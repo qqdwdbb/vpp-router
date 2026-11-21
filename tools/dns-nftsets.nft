@@ -1,0 +1,15 @@
+# Collections referenced by the supplied dnsmasq files and /etc/nftables.conf.
+# Do not flush tables or existing members.
+add table inet mangle
+add set inet mangle altroute { type ipv4_addr; flags timeout; timeout 1h; }
+add set inet mangle vpn { type ipv4_addr; flags timeout; timeout 1h; }
+add set inet mangle uk { type ipv4_addr; flags timeout; timeout 1h; }
+add set inet mangle proxylist { type ipv4_addr; flags timeout; timeout 1h; }
+add set inet mangle vpn6 { type ipv6_addr; flags timeout; timeout 1h; }
+add set inet mangle proxylist6 { type ipv6_addr; flags timeout; timeout 1h; }
+add set inet mangle local { type ipv4_addr; flags interval; elements = { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 224.0.0.0/4 }; }
+add set inet mangle carrier6 { type ipv6_addr; flags interval; elements = { 2001:db8:ffff::/48 }; }
+
+add table inet filter
+add set inet filter blacklist { type ipv4_addr; flags interval; }
+add set inet filter black6 { type ipv6_addr; flags interval; }

@@ -1,0 +1,7 @@
+comment { One unique public key and tunnel /32 address per client. }
+comment { Passive server: authenticate the initiating client, then learn its endpoint. }
+wireguard peer add wg0 public-key <CLIENT_PUBLIC_KEY_BASE64> endpoint 0.0.0.0 dst-port 0 allowed-ip 10.66.66.2/32 persistent-keepalive 0
+ip route add 10.66.66.2/32 via 10.66.66.2 wg0
+
+comment { For another client, replace its public key and use another /32, e.g. 10.66.66.3/32. }
+comment { If using a preshared key, add preshared-key <PSK_BASE64> to the peer-add command and PresharedKey to the client. }

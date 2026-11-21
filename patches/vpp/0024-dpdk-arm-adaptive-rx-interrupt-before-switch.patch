@@ -1,0 +1,117 @@
+dpdk: arm adaptive RX interrupts only for interrupt state
+
+The RX eventfd handler re-armed the queue interrupt on every read, also
+while dpdk-input was polling in adaptive mode. With a one-shot PMD
+interrupt (r8169 with dpdk/0001) the device then interrupts continuously
+during polling, and nothing arms it when vlib switches the node back to
+interrupt state, which vlib leaves to the driver ("dispatch in polling one
+more time. This allows driver to re-enable interrupts.").
+
+Re-arm in the eventfd handler only when the node is in interrupt state on
+the queue's thread (or the queue is in plain interrupt mode). In the
+dispatch that vlib marks before switching to interrupt state, arm each
+adaptive queue first and then poll it, so packets that arrived before
+arming are taken and later ones raise the interrupt. Armed state is kept
+per vnet RX queue index outside dpdk_rx_queue_t. Requires 0023, which
+clears a stale switch mark when a busy window intervenes.
+
+--- a/src/plugins/dpdk/device/common.c
++++ b/src/plugins/dpdk/device/common.c
+@@ -343,6 +343,15 @@
+   xd->flags |= DPDK_DEVICE_FLAG_PMD_INIT_FAIL;
+   sw->flags |= VNET_SW_INTERFACE_FLAG_ERROR;
+ }
++
++/* Whether an adaptive RX queue's interrupt is armed, by vnet RX queue index.
++ * A PMD with one-shot interrupts (r8169) disarms when it fires. Re-arm only
++ * while dpdk-input is in interrupt state on the queue's thread: while it
++ * polls, interrupts are wasted work, and dpdk-input arms the queue again just
++ * before vlib switches it back to interrupt state. Sized on the main thread
++ * when interrupts are set up; each entry is written only by the queue's
++ * thread. */
++u8 *dpdk_rxq_int_armed;
+ 
+ static clib_error_t *
+ dpdk_rx_read_ready (clib_file_t *uf)
+@@ -355,10 +364,20 @@
+ 
+   u64 b;
+   CLIB_UNUSED (ssize_t size) = read (uf->file_descriptor, &b, sizeof (b));
++  if (qidx < vec_len (dpdk_rxq_int_armed))
++    dpdk_rxq_int_armed[qidx] = 0;
+   if (rxq->mode != VNET_HW_IF_RX_MODE_POLLING)
+     {
++      vlib_main_t *vm = vlib_get_main ();
+       vnet_hw_if_rx_queue_set_int_pending (vnm, uf->private_data);
+-      rte_eth_dev_rx_intr_enable (xd->port_id, rxq->queue_id);
++      if (rxq->mode != VNET_HW_IF_RX_MODE_ADAPTIVE ||
++	  vlib_node_get_state (vm, dpdk_input_node.index) !=
++	    VLIB_NODE_STATE_POLLING)
++	{
++	  rte_eth_dev_rx_intr_enable (xd->port_id, rxq->queue_id);
++	  if (qidx < vec_len (dpdk_rxq_int_armed))
++	    dpdk_rxq_int_armed[qidx] = 1;
++	}
+     }
+ 
+   return 0;
+@@ -405,6 +424,8 @@
+ 	      int_mode = 0;
+ 	      break;
+ 	    }
++	  vec_validate (dpdk_rxq_int_armed, rxq->queue_index);
++	  dpdk_rxq_int_armed[rxq->queue_index] = 0;
+ 	  f.read_function = dpdk_rx_read_ready;
+ 	  f.flags = UNIX_FILE_EVENT_EDGE_TRIGGERED;
+ 	  f.file_descriptor = rxq->efd;
+--- a/src/plugins/dpdk/device/node.c
++++ b/src/plugins/dpdk/device/node.c
+@@ -528,6 +528,32 @@
+   return n_rx_packets;
+ }
+ 
++extern u8 *dpdk_rxq_int_armed;
++
++/* vlib is about to switch this adaptive node to interrupt state after this
++ * dispatch. Arm the queue first, then poll it: packets that arrived before
++ * arming are picked up here, later ones raise the interrupt. */
++static_always_inline void
++dpdk_rxq_arm_before_interrupt (dpdk_device_t *xd, u16 queue_id)
++{
++  vnet_main_t *vnm = vnet_get_main ();
++  dpdk_rx_queue_t *rxq;
++  vnet_hw_if_rx_queue_t *hq;
++
++  if (!(xd->flags & DPDK_DEVICE_FLAG_INT_SUPPORTED) ||
++      (xd->flags & DPDK_DEVICE_FLAG_INT_UNMASKABLE))
++    return;
++  rxq = vec_elt_at_index (xd->rx_queues, queue_id);
++  if (rxq->queue_index >= vec_len (dpdk_rxq_int_armed) ||
++      dpdk_rxq_int_armed[rxq->queue_index])
++    return;
++  hq = vnet_hw_if_get_rx_queue (vnm, rxq->queue_index);
++  if (hq->mode != VNET_HW_IF_RX_MODE_ADAPTIVE)
++    return;
++  if (rte_eth_dev_rx_intr_enable (xd->port_id, queue_id) == 0)
++    dpdk_rxq_int_armed[rxq->queue_index] = 1;
++}
++
+ VLIB_NODE_FN (dpdk_input_node) (vlib_main_t * vm, vlib_node_runtime_t * node,
+ 				vlib_frame_t * f)
+ {
+@@ -542,10 +568,15 @@
+    */
+ 
+   pv = vnet_hw_if_get_rxq_poll_vector (vm, node);
++  int arm = PREDICT_FALSE (
++    node->state == VLIB_NODE_STATE_POLLING &&
++    (node->flags & VLIB_NODE_FLAG_SWITCH_FROM_POLLING_TO_INTERRUPT_MODE));
+ 
+   for (int i = 0; i < vec_len (pv); i++)
+     {
+       xd = vec_elt_at_index (dm->devices, pv[i].dev_instance);
++      if (arm)
++	dpdk_rxq_arm_before_interrupt (xd, pv[i].queue_id);
+       n_rx_packets +=
+ 	dpdk_device_input (vm, dm, xd, node, thread_index, pv[i].queue_id);
+     }

@@ -1,0 +1,28 @@
+vlib: cancel a pending adaptive switch when the next window is busy
+
+An adaptive input node switches to interrupt state in two steps: a quiet
+window marks it (VLIB_NODE_FLAG_SWITCH_FROM_POLLING_TO_INTERRUPT_MODE),
+and after one more dispatch in polling state, which lets the driver
+re-enable its interrupt, a quiet window switches it. A busy window in
+between never cleared the mark, so the node stayed marked while polling
+and any later single quiet window switched at once. A driver that arms
+its interrupt in the marked dispatch (dpdk, 0024) would also keep arming
+it during busy polling. Clear the mark when the window is busy.
+
+--- a/src/vlib/main.c
++++ b/src/vlib/main.c
+@@ -938,6 +938,14 @@
+       {
+ 	u32 node_name, vector_length, is_polling;
+       } *ed;
++
++      /* The switch to interrupt state needs two quiet windows in a row; a
++	 busy window in between cancels the pending switch. Drivers can then
++	 re-arm their interrupt in the marked dispatch, just before the
++	 switch. */
++      if (node->state == VLIB_NODE_STATE_POLLING &&
++	  v > nm->interrupt_threshold_vector_length)
++	node->flags &= ~VLIB_NODE_FLAG_SWITCH_FROM_POLLING_TO_INTERRUPT_MODE;
+ 
+       if ((node->state == VLIB_NODE_STATE_INTERRUPT &&
+ 	   v >= nm->polling_threshold_vector_length) &&

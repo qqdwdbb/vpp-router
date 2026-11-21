@@ -1,0 +1,22 @@
+[Unit]
+Description=LibreSpeed nginx through VPP Host Stack
+Requires=vpp-router.service
+After=vpp-router.service network-online.target librespeed-go.socket
+Wants=librespeed-go.socket
+PartOf=vpp-router.service
+
+[Service]
+Type=simple
+# Only nginx uses LDP; preparation must work before VPP sessions are enabled.
+ExecStartPre=/usr/local/bin/vppctl -s /run/vpp/cli.sock session enable
+ExecStartPre=/etc/vpp/nginx-hoststack/ensure-hoststack-appns.sh
+# Keep virtual descriptors above the Linux descriptor limit to prevent collisions.
+ExecStart=/usr/bin/env LDP_SID_BIT=20 LD_LIBRARY_PATH=/usr/local/lib/vpp-router LD_PRELOAD=/usr/local/lib/vpp-router/libvcl_ldpreload.so.26.06.0 VCL_CONFIG=/etc/vpp/nginx-hoststack/vcl.conf /usr/sbin/nginx -c /etc/vpp/nginx-hoststack/nginx.conf
+ExecStop=/bin/kill -TERM $MAINPID
+Restart=on-failure
+RestartSec=2
+KillMode=control-group
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

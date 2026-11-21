@@ -1,0 +1,18 @@
+[Unit]
+Description=VPP client DNS port interception
+Requires=vrouter-vpp.service vrouter-firewall.service
+After=vrouter-vpp.service vrouter-firewall.service
+Before=vrouter-dns-route-gate.service
+PartOf=vrouter-vpp.service
+
+[Service]
+Type=notify
+NotifyAccess=main
+TimeoutStartSec=60
+EnvironmentFile=/etc/vpp/runtime.env
+ExecStart=/usr/bin/python3 /usr/local/lib/vpp-vrouter/scripts/vrouter/dns-intercept/intercept.py
+Restart=on-failure
+RestartSec=1
+
+[Install]
+WantedBy=multi-user.target

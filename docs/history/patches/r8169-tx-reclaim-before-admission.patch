@@ -1,0 +1,65 @@
+--- a/drivers/net/r8169/r8169_rxtx.c
++++ b/drivers/net/r8169/r8169_rxtx.c
+@@ -8,7 +8,8 @@
+ #include <stdlib.h>
+ 
+ #include <rte_eal.h>
++#include <rte_cycles.h>
+ 
+ #include <rte_common.h>
+ #include <rte_interrupts.h>
+ #include <rte_byteorder.h>
+@@ -2096,8 +2097,9 @@
+ 	struct rtl_tx_queue *txq = tx_queue;
+ 	struct rtl_hw *hw = txq->hw;
+ 	struct rte_mbuf *tx_pkt;
+ 	uint16_t nb_tx;
++	uint64_t deadline = 0;
+ 
+ 	RTE_ASSERT(RTL_R8(hw, ChipCmd) & CmdTxEnb);
+ 
+ 	PMD_TX_LOG(DEBUG,
+@@ -2108,15 +2110,28 @@
+-	for (nb_tx = 0; nb_tx < nb_pkts; nb_tx++) {
+-		tx_pkt = *tx_pkts++;
+-
+-		if (txq->tx_free < tx_pkt->nb_segs)
+-			break;
+-
+-		/* Check mbuf is valid */
+-		if (tx_pkt->nb_segs == 0 || tx_pkt->pkt_len == 0 ||
+-		    (tx_pkt->nb_segs > 1 && tx_pkt->next == NULL))
+-			break;
+-
+-		rtl_xmit_pkt(hw, txq, tx_pkt);
+-	}
+-
+-	rte_wmb();
++	for (nb_tx = 0; nb_tx < nb_pkts; nb_tx++) {
++		tx_pkt = *tx_pkts++;
++
++		/* Check mbuf is valid before waiting for descriptor space. */
++		if (tx_pkt->nb_segs == 0 || tx_pkt->pkt_len == 0 ||
++		    (tx_pkt->nb_segs > 1 && tx_pkt->next == NULL))
++			break;
++
++		while (txq->tx_free < tx_pkt->nb_segs) {
++			/* VPP stops retrying on a zero return. Reclaim first,
++			 * then absorb transient backpressure within a shared
++			 * 2 ms budget for this burst, never an unbounded wait.
++			 */
++			rtl_tx_clean(hw, txq);
++			if (txq->tx_free >= tx_pkt->nb_segs)
++				break;
++			if (deadline == 0)
++				deadline = rte_get_timer_cycles() + rte_get_timer_hz() / 500;
++			if (rte_get_timer_cycles() >= deadline)
++				goto done;
++			rte_delay_us_block(5);
++		}
++
++		rtl_xmit_pkt(hw, txq, tx_pkt);
++	}
++
++done:
++	rte_wmb();

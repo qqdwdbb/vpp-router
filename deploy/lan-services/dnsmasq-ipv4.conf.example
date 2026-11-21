@@ -1,0 +1,9 @@
+# Replace the old IPv4 LAN declarations; do not append overlapping DHCP pools.
+# Keep the existing upstream servers, conf-dir/domain rules and other services.
+interface=br-mgmt
+listen-address=10.61.20.2,127.0.0.1,::1
+bind-interfaces
+# .1 belongs to VPP; .2 is reserved for Linux, never leased to clients.
+dhcp-range=set:lan,10.61.20.3,10.61.20.254,255.255.255.0,6h
+dhcp-option=tag:lan,option:router,10.61.20.1
+dhcp-option=tag:lan,option:dns-server,10.61.20.2

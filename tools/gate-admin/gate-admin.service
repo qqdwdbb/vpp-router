@@ -1,0 +1,11 @@
+[Unit]
+Description=Gate admin service for the management panel
+# Separate from Gate on purpose: it restarts Gate, and rolls a change back if Gate fails.
+
+[Service]
+ExecStart=/usr/local/bin/gate-admin
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

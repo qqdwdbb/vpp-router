@@ -1,0 +1,20 @@
+--- a/src/plugins/nat/nat44-ei/nat44_ei_api.c
++++ b/src/plugins/nat/nat44-ei/nat44_ei_api.c
+@@ -1191,6 +1191,8 @@
+   rmp->last_heard = clib_host_to_net_u64 ((u64) s->last_heard);
+   rmp->total_bytes = clib_host_to_net_u64 (s->total_bytes);
+   rmp->total_pkts = ntohl (s->total_pkts);
++  clib_memcpy (rmp->ext_host_address, &s->ext_host_addr, 4);
++  rmp->ext_host_port = s->ext_host_port;
+   rmp->context = context;
+   if (nat44_ei_is_unk_proto_session (s))
+     {
+@@ -1229,6 +1231,8 @@
+     (u64) (vlib_time_now (vlib_get_main ()) - s->last_heard));
+   rmp->total_bytes = clib_host_to_net_u64 (s->total_bytes);
+   rmp->total_pkts = ntohl (s->total_pkts);
++  clib_memcpy (rmp->ext_host_address, &s->ext_host_addr, 4);
++  rmp->ext_host_port = s->ext_host_port;
+   rmp->context = context;
+   if (nat44_ei_is_unk_proto_session (s))
+     {

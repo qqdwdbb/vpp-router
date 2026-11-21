@@ -1,0 +1,15 @@
+# Migration fragment. Replace WAN_INTERFACE with the actual VPP VLAN 100 interface.
+# Execute after WAN/LAN interfaces exist; never enable a second PD client on production WAN.
+enable ip6 interface WAN_INTERFACE
+ip6 nd WAN_INTERFACE ra-suppress
+ip6 nd address autoconfig WAN_INTERFACE default-route
+dhcp6 pd client WAN_INTERFACE prefix group wan-pd
+set ip6 address loop200 prefix group wan-pd ::1/64
+set interface ip address loop200 fd42:1111:2222:10::1/64
+ip6 nd loop200 ra-interval 10 7 ra-other-config-flag
+# The ULA PIO is static. Use the maximum RFC 4861 lifetime so it cannot
+# expire while VPP remains up and trigger a zero-valid-lifetime RA warning.
+ip6 nd loop200 prefix fd42:1111:2222:10::/64 4294967295 4294967295
+# pd-sync.py publishes public PIOs from the consumed live lease;
+# do not paste a fixed public prefix into startup configuration.
+# Linux br-mgmt owns fd42:1111:2222:10::2/64, never the gateway ::1.

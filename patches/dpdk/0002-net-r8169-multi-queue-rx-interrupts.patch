@@ -1,0 +1,289 @@
+net/r8169: RX interrupts for up to four queues
+
+Keep the legacy EAL vector and forward it to per-queue eventfds.
+Additional RX queues use the legacy 16-bit IMR/ISR bank. Wake every
+armed queue because the receive path can clear status before the handler.
+
+--- a/drivers/net/r8169/r8169_ethdev.c
++++ b/drivers/net/r8169/r8169_ethdev.c
+@@ -161,12 +161,17 @@
+ 	struct rtl_adapter *adapter = container_of(hw, struct rtl_adapter, hw);
+ 	u32 mask = LinkChg;
+ 
+-	if (adapter->rxq_intr_armed)
++	if (adapter->rxq_intr_armed[0])
+ 		mask |= RTL_RXQ_INTR_CAUSES;
+ 	if (rtl_is_8125(hw))
+ 		RTL_W32(hw, IMR0_8125, mask);
+ 	else
+ 		RTL_W16(hw, IntrMask, mask);
++	if (rtl_is_8125(hw))
++		for (unsigned int q = 1; q < adapter->rxq_intr_count; q++)
++			RTL_W16(hw, IMR1_8125 + (q - 1) * 4,
++				adapter->rxq_intr_armed[q] ? (BIT_0 | BIT_1) : 0);
++
+ }
+ 
+ static void
+@@ -176,65 +181,52 @@
+ 	rtl_write_imr(hw);
+ }
+ 
+-/*
+- * RX queue interrupts.
+- *
+- * The PMD keeps the old interrupt mapping (INT_CFG0_ENABLE_8125 cleared in
+- * rtl_hw_config()), so every cause, RX included, raises the first vector.
+- * Its eventfd belongs to the EAL interrupt thread, and with ISR V2 the RX
+- * queue 0 cause would still be vector 0, so the device has no vector that
+- * could be handed to the application as the queue's own.
+- *
+- * Instead the queue gets an eventfd that only the PMD writes:
+- * rtl_dev_interrupt_handler() writes it when an interrupt arrives while the
+- * queue is armed. The interrupt is one-shot: the handler masks the RX causes
+- * again and rx_queue_intr_enable() re-arms them. max_intr stays 0, so vfio
+- * still enables only the first MSI-X vector and never sees this eventfd.
+- *
+- * Only a single RX queue is supported. With RSS, queues 1-3 report in
+- * ISR1_8125 and the following registers, which have not been tested with the
+- * old mapping. With more queues the eventfd is not created and
+- * rx_queue_intr_enable() returns -ENOTSUP, so the application keeps polling.
++/* Each RX queue has its own application eventfd. Hardware causes retain
++ * the legacy mapping to the EAL vector. Wake all armed queues on an IRQ:
++ * rtl_clear_rdu() may have cleared a cause before the EAL thread reads it.
++ * Spurious wakeups are harmless; each queue masks and rearms independently.
+  */
+ static void
+ rtl_rxq_intr_setup(struct rte_eth_dev *dev)
+ {
+ 	struct rtl_adapter *adapter = RTL_DEV_PRIVATE(dev);
+ 	struct rte_intr_handle *intr_handle = dev->intr_handle;
+-	int fd;
+-
+-	if (!dev->data->dev_conf.intr_conf.rxq)
++	unsigned int count = dev->data->nb_rx_queues, q;
++	int fds[4];
++
++	if (!dev->data->dev_conf.intr_conf.rxq || !count || count > 4 ||
++	    (count > 1 && !rtl_is_8125(&adapter->hw)))
+ 		return;
+-
+-	if (dev->data->nb_rx_queues != 1) {
+-		PMD_INIT_LOG(NOTICE,
+-			     "r8169: RX queue interrupts need a single RX queue, not %u",
+-			     dev->data->nb_rx_queues);
++	for (q = 0; q < count; q++)
++		fds[q] = -1;
++	if (rte_intr_vec_list_alloc(intr_handle, "rtl_rxq_intr", count))
+ 		return;
+-	}
+-
+-	fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+-	if (fd < 0) {
+-		PMD_INIT_LOG(ERR, "r8169: RX queue eventfd: %s", strerror(errno));
+-		return;
+-	}
+-
+-	if (rte_intr_vec_list_alloc(intr_handle, "rtl_rxq_intr", 1) ||
+-	    rte_intr_vec_list_index_set(intr_handle, 0, RTE_INTR_VEC_RXTX_OFFSET) ||
+-	    rte_intr_efds_index_set(intr_handle, 0, fd) ||
+-	    rte_intr_nb_efd_set(intr_handle, 1)) {
+-		PMD_INIT_LOG(ERR, "r8169: cannot register the RX queue eventfd");
+-		rte_intr_nb_efd_set(intr_handle, 0);
+-		rte_intr_vec_list_free(intr_handle);
+-		close(fd);
+-		return;
+-	}
+-
++	for (q = 0; q < count; q++) {
++		fds[q] = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
++		if (fds[q] < 0 ||
++		    rte_intr_vec_list_index_set(intr_handle, q, RTE_INTR_VEC_RXTX_OFFSET + q) ||
++		    rte_intr_efds_index_set(intr_handle, q, fds[q]))
++			goto fail;
++	}
++	if (rte_intr_nb_efd_set(intr_handle, count))
++		goto fail;
+ 	rte_spinlock_lock(&adapter->intr_lock);
+-	adapter->rxq_intr_efd = fd;
+-	adapter->rxq_intr_armed = false;
+-	adapter->rxq_intr_on = true;
++	for (q = 0; q < count; q++) {
++		adapter->rxq_intr_efd[q] = fds[q];
++		adapter->rxq_intr_armed[q] = false;
++	}
++	adapter->rxq_intr_count = count;
+ 	rte_spinlock_unlock(&adapter->intr_lock);
++	return;
++fail:
++	PMD_INIT_LOG(ERR, "r8169: cannot register RX queue eventfds");
++	for (q = 0; q < count; q++) {
++		if (fds[q] >= 0)
++			close(fds[q]);
++		rte_intr_efds_index_set(intr_handle, q, -1);
++	}
++	rte_intr_nb_efd_set(intr_handle, 0);
++	rte_intr_vec_list_free(intr_handle);
+ }
+ 
+ static void
+@@ -242,77 +234,68 @@
+ {
+ 	struct rtl_adapter *adapter = RTL_DEV_PRIVATE(dev);
+ 	struct rte_intr_handle *intr_handle = dev->intr_handle;
+-	struct rtl_hw *hw = &adapter->hw;
+-	bool on;
+-	int fd;
+-
+-	/* After this the interrupt handler no longer writes the eventfd */
++	unsigned int count, q;
++	int fds[4];
++
+ 	rte_spinlock_lock(&adapter->intr_lock);
+-	on = adapter->rxq_intr_on;
+-	fd = adapter->rxq_intr_efd;
+-	adapter->rxq_intr_on = false;
+-	adapter->rxq_intr_armed = false;
+-	rtl_write_imr(hw);
++	count = adapter->rxq_intr_count;
++	for (q = 0; q < count; q++) {
++		fds[q] = adapter->rxq_intr_efd[q];
++		adapter->rxq_intr_armed[q] = false;
++	}
++	/* Mask the extra queues before clearing the count. */
++	rtl_write_imr(&adapter->hw);
++	adapter->rxq_intr_count = 0;
+ 	rte_spinlock_unlock(&adapter->intr_lock);
+-
+-	if (!on)
++	if (!count)
+ 		return;
+-
++	for (q = 0; q < count; q++) {
++		close(fds[q]);
++		rte_intr_efds_index_set(intr_handle, q, -1);
++	}
+ 	rte_intr_nb_efd_set(intr_handle, 0);
+ 	rte_intr_vec_list_free(intr_handle);
+-	close(fd);
+-}
+-
+-/* Clear RX causes left from polling, so that arming does not fire at once */
++}
++
+ static void
+-rtl_rxq_intr_clear(struct rtl_hw *hw)
+-{
+-	if (rtl_is_8125(hw))
++rtl_rxq_intr_clear(struct rtl_hw *hw, uint16_t q)
++{
++	if (q)
++		RTL_W16(hw, ISR1_8125 + (q - 1) * 4, BIT_0 | BIT_1);
++	else if (rtl_is_8125(hw))
+ 		RTL_W32(hw, ISR0_8125, RTL_RXQ_INTR_CAUSES);
+ 	else
+ 		RTL_W16(hw, IntrStatus, RTL_RXQ_INTR_CAUSES);
+ }
+ 
+ static int
+-rtl_rx_queue_intr_enable(struct rte_eth_dev *dev, uint16_t queue_id __rte_unused)
+-{
+-	struct rtl_adapter *adapter = RTL_DEV_PRIVATE(dev);
+-	struct rtl_hw *hw = &adapter->hw;
+-	int ret = 0;
+-
++rtl_rx_queue_intr_enable(struct rte_eth_dev *dev, uint16_t queue_id)
++{
++	struct rtl_adapter *adapter = RTL_DEV_PRIVATE(dev);
++	int ret = -ENOTSUP;
+ 	rte_spinlock_lock(&adapter->intr_lock);
+-	if (adapter->rxq_intr_on) {
+-		/*
+-		 * Packets that arrived before this point are picked up by the
+-		 * poll that follows arming; later ones raise the interrupt.
+-		 */
+-		rtl_rxq_intr_clear(hw);
+-		adapter->rxq_intr_armed = true;
+-		rtl_write_imr(hw);
+-	} else {
+-		ret = -ENOTSUP;
++	if (queue_id < adapter->rxq_intr_count) {
++		rtl_rxq_intr_clear(&adapter->hw, queue_id);
++		adapter->rxq_intr_armed[queue_id] = true;
++		rtl_write_imr(&adapter->hw);
++		ret = 0;
+ 	}
+ 	rte_spinlock_unlock(&adapter->intr_lock);
+-
+ 	return ret;
+ }
+ 
+ static int
+-rtl_rx_queue_intr_disable(struct rte_eth_dev *dev, uint16_t queue_id __rte_unused)
+-{
+-	struct rtl_adapter *adapter = RTL_DEV_PRIVATE(dev);
+-	struct rtl_hw *hw = &adapter->hw;
+-	int ret = 0;
+-
++rtl_rx_queue_intr_disable(struct rte_eth_dev *dev, uint16_t queue_id)
++{
++	struct rtl_adapter *adapter = RTL_DEV_PRIVATE(dev);
++	int ret = -ENOTSUP;
+ 	rte_spinlock_lock(&adapter->intr_lock);
+-	if (adapter->rxq_intr_on) {
+-		adapter->rxq_intr_armed = false;
+-		rtl_write_imr(hw);
+-	} else {
+-		ret = -ENOTSUP;
++	if (queue_id < adapter->rxq_intr_count) {
++		adapter->rxq_intr_armed[queue_id] = false;
++		rtl_write_imr(&adapter->hw);
++		ret = 0;
+ 	}
+ 	rte_spinlock_unlock(&adapter->intr_lock);
+-
+ 	return ret;
+ }
+ 
+@@ -847,11 +830,21 @@
+ 	 * set: the RX path clears RxOK in ISR on its own (rtl_clear_rdu), and
+ 	 * a spurious wakeup only costs one empty poll.
+ 	 */
+-	armed = adapter->rxq_intr_armed;
+-	adapter->rxq_intr_armed = false;
+-	if (armed && write(adapter->rxq_intr_efd, &one, sizeof(one)) < 0 &&
+-	    errno != EAGAIN)
+-		PMD_DRV_LOG(ERR, "r8169: RX queue eventfd: %s", strerror(errno));
++	armed = false;
++	for (unsigned int q = 0; q < adapter->rxq_intr_count; q++) {
++		if (adapter->rxq_intr_armed[q]) {
++			armed = true;
++			adapter->rxq_intr_armed[q] = false;
++			if (write(adapter->rxq_intr_efd[q], &one, sizeof(one)) < 0 &&
++			    errno != EAGAIN)
++				PMD_DRV_LOG(ERR, "r8169: RX queue eventfd: %s", strerror(errno));
++		}
++		if (q) {
++			RTL_W16(hw, IMR1_8125 + (q - 1) * 4, 0);
++			RTL_W16(hw, ISR1_8125 + (q - 1) * 4,
++				RTL_R16(hw, ISR1_8125 + (q - 1) * 4));
++		}
++	}
+ 
+ 	rte_spinlock_unlock(&adapter->intr_lock);
+ 
+--- a/drivers/net/r8169/r8169_ethdev.h
++++ b/drivers/net/r8169/r8169_ethdev.h
+@@ -164,9 +164,9 @@
+ 	 * between the interrupt thread and the threads that arm the queue.
+ 	 */
+ 	rte_spinlock_t      intr_lock;
+-	bool                rxq_intr_on;    /* the eventfd exists */
+-	bool                rxq_intr_armed; /* RX causes enabled in IMR */
+-	int                 rxq_intr_efd;
++	unsigned int        rxq_intr_count;
++	bool                rxq_intr_armed[4];
++	int                 rxq_intr_efd[4];
+ };
+ 
+ /* Struct RxDesc in kernel r8169 */

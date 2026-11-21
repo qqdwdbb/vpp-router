@@ -1,0 +1,117 @@
+--- a/plugins/nat-ei-context/nat_ei_context.c
++++ b/plugins/nat-ei-context/nat_ei_context.c
+@@ -7,11 +7,15 @@
+ 
+ static u32 *contexts;
+ static int wired;
++static u8 context_output_arc = (u8) ~0;
+ 
+ static clib_error_t *
+ wire_output_chain (vlib_main_t *vm)
+ {
+   if (wired) return 0;
++  context_output_arc = vnet_get_feature_arc_index ("ip4-output");
++  if (context_output_arc == (u8) ~0)
++    return clib_error_return (0, "ip4-output feature arc is unavailable");
+   vlib_node_t *destination = vlib_get_node_by_name (vm, (u8 *) "interface-output");
+   char *names[] = { "nat44-ei-in2out-output", "nat44-ei-in2out-output-slowpath",
+                     "nat44-ei-in2out-hairpinning-finish-interface-output" };
+@@ -27,14 +31,46 @@
+   return 0;
+ }
+ 
++/* Position of this node's own entry in the egress config string. The string is
++ * [next-to-feature-0, cfg-0..., next-to-feature-1, cfg-1..., ...], and the arc
++ * start consumes the first next. Returns ~0 when the position is not unique.
++ * Workers only read the config under the barrier's protection. */
++static u32
++context_exit_cursor (u32 tx, u32 node_index)
++{
++  vnet_feature_config_main_t *fcm = vnet_feature_get_config_main (context_output_arc);
++  if (tx >= vec_len (fcm->config_index_by_sw_if_index)) return ~0;
++  u32 start = fcm->config_index_by_sw_if_index[tx];
++  vnet_config_main_t *cm = &fcm->config_main;
++  if (start >= vec_len (cm->config_pool_index_by_user_index)) return ~0;
++  vnet_config_t *c = pool_elt_at_index (cm->config_pool, cm->config_pool_index_by_user_index[start]);
++  u32 cursor = start + 1, expected = ~0;
++  vnet_config_feature_t *f;
++  vec_foreach (f, c->features)
++    {
++      if (f->node_index == node_index)
++        {
++          /* Enabling both the output chain and a context on one interface adds
++           * this node twice. Either position is legitimate, so leave it to the
++           * range check. */
++          if (expected != ~0) return ~0;
++          expected = cursor;
++        }
++      cursor += 1 + vec_len (f->feature_config);
++    }
++  return expected;
++}
++
+ typedef enum
+ {
+   CONTEXT_ERROR_INVALID_NEXT,
++  CONTEXT_ERROR_CURSOR_MISMATCH,
+   CONTEXT_N_ERROR,
+ } context_error_t;
+ 
+ static char *context_error_strings[] = {
+   "invalid-next-index",
++  "cursor-mismatch",
+ };
+ 
+ typedef struct
+@@ -68,6 +104,25 @@
+   return 0; /* Both context nodes register slot 0 as error-drop. */
+ }
+ 
++/* A misplaced cursor can still produce an in-range next that belongs to another
++ * node's edge table, so the range check alone cannot catch it. */
++static_always_inline void
++context_cursor_drop (vlib_main_t *vm, vlib_node_runtime_t *node, vlib_buffer_t *b,
++                     u32 cursor, u32 expected)
++{
++  b->error = node->errors[CONTEXT_ERROR_CURSOR_MISMATCH];
++  context_runtime_t *rt = (void *) node->runtime_data;
++  f64 now = vlib_time_now (vm);
++  if (now >= rt->next_warning)
++    {
++      rt->next_warning = now + 5.0;
++      clib_warning ("%v thread %u: feature cursor %u, expected %u, rx %u tx %u; dropping",
++                    vlib_get_node (vm, node->node_index)->name, vm->thread_index,
++                    cursor, expected, vnet_buffer (b)->sw_if_index[VLIB_RX],
++                    vnet_buffer (b)->sw_if_index[VLIB_TX]);
++    }
++}
++
+ static uword
+ context_enter (vlib_main_t *vm, vlib_node_runtime_t *node, vlib_frame_t *frame)
+ {
+@@ -95,6 +150,7 @@
+   /* EI selects the handoff feature whenever a worker is configured.
+    * That feature already consumes the pending EI -> exit cursor entry. */
+   int handoff = vlib_num_workers () > 0;
++  u32 cached_tx = ~0, expected = ~0;
+   vlib_get_buffers (vm, from, bufs, frame->n_vectors);
+   for (u32 i = 0; i < frame->n_vectors; i++)
+     {
+@@ -105,6 +161,17 @@
+       /* Without handoff, EI jumps here without advancing the cursor. */
+       if (!handoff) vnet_feature_next (&discarded, b);
+       u32 config_index = b->current_config_index;
++      if (tx != cached_tx)
++        {
++          cached_tx = tx;
++          expected = context_exit_cursor (tx, node->node_index);
++        }
++      if (PREDICT_FALSE (expected != ~0 && config_index != expected))
++        {
++          context_cursor_drop (vm, node, b, config_index, expected);
++          nexts[i] = 0;
++          continue;
++        }
+       vnet_feature_next (&next, b);
+       nexts[i] = context_checked_next (vm, node, b, next, config_index);
+     }

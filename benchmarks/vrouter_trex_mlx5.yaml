@@ -1,0 +1,17 @@
+# Native DPDK TRex configuration for the Linux host's Mellanox port.
+# Port 0 is ConnectX-4 Lx 03:00.0 (enp3s0f0). dest_mac is VROUTER WAN.
+- version: 2
+  port_limit: 2
+  port_mtu: 1500
+  interfaces: ["03:00.0", "dummy"]
+  port_info:
+    - src_mac: 02:00:00:00:10:03
+      dest_mac: 02:00:00:00:10:01
+    - src_mac: 00:00:00:00:00:01
+      dest_mac: 00:00:00:00:00:02
+  platform:
+    master_thread_id: 0
+    latency_thread_id: 1
+    dual_if:
+      - socket: 0
+        threads: [2, 3, 4, 5]

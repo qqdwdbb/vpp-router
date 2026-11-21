@@ -1,0 +1,82 @@
+--- a/r8169_rxtx.c
++++ b/r8169_rxtx.c
+@@ -1072,8 +1072,9 @@
+ }
+ 
+ /* PMD receive function */
+-uint16_t
+-rtl_recv_pkts(void *rx_queue, struct rte_mbuf **rx_pkts, uint16_t nb_pkts)
++static __attribute__((noinline)) uint16_t
++rtl_recv_pkts_ready(void *rx_queue, struct rte_mbuf **rx_pkts, uint16_t nb_pkts,
++		    uint32_t first_opts1, uintptr_t first_line)
+ {
+ 	struct rtl_rx_queue *rxq = (struct rtl_rx_queue *)rx_queue;
+ 	struct rte_eth_dev *dev = &rte_eth_devices[rxq->port_id];
+@@ -1093,7 +1094,8 @@
+ 	uint32_t opts1;
+ 	uint32_t opts2;
+ 	uint64_t dma_addr;
+-	uintptr_t synced_line = UINTPTR_MAX;
++	uintptr_t synced_line = first_line;
++	int first = 1;
+ 	uint16_t rearm_first = 0, rearm_count = 0;
+ 	const unsigned int per_line = rtl_nc_dma ? rtl_nc_line / hw->RxDescLength : 0;
+ 	uint64_t rx_bytes = 0;
+@@ -1107,7 +1109,7 @@
+ 	while (nb_rx < nb_pkts) {
+ 		uint16_t consumed = tail;
+ 		rxd = rtl_get_rxdesc(hw, rxq->hw_ring, tail);
+-		if (rtl_nc_dma && !scanned) {
++		if (!first && rtl_nc_dma && !scanned) {
+ 			uintptr_t line = (uintptr_t)rxd &
+ 					 ~(uintptr_t)(rtl_nc_line - 1);
+ 			/* Reuse this burst's snapshot of neighbouring descriptors.
+@@ -1118,7 +1120,8 @@
+ 			}
+ 		}
+ 
+-		opts1 = rtl_rx_desc_opts1(hw, rxd);
++		opts1 = first ? first_opts1 : rtl_rx_desc_opts1(hw, rxd);
++		first = 0;
+ 		if (opts1 & DescOwn)
+ 			break;
+ 
+@@ -1261,6 +1264,38 @@
+ 	rxq->nb_rx_hold = nb_hold;
+ 
+ 	return nb_rx;
++}
++
++/* Keep empty polls outside the large ready-path stack frame. The first
++ * status snapshot is reused by the ready path; DMA synchronization is unchanged. */
++uint16_t
++rtl_recv_pkts(void *rx_queue, struct rte_mbuf **rx_pkts, uint16_t nb_pkts)
++{
++	struct rtl_rx_queue *rxq = rx_queue;
++	struct rtl_hw *hw = rxq->hw;
++	uintptr_t first_line = UINTPTR_MAX;
++	uint32_t opts1 = DescOwn;
++
++	RTE_ASSERT(RTL_R8(hw, ChipCmd) & CmdRxEnb);
++	if (nb_pkts) {
++		struct rtl_rx_desc *rxd = rtl_get_rxdesc(hw, rxq->hw_ring,
++						      rxq->rx_tail);
++		if (rtl_nc_dma) {
++			rtl_nc_sync(rxd, hw->RxDescLength, 1);
++			first_line = (uintptr_t)rxd & ~(uintptr_t)(rtl_nc_line - 1);
++		}
++		opts1 = rtl_rx_desc_opts1(hw, rxd);
++		if (!(opts1 & DescOwn))
++			return rtl_recv_pkts_ready(rx_queue, rx_pkts, nb_pkts,
++						   opts1, first_line);
++	}
++	/* Even an empty/zero-budget call must preserve deferred RDU handling. */
++	if (rxq->nb_rx_hold > rxq->rx_free_thresh) {
++		rte_wmb();
++		rtl_clear_rdu(hw, rxq->queue_id);
++		rxq->nb_rx_hold = 0;
++	}
++	return 0;
+ }
+ 
+ static inline int

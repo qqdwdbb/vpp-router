@@ -1,0 +1,48 @@
+add table inet vrouter_dns_route_gate
+# VPP ACL/ABF sends client TCP/UDP 53 here independently of destination IP.
+# DNAT supplies the Gate bind address; conntrack restores the queried address
+# on replies. No public-resolver address list; VPN clients retain their configured DNS.
+add set inet vrouter_dns_route_gate lan6_sources { type ipv6_addr; flags interval; }
+add element inet vrouter_dns_route_gate lan6_sources { fd42:1111:2222:10::/64 }
+add chain inet vrouter_dns_route_gate legacy_frontend { type nat hook prerouting priority dstnat - 1; policy accept; }
+flush chain inet vrouter_dns_route_gate legacy_frontend
+add rule inet vrouter_dns_route_gate legacy_frontend iifname { "br-mgmt", "nic1", "vpp-lan", "lan", "br0", "vrouter-vps" } ip saddr 10.61.20.0/24 meta l4proto { tcp, udp } th dport 53 counter dnat ip to 10.61.20.2:1053
+add rule inet vrouter_dns_route_gate legacy_frontend iifname { "br-mgmt", "nic1", "vpp-lan", "lan", "br0", "vrouter-vps" } ip6 saddr @lan6_sources meta l4proto { tcp, udp } th dport 53 counter dnat ip6 to [fd42:1111:2222:10::2]:1053
+add chain inet vrouter_dns_route_gate prerouting { type nat hook prerouting priority dstnat; policy accept; }
+flush chain inet vrouter_dns_route_gate prerouting
+add rule inet vrouter_dns_route_gate prerouting iifname { "br-mgmt", "nic1", "vpp-lan", "lan" } ip daddr 10.61.20.2 meta l4proto { tcp, udp } th dport 53 counter redirect to :1053
+add rule inet vrouter_dns_route_gate prerouting iifname { "br-mgmt", "nic1", "vpp-lan", "lan" } ip6 daddr fd42:1111:2222:10::2 meta l4proto { tcp, udp } th dport 53 counter redirect to :1053
+# VPP owns the VPN gateway. Change the destination address as well as the port:
+# the gate listens on the Linux host address, not on 10.62.10.1.
+add rule inet vrouter_dns_route_gate prerouting iifname { "br-mgmt", "nic1", "vpp-lan", "lan" } ip daddr 10.62.10.1 meta l4proto { tcp, udp } th dport 53 counter dnat ip to 10.61.20.2:1053
+
+# Only the dedicated routed TAP is a proxy ingress.
+add chain inet mangle vrouter_lease_tproxy { type filter hook prerouting priority mangle - 1; policy accept; }
+flush chain inet mangle vrouter_lease_tproxy
+add rule inet mangle vrouter_lease_tproxy iifname "vpp-tproxy" fib daddr type local return
+add rule inet mangle vrouter_lease_tproxy iifname "vpp-tproxy" ip daddr { 0.0.0.0/8, 10.0.0.0/8, 127.0.0.0/8, 169.254.0.0/16, 172.16.0.0/12, 192.168.0.0/16, 224.0.0.0/4, 240.0.0.0/4 } counter return
+add rule inet mangle vrouter_lease_tproxy iifname "vpp-tproxy" ip6 daddr { ::/128, ::1/128, fe80::/10, ff00::/8 } counter return
+add rule inet mangle vrouter_lease_tproxy iifname "vpp-tproxy" ip protocol udp udp dport 443 counter reject with icmp port-unreachable
+add rule inet mangle vrouter_lease_tproxy iifname "vpp-tproxy" ip6 nexthdr udp udp dport 443 counter reject with icmpv6 port-unreachable
+add rule inet mangle vrouter_lease_tproxy iifname "vpp-tproxy" ip6 daddr fc00::/7 counter return
+add rule inet mangle vrouter_lease_tproxy iifname "vpp-tproxy" meta nfproto ipv4 meta l4proto { tcp, udp } counter tproxy ip to :2080 meta mark set 1 ct mark set 1 accept
+add rule inet mangle vrouter_lease_tproxy iifname "vpp-tproxy" meta nfproto ipv6 meta l4proto { tcp, udp } counter tproxy ip6 to :2080 meta mark set 1 ct mark set 1 accept
+add chain inet mangle vrouter_proxy_reply { type route hook output priority mangle; policy accept; }
+flush chain inet mangle vrouter_proxy_reply
+add rule inet mangle vrouter_proxy_reply ct mark 1 ct direction reply meta mark set meta mark | 0x04000000
+add chain inet mangle vrouter_proxy_guard { type filter hook forward priority filter - 2; policy accept; }
+flush chain inet mangle vrouter_proxy_guard
+add rule inet mangle vrouter_proxy_guard iifname "vpp-tproxy" counter drop
+# Routed traffic sent back through the same management interface can loop
+# between VPP and Linux. Local sockets and ordinary L2 bridging are unaffected.
+# QUIC reject must still hairpin ICMP/ICMPv6 dest-unreach back to the LAN client.
+add chain inet mangle vrouter_lease_guard { type filter hook forward priority filter - 1; policy accept; }
+flush chain inet mangle vrouter_lease_guard
+add rule inet mangle vrouter_lease_guard iifname "br-mgmt" oifname "br-mgmt" icmp type destination-unreachable counter accept
+add rule inet mangle vrouter_lease_guard iifname "br-mgmt" oifname "br-mgmt" icmpv6 type { destination-unreachable, packet-too-big } counter accept
+add rule inet mangle vrouter_lease_guard iifname "br-mgmt" oifname "br-mgmt" counter drop
+
+# Nebula peers know the overlay source, not the LAN/VPP client subnets.
+add chain inet vrouter_dns_route_gate nebula_source { type nat hook postrouting priority srcnat; policy accept; }
+flush chain inet vrouter_dns_route_gate nebula_source
+add rule inet vrouter_dns_route_gate nebula_source iifname "br-mgmt" oifname "nebula" ip saddr { 10.61.20.0/24, 10.62.0.0/16 } ip daddr { 10.64.10.0/24, 10.64.30.0/24, 10.64.40.0/24, 10.64.20.0/24 } counter masquerade

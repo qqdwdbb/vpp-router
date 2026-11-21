@@ -1,0 +1,27 @@
+vlib: dispatch pending handoff frames before sleeping
+
+The main loop dequeues inter-thread frames before calling vlib_file_poll(),
+but dispatches the resulting pending frames afterwards. Previous-loop vector
+counts can be zero at this point. Waiting in epoll then delays work already
+dequeued from the handoff queue and can cause NAT handoff congestion even
+when the destination worker is not CPU-bound.
+
+Treat pending dispatch frames and newly published frame-queue work as busy.
+This does not change the handoff queue capacity or NAT worker selection.
+
+--- a/src/vlib/file.c
++++ b/src/vlib/file.c
+@@ -131,6 +131,13 @@
+       goto epoll;
+     }
+ 
++  /* Inter-thread frames are dequeued before this call and dispatched after
++   * it. Do not sleep with work already pending, even if the previous loop
++   * processed no vectors. Also notice work published since the dequeue. */
++  if (vec_len (nm->pending_frames) ||
++      __atomic_load_n (&vm->check_frame_queues, __ATOMIC_ACQUIRE))
++    goto skip_loops;
++
+   /* we are busy, skip some loops before polling again */
+   if (vlib_last_vectors_per_main_loop (vm) >= 2)
+     goto skip_loops;

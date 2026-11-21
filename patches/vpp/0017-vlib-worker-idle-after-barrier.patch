@@ -1,0 +1,18 @@
+vlib: shorten worker polling grace after a barrier
+
+A control-plane update keeps workers polling for 500ms after each barrier,
+even when all input nodes use interrupts. Frequent updates can therefore
+prevent idle workers from sleeping. Keep a 1ms grace; barrier synchronization
+already explicitly wakes sleeping workers through vlib_thread_wakeup().
+
+--- a/src/vlib/file.c
++++ b/src/vlib/file.c
+@@ -151,7 +151,7 @@
+       if (*vlib_worker_threads->wait_at_barrier)
+ 	goto epoll;
+ 
+-      if (vlib_get_first_main ()->time_last_barrier_release + 0.5 >=
++      if (vlib_get_first_main ()->time_last_barrier_release + 0.001 >=
+ 	  vlib_time_now (vm))
+ 	goto skip_loops;
+     }

@@ -1,0 +1,354 @@
+--- a/drivers/net/r8169/r8169_ethdev.c
++++ b/drivers/net/r8169/r8169_ethdev.c
+@@ -26,7 +26,7 @@
+ #include "r8169_hw.h"
+ #include "r8169_dash.h"
+ 
+-static int rtl_dev_configure(struct rte_eth_dev *dev __rte_unused);
++static int rtl_dev_configure(struct rte_eth_dev *dev);
+ static int rtl_dev_start(struct rte_eth_dev *dev);
+ static int rtl_dev_stop(struct rte_eth_dev *dev);
+ static int rtl_dev_reset(struct rte_eth_dev *dev);
+@@ -133,8 +133,33 @@ static const struct eth_dev_ops rtl_eth_dev_ops = {
+ };
+ 
+ static int
+-rtl_dev_configure(struct rte_eth_dev *dev __rte_unused)
++rtl_dev_configure(struct rte_eth_dev *dev)
+ {
++	struct rtl_adapter *adapter = RTL_DEV_PRIVATE(dev);
++	struct rtl_hw *hw = &adapter->hw;
++	struct rte_eth_rss_conf *rss_conf = &dev->data->dev_conf.rx_adv_conf.rss_conf;
++	int ret;
++
++	if (!hw->EnableRss)
++		return 0;
++
++	ret = rtl8125_rss_check(rss_conf->rss_hf, dev->data->nb_rx_queues);
++	if (ret)
++		return ret;
++
++	if (rss_conf->rss_key && rss_conf->rss_key_len) {
++		if (rss_conf->rss_key_len != RTL_RSS_KEY_SIZE) {
++			PMD_DRV_LOG(ERR, "RSS key must be %d bytes, not %u",
++				    RTL_RSS_KEY_SIZE, rss_conf->rss_key_len);
++			return -EINVAL;
++		}
++		memcpy(hw->rss_key, rss_conf->rss_key, RTL_RSS_KEY_SIZE);
++		hw->rss_key_valid = 1;
++	}
++
++	/* Applied to the hardware at start, in rtl_rx_init(). */
++	hw->rss_hf = rss_conf->rss_hf;
++
+ 	return 0;
+ }
+ 
+@@ -498,7 +523,7 @@ rtl_dev_infos_get(struct rte_eth_dev *dev, struct rte_eth_dev_info *dev_info)
+ 	if (hw->EnableRss) {
+ 		dev_info->hash_key_size = RTL_RSS_KEY_SIZE;
+ 		dev_info->reta_size = RTL_MAX_INDIRECTION_TABLE_ENTRIES;
+-		dev_info->flow_type_rss_offloads = RTL_RSS_OFFLOAD_ALL;
++		dev_info->flow_type_rss_offloads = RTL_RSS_FLOW_TYPE_CAPA;
+ 	}
+ 
+ 	return 0;
+@@ -922,37 +947,40 @@ rtl_rss_hash_update(struct rte_eth_dev *dev, struct rte_eth_rss_conf *rss_conf)
+ {
+ 	struct rtl_adapter *adapter = RTL_DEV_PRIVATE(dev);
+ 	struct rtl_hw *hw = &adapter->hw;
++	u16 nb_rx_queues = dev->data->nb_rx_queues;
++	bool was_src_only;
+ 	u32 rss_ctrl_8125;
++	int ret;
+ 
+ 	if (!hw->EnableRss || !(rss_conf->rss_hf & RTL_RSS_OFFLOAD_ALL))
+ 		return -EINVAL;
+ 
+-	if (rss_conf->rss_key)
++	ret = rtl8125_rss_check(rss_conf->rss_hf, nb_rx_queues);
++	if (ret)
++		return ret;
++
++	if (rss_conf->rss_key) {
++		if (rss_conf->rss_key_len &&
++		    rss_conf->rss_key_len != RTL_RSS_KEY_SIZE)
++			return -EINVAL;
+ 		memcpy(hw->rss_key, rss_conf->rss_key, RTL_RSS_KEY_SIZE);
++		hw->rss_key_valid = 1;
++	}
+ 
+-	rtl8125_store_rss_key(hw);
++	was_src_only = rtl8125_rss_src_only(hw);
++	hw->rss_hf = rss_conf->rss_hf;
+ 
+-	rss_ctrl_8125 = RTL_R32(hw, RSS_CTRL_8125) & ~RTL_RSS_CTRL_OFFLOAD_ALL;
++	rtl8125_store_rss_key(hw);
+ 
+-	if (rss_conf->rss_hf & RTE_ETH_RSS_IPV4)
+-		rss_ctrl_8125 |= RSS_CTRL_IPV4_SUPP;
+-	if (rss_conf->rss_hf & RTE_ETH_RSS_NONFRAG_IPV4_TCP)
+-		rss_ctrl_8125 |= RSS_CTRL_TCP_IPV4_SUPP;
+-	if (rss_conf->rss_hf & RTE_ETH_RSS_NONFRAG_IPV6_TCP)
+-		rss_ctrl_8125 |= RSS_CTRL_TCP_IPV6_SUPP;
+-	if (rss_conf->rss_hf & RTE_ETH_RSS_IPV6)
+-		rss_ctrl_8125 |= RSS_CTRL_IPV6_SUPP;
+-	if (rss_conf->rss_hf & RTE_ETH_RSS_IPV6_EX)
+-		rss_ctrl_8125 |= RSS_CTRL_IPV6_EXT_SUPP;
+-	if (rss_conf->rss_hf & RTE_ETH_RSS_IPV6_TCP_EX)
+-		rss_ctrl_8125 |= RSS_CTRL_TCP_IPV6_EXT_SUPP;
+-	if (rss_conf->rss_hf & RTE_ETH_RSS_NONFRAG_IPV4_UDP)
+-		rss_ctrl_8125 |= RSS_CTRL_UDP_IPV4_SUPP;
+-	if (rss_conf->rss_hf & RTE_ETH_RSS_NONFRAG_IPV6_UDP)
+-		rss_ctrl_8125 |= RSS_CTRL_UDP_IPV6_SUPP;
+-	if (rss_conf->rss_hf & RTE_ETH_RSS_IPV6_UDP_EX)
+-		rss_ctrl_8125 |= RSS_CTRL_UDP_IPV6_EXT_SUPP;
++	/* The table depends on the mode; keep a user table otherwise. */
++	if (was_src_only != rtl8125_rss_src_only(hw) && nb_rx_queues) {
++		rtl8125_rss_default_reta(hw, nb_rx_queues);
++		rtl8125_config_rss(hw, nb_rx_queues);
++		return 0;
++	}
+ 
++	rss_ctrl_8125 = RTL_R32(hw, RSS_CTRL_8125) & ~RTL_RSS_CTRL_OFFLOAD_ALL;
++	rss_ctrl_8125 |= rtl8125_rss_hf_to_ctrl(hw->rss_hf);
+ 	RTL_W32(hw, RSS_CTRL_8125, rss_ctrl_8125);
+ 
+ 	return 0;
+@@ -973,7 +1001,8 @@ rtl_rss_hash_conf_get(struct rte_eth_dev *dev, struct rte_eth_rss_conf *rss_conf
+ 
+ 	if (rss_conf->rss_key) {
+ 		rss_conf->rss_key_len = RTL_RSS_KEY_SIZE;
+-		memcpy(rss_conf->rss_key, hw->rss_key, RTL_RSS_KEY_SIZE);
++		/* The key the hardware uses, after the l3-src-only mask. */
++		rtl8125_rss_effective_key(hw, rss_conf->rss_key);
+ 	}
+ 
+ 	rss_ctrl_8125 = RTL_R32(hw, RSS_CTRL_8125);
+@@ -997,6 +1026,9 @@ rtl_rss_hash_conf_get(struct rte_eth_dev *dev, struct rte_eth_rss_conf *rss_conf
+ 	if (rss_ctrl_8125 & RSS_CTRL_UDP_IPV6_EXT_SUPP)
+ 		rss_hf |= RTE_ETH_RSS_IPV6_UDP_EX;
+ 
++	if (rtl8125_rss_src_only(hw))
++		rss_hf |= RTE_ETH_RSS_L3_SRC_ONLY;
++
+ 	rss_conf->rss_hf = rss_hf;
+ 
+ 	return 0;
+--- a/drivers/net/r8169/r8169_ethdev.h
++++ b/drivers/net/r8169/r8169_ethdev.h
+@@ -59,6 +59,14 @@ enum rtl_rss_register_content {
+ 	RTE_ETH_RSS_IPV6_TCP_EX | \
+ 	RTE_ETH_RSS_IPV6_UDP_EX)
+ 
++/* Hash types that keep only addresses as input; L3_SRC_ONLY needs one. */
++#define RTL_RSS_L3_TYPES ( \
++	RTE_ETH_RSS_IPV4 | \
++	RTE_ETH_RSS_IPV6 | \
++	RTE_ETH_RSS_IPV6_EX)
++
++#define RTL_RSS_FLOW_TYPE_CAPA (RTL_RSS_OFFLOAD_ALL | RTE_ETH_RSS_L3_SRC_ONLY)
++
+ #define RTL_RSS_CTRL_OFFLOAD_ALL ( \
+ 	RSS_CTRL_TCP_IPV4_SUPP | \
+ 	RSS_CTRL_IPV4_SUPP | \
+@@ -141,6 +149,9 @@ struct rtl_hw {
+ 	u8 HwSuppRxDescType;
+ 	u16 RxDescLength;
+ 	u8 rss_key[RTL_RSS_KEY_SIZE];
++	u8 rss_key_valid;
++	/* Requested hash types; 0 keeps the default of every type. */
++	u64 rss_hf;
+ 	u8 rss_indir_tbl[RTL_MAX_INDIRECTION_TABLE_ENTRIES];
+ };
+ 
+--- a/drivers/net/r8169/r8169_hw.c
++++ b/drivers/net/r8169/r8169_hw.c
+@@ -3,6 +3,7 @@
+  */
+ 
+ #include <stdio.h>
++#include <string.h>
+ #include <errno.h>
+ #include <stdint.h>
+ 
+@@ -840,7 +841,7 @@ rtl8125_set_rss_hash_opt(struct rtl_hw *hw, u16 nb_rx_queues)
+ 	rss_ctrl <<= RSS_CPU_NUM_OFFSET;
+ 
+ 	/* Perform hash on these packet types */
+-	rss_ctrl |= RTL_RSS_CTRL_OFFLOAD_ALL;
++	rss_ctrl |= rtl8125_rss_hf_to_ctrl(hw->rss_hf);
+ 
+ 	hash_mask_len = rte_log2_u32(RTL_MAX_INDIRECTION_TABLE_ENTRIES);
+ 	hash_mask_len &= (BIT_0 | BIT_1 | BIT_2);
+@@ -864,17 +865,131 @@ rtl8125_store_reta(struct rtl_hw *hw)
+ 	}
+ }
+ 
++bool
++rtl8125_rss_src_only(const struct rtl_hw *hw)
++{
++	return (hw->rss_hf & RTE_ETH_RSS_L3_SRC_ONLY) != 0;
++}
++
++u32
++rtl8125_rss_hf_to_ctrl(u64 rss_hf)
++{
++	u32 ctrl = 0;
++
++	if (!rss_hf)
++		return RTL_RSS_CTRL_OFFLOAD_ALL;
++
++	/* Ports and the destination must not reach the hash. */
++	if (rss_hf & RTE_ETH_RSS_L3_SRC_ONLY)
++		rss_hf &= RTL_RSS_L3_TYPES;
++
++	if (rss_hf & RTE_ETH_RSS_IPV4)
++		ctrl |= RSS_CTRL_IPV4_SUPP;
++	if (rss_hf & RTE_ETH_RSS_NONFRAG_IPV4_TCP)
++		ctrl |= RSS_CTRL_TCP_IPV4_SUPP;
++	if (rss_hf & RTE_ETH_RSS_NONFRAG_IPV6_TCP)
++		ctrl |= RSS_CTRL_TCP_IPV6_SUPP;
++	if (rss_hf & RTE_ETH_RSS_IPV6)
++		ctrl |= RSS_CTRL_IPV6_SUPP;
++	if (rss_hf & RTE_ETH_RSS_IPV6_EX)
++		ctrl |= RSS_CTRL_IPV6_EXT_SUPP;
++	if (rss_hf & RTE_ETH_RSS_IPV6_TCP_EX)
++		ctrl |= RSS_CTRL_TCP_IPV6_EXT_SUPP;
++	if (rss_hf & RTE_ETH_RSS_NONFRAG_IPV4_UDP)
++		ctrl |= RSS_CTRL_UDP_IPV4_SUPP;
++	if (rss_hf & RTE_ETH_RSS_NONFRAG_IPV6_UDP)
++		ctrl |= RSS_CTRL_UDP_IPV6_SUPP;
++	if (rss_hf & RTE_ETH_RSS_IPV6_UDP_EX)
++		ctrl |= RSS_CTRL_UDP_IPV6_EXT_SUPP;
++
++	return ctrl;
++}
++
++int
++rtl8125_rss_check(u64 rss_hf, u16 nb_rx_queues)
++{
++	if (!(rss_hf & RTE_ETH_RSS_L3_SRC_ONLY))
++		return 0;
++
++	if (!(rss_hf & RTL_RSS_L3_TYPES)) {
++		PMD_DRV_LOG(ERR, "l3-src-only needs ipv4 or ipv6 hashing");
++		return -EINVAL;
++	}
++
++	/* The table below reads two hash bits, so 3 queues cannot be even. */
++	if (nb_rx_queues != 1 && nb_rx_queues != 2 && nb_rx_queues != 4) {
++		PMD_DRV_LOG(ERR, "l3-src-only needs 1, 2 or 4 RX queues, not %u",
++			    nb_rx_queues);
++		return -EINVAL;
++	}
++
++	return 0;
++}
++
++static void
++rtl_rss_key_clear_bits(u8 *key, int first, int last)
++{
++	int k;
++
++	for (k = first; k <= last; k++)
++		key[k / 8] &= ~(0x80 >> (k % 8));
++}
++
++/*
++ * Toeplitz XORs, for each set input bit j, the 32 key bits starting at
++ * key bit j; result bit b (0 = least significant) therefore takes key bit
++ * j + 31 - b. The destination address is input bits 32-63 for IPv4 and
++ * 128-255 for IPv6. Clearing key bits 61-93 and 157-285 keeps the
++ * destination out of result bits 1 and 2, and the default table maps
++ * queues from those two bits only. Bit 0 is not used: keeping it free of
++ * the destination would also cut the last source bit out of it.
++ */
++void
++rtl8125_rss_effective_key(const struct rtl_hw *hw, u8 *key)
++{
++	memcpy(key, hw->rss_key, RTL_RSS_KEY_SIZE);
++
++	if (!rtl8125_rss_src_only(hw))
++		return;
++
++	rtl_rss_key_clear_bits(key, 61, 93);
++	rtl_rss_key_clear_bits(key, 157, 285);
++
++	/*
++	 * The last IPv4 source byte reaches result bits 1 and 2 through key
++	 * bits 53-60 only; if they were all zero, hosts in one /24 would
++	 * share a queue. Bit 60 set keeps the two bits independent.
++	 */
++	key[60 / 8] |= 0x80 >> (60 % 8);
++}
++
++void
++rtl8125_rss_default_reta(struct rtl_hw *hw, u16 nb_rx_queues)
++{
++	int i;
++
++	for (i = 0; i < RTL_MAX_INDIRECTION_TABLE_ENTRIES; i++) {
++		if (rtl8125_rss_src_only(hw))
++			hw->rss_indir_tbl[i] = (u8)((i >> 1) & (nb_rx_queues - 1));
++		else
++			hw->rss_indir_tbl[i] = (u8)(i % nb_rx_queues);
++	}
++}
++
+ void
+ rtl8125_store_rss_key(struct rtl_hw *hw)
+ {
++	u8 key[RTL_RSS_KEY_SIZE];
+ 	u32 rss_key;
+ 	int i;
+ 
++	rtl8125_rss_effective_key(hw, key);
++
+ 	for (i = 0; i < RTL_RSS_KEY_SIZE; i += 4) {
+-		rss_key = hw->rss_key[i];
+-		rss_key |= hw->rss_key[i + 1] << 8;
+-		rss_key |= hw->rss_key[i + 2] << 16;
+-		rss_key |= hw->rss_key[i + 3] << 24;
++		rss_key = key[i];
++		rss_key |= key[i + 1] << 8;
++		rss_key |= key[i + 2] << 16;
++		rss_key |= key[i + 3] << 24;
+ 		RTL_W32(hw, RSS_KEY_8125 + i, rss_key);
+ 	}
+ }
+--- a/drivers/net/r8169/r8169_hw.h
++++ b/drivers/net/r8169/r8169_hw.h
+@@ -100,6 +100,11 @@ u64 rtl_get_hw_mcu_patch_code_ver(struct rtl_hw *hw);
+ u64 rtl_get_bin_mcu_patch_code_ver(const u16 *entry, u16 entry_cnt);
+ 
+ void rtl8125_store_rss_key(struct rtl_hw *hw);
++bool rtl8125_rss_src_only(const struct rtl_hw *hw);
++u32 rtl8125_rss_hf_to_ctrl(u64 rss_hf);
++void rtl8125_rss_effective_key(const struct rtl_hw *hw, u8 *key);
++void rtl8125_rss_default_reta(struct rtl_hw *hw, u16 nb_rx_queues);
++int rtl8125_rss_check(u64 rss_hf, u16 nb_rx_queues);
+ void rtl8125_config_rss(struct rtl_hw *hw, u16 nb_rx_queues);
+ 
+ extern const struct rtl_hw_ops rtl8168g_ops;
+--- a/drivers/net/r8169/r8169_rxtx.c
++++ b/drivers/net/r8169/r8169_rxtx.c
+@@ -723,13 +723,16 @@ rtl_init_rss(struct rtl_hw *hw, u16 nb_rx_queues)
+ 	u64 rand;
+ 	int i;
+ 
+-	for (i = 0; i < RTL_MAX_INDIRECTION_TABLE_ENTRIES; i++)
+-		hw->rss_indir_tbl[i] = (u8)(i % nb_rx_queues);
++	rtl8125_rss_default_reta(hw, nb_rx_queues);
++
++	if (hw->rss_key_valid)
++		return;
+ 
+ 	for (i = 0; i < RTL_RSS_KEY_SIZE; i += sizeof(u64)) {
+ 		rand = rte_rand();
+ 		memcpy(&hw->rss_key[i], &rand, sizeof(u64));
+ 	}
++	hw->rss_key_valid = 1;
+ }
+ 
+ static void

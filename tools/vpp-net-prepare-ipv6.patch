@@ -1,0 +1,6 @@
+--- /usr/local/sbin/vpp-net-prepare
++++ /usr/local/sbin/vpp-net-prepare
+@@ -1,1 +1,3 @@
+ ip link set vpp-wan up
++# Receive upstream IPv6 RA/ND on the macvlan even with Linux IPv6 disabled.
++ip link set dev vpp-wan allmulticast on

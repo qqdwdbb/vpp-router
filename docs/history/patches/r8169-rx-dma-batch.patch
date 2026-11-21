@@ -1,0 +1,105 @@
+--- a/drivers/net/r8169/r8169_rxtx.c
++++ b/drivers/net/r8169/r8169_rxtx.c
+@@ -45,8 +45,10 @@
+ #endif
+ }
+ 
++/* Issue cache maintenance without waiting; callers must complete it before
++ * reading DMA data or publishing ownership to the NIC. */
+ static inline void
+-rtl_nc_sync(const void *address, size_t length, int invalidate)
++rtl_nc_sync_range(const void *address, size_t length, int invalidate)
+ {
+ #if defined(RTE_ARCH_ARM64)
+ 	uintptr_t start, end;
+@@ -60,12 +62,29 @@
+ 		else
+ 			__asm__ volatile("dc cvac, %0" :: "r" (start) : "memory");
+ 	}
+-	__asm__ volatile("dsb sy" ::: "memory");
+ #else
+ 	RTE_SET_USED(address);
+ 	RTE_SET_USED(length);
+ 	RTE_SET_USED(invalidate);
+ #endif
++}
++
++static inline void
++rtl_nc_sync_complete(void)
++{
++#if defined(RTE_ARCH_ARM64)
++	if (rtl_nc_dma)
++		__asm__ volatile("dsb sy" ::: "memory");
++#endif
++}
++
++static inline void
++rtl_nc_sync(const void *address, size_t length, int invalidate)
++{
++	if (!rtl_nc_dma || !length)
++		return;
++	rtl_nc_sync_range(address, length, invalidate);
++	rtl_nc_sync_complete();
+ }
+ 
+ /* The tally buffer is device-owned, just like RX descriptors. Keep the
+@@ -576,7 +595,14 @@
+ 	first = consumed + 1 - per_line;
+ 	for (i = first; i <= consumed; i++) {
+ 		struct rte_mbuf *mb = rxq->sw_ring[i].mbuf;
+-		rtl_nc_sync((char *)mb->buf_addr + RTE_PKTMBUF_HEADROOM, hw->rx_buf_sz, 1);
++		rtl_nc_sync_range((char *)mb->buf_addr + RTE_PKTMBUF_HEADROOM,
++				  hw->rx_buf_sz, 1);
++	}
++	/* All buffers must be ready before any OWN store: a dirty descriptor
++	 * line can reach memory through eviction before the explicit clean. */
++	rtl_nc_sync_complete();
++	for (i = first; i <= consumed; i++) {
++		struct rte_mbuf *mb = rxq->sw_ring[i].mbuf;
+ 		rtl_map_to_asic(hw, rtl_get_rxdesc(hw, rxq->hw_ring, i),
+ 			rte_cpu_to_le_64(rte_mbuf_data_iova_default(mb)));
+ 	}
+@@ -1001,12 +1027,22 @@
+ 	uint32_t opts1;
+ 	uint32_t opts2;
+ 	uint64_t dma_addr;
++	uintptr_t synced_line = UINTPTR_MAX;
+ 
+ 	RTE_ASSERT(RTL_R8(hw, ChipCmd) & CmdRxEnb);
+ 
+ 	while (nb_rx < nb_pkts) {
+ 		rxd = rtl_get_rxdesc(hw, rxq->hw_ring, tail);
+-		rtl_nc_sync(rxd, hw->RxDescLength, 1);
++		if (rtl_nc_dma) {
++			uintptr_t line = (uintptr_t)rxd &
++					 ~(uintptr_t)(rtl_nc_line - 1);
++			/* Reuse this burst's snapshot of neighbouring descriptors.
++			 * A cached OWN still stops polling; the next call refreshes it. */
++			if (line != synced_line) {
++				rtl_nc_sync(rxd, hw->RxDescLength, 1);
++				synced_line = line;
++			}
++		}
+ 
+ 		opts1 = rtl_rx_desc_opts1(hw, rxd);
+ 		if (opts1 & DescOwn)
+@@ -1072,7 +1108,9 @@
+ 		pkt_len -= RTE_ETHER_CRC_LEN;
+ 
+ 		rmb->data_off = RTE_PKTMBUF_HEADROOM;
+-		rtl_nc_sync(rte_pktmbuf_mtod(rmb, void *), pkt_len, 1);
++		/* Only metadata is read below; packet data is consumed by the
++		 * caller after the burst's completion barrier. */
++		rtl_nc_sync_range(rte_pktmbuf_mtod(rmb, void *), pkt_len, 1);
+ 		rte_prefetch1((char *)rmb->buf_addr + rmb->data_off);
+ 		rmb->nb_segs = 1;
+ 		rmb->next = NULL;
+@@ -1098,6 +1136,8 @@
+ 		stats->rx_packets++;
+ 	}
+ 
++	if (nb_rx)
++		rtl_nc_sync_complete();
+ 	rxq->rx_tail = tail;
+ 
+ 	nb_hold = (uint16_t)(nb_hold + rxq->nb_rx_hold);

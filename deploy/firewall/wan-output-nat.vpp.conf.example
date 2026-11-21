@@ -1,0 +1,9 @@
+# Staged fragment. Replace WAN_INTERFACE with the final VPP WAN interface.
+# Requires the ACL ordering NAT/context/IPsec candidate bundle documented below.
+# Match firewall.json vpp.wan_ipv4 to the actual interface/NAT address.
+nat44 ei plugin enable sessions 4096
+nat44 ei add interface address WAN_INTERFACE
+nat44 ei add identity mapping external WAN_INTERFACE
+set interface nat44 ei out WAN_INTERFACE output-feature
+nat44 ei output-chain WAN_INTERFACE
+# Apply WAN ACLs only after topology/NAT setup; filter LAN ingress member ports.

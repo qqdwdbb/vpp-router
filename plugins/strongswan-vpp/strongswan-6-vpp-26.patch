@@ -1,0 +1,381 @@
+--- a/kernel_vpp_ipsec.c
++++ b/kernel_vpp_ipsec.c
+@@ -218,7 +218,7 @@
+   free (this);
+ }
+ 
+-static uint32_t get_sw_if_index ();
++static uint32_t get_sw_if_index (char *if_name);
+ 
+ static int
+ set_arp (char *ipStr, char *if_name, bool add)
+@@ -261,12 +261,13 @@
+   fp = fopen (file, "rb");
+   while (fp && ((nread = getline (&buffer, &len, fp)) != -1))
+     {
+-      sscanf (buffer, "%s %*s %*s %s %*s %*s", &buf[0], &buf[1]);
+-      inet_aton (&buf[0], &addr);
++      if (sscanf (buffer, "%19s %*s %*s %19s %*s %*s", buf[0], buf[1]) != 2 ||
++          inet_pton (AF_INET, buf[0], &addr) != 1)
++        continue;
+ 
+       if (addr == *((u32 *) (ipStr)))
+ 	{
+-	  sscanf (buf[1], "%02x:%02x:%02x:%02x:%02x:%02x", &mac[0], &mac[1],
++	  sscanf (buf[1], "%02hhx:%02hhx:%02hhx:%02hhx:%02hhx:%02hhx", &mac[0], &mac[1],
+ 		  &mac[2], &mac[3], &mac[4], &mac[5]);
+ 	  u16 msg_id =
+ 	    vl_msg_api_get_msg_index ((u8 *) "ip_neighbor_add_del_0607c257");
+@@ -788,219 +789,37 @@
+   return rv;
+ }
+ 
+-static int
+-bypass_all (bool add, uint32_t spd_id, uint32_t sa_id, uint32_t priority)
+-{
+-  vl_api_ipsec_spd_entry_add_del_t *mp;
+-  vl_api_ipsec_spd_entry_add_del_reply_t *rmp;
+-  char *out = NULL;
+-  int out_len;
+-  status_t rv = FAILED;
+-
+-  DBG2 (DBG_KNL, "bypass_all [%s] spd_id %d sa_id %d", add ? "ADD" : "DEL",
+-	spd_id, sa_id);
+-
+-  mp = vl_msg_api_alloc (sizeof (*mp));
+-  memset (mp, 0, sizeof (*mp));
+-
+-  u16 msg_id =
+-    vl_msg_api_get_msg_index ((u8 *) "ipsec_spd_entry_add_del_338b7411");
+-  mp->_vl_msg_id = ntohs (msg_id);
+-  mp->is_add = add;
+-  mp->entry.sa_id = ntohl (sa_id);
+-  mp->entry.spd_id = ntohl (spd_id);
+-  mp->entry.priority = ntohl (priority - POLICY_PRIORITY_PASS);
+-  mp->entry.is_outbound = 0;
+-  mp->entry.policy = ntohl (IPSEC_API_SPD_ACTION_BYPASS);
+-  memset (mp->entry.local_address_stop.un.ip6, 0xFF, 16);
+-  memset (mp->entry.remote_address_stop.un.ip6, 0xFF, 16);
+-  mp->entry.remote_port_start = mp->entry.local_port_start = ntohs (0);
+-  mp->entry.remote_port_stop = mp->entry.local_port_stop = ntohs (0xFFFF);
+-  mp->entry.protocol = IP_API_PROTO_ESP;
+-  if (vac->send (vac, (char *) mp, sizeof (*mp), &out, &out_len))
+-    {
+-      DBG1 (DBG_KNL, "vac %s SPD entry failed", add ? "adding" : "removing");
+-      goto error;
+-    }
+-  rmp = (void *) out;
+-  if (rmp->retval)
+-    {
+-      DBG1 (DBG_KNL, "%s SPD entry failed rv:%d", add ? "add" : "remove",
+-	    ntohl (rmp->retval));
+-      goto error;
+-    }
+-  /* address "out" needs to be freed after vec->send */
+-  if (out != NULL)
+-    {
+-      free (out);
+-      out = NULL;
+-    }
+-  mp->entry.is_outbound = 1;
+-  if (vac->send (vac, (char *) mp, sizeof (*mp), &out, &out_len))
+-    {
+-      DBG1 (DBG_KNL, "vac %s SPD entry failed", add ? "adding" : "removing");
+-      goto error;
+-    }
+-  rmp = (void *) out;
+-  if (rmp->retval)
+-    {
+-      DBG1 (DBG_KNL, "%s SPD entry failed rv:%d", add ? "add" : "remove",
+-	    ntohl (rmp->retval));
+-      goto error;
+-    }
+-  /* address "out" needs to be freed after vec->send */
+-  if (out != NULL)
+-    {
+-      free (out);
+-      out = NULL;
+-    }
+-  mp->entry.is_outbound = 0;
+-  mp->entry.protocol = IP_API_PROTO_AH;
+-  if (vac->send (vac, (char *) mp, sizeof (*mp), &out, &out_len))
+-    {
+-      DBG1 (DBG_KNL, "vac %s SPD entry failed", add ? "adding" : "removing");
+-      goto error;
+-    }
+-  rmp = (void *) out;
+-  if (rmp->retval)
+-    {
+-      DBG1 (DBG_KNL, "%s SPD entry failed rv:%d", add ? "add" : "remove",
+-	    ntohl (rmp->retval));
+-      goto error;
+-    }
+-  /* address "out" needs to be freed after vec->send */
+-  if (out != NULL)
+-    {
+-      free (out);
+-      out = NULL;
+-    }
+-  mp->entry.is_outbound = 1;
+-  if (vac->send (vac, (char *) mp, sizeof (*mp), &out, &out_len))
+-    {
+-      DBG1 (DBG_KNL, "vac %s SPD entry failed", add ? "adding" : "removing");
+-      goto error;
+-    }
+-  rmp = (void *) out;
+-  if (rmp->retval)
+-    {
+-      DBG1 (DBG_KNL, "%s SPD entry failed rv:%d", add ? "add" : "remove",
+-	    ntohl (rmp->retval));
+-      goto error;
+-    }
+-
+-  rv = SUCCESS;
+-
+-error:
+-  if (out)
+-    free (out);
+-  vl_msg_api_free (mp);
+-
+-  return rv;
+-}
+-
+-static int
+-bypass_port (bool add, uint32_t spd_id, uint32_t sa_id, uint16_t port,
+-	     uint32_t priority)
+-{
+-  vl_api_ipsec_spd_entry_add_del_t *mp;
+-  vl_api_ipsec_spd_entry_add_del_reply_t *rmp;
+-  char *out = NULL;
+-  int out_len;
+-  status_t rv = FAILED;
+-
+-  mp = vl_msg_api_alloc (sizeof (*mp));
+-  memset (mp, 0, sizeof (*mp));
+-
+-  u16 msg_id =
+-    vl_msg_api_get_msg_index ((u8 *) "ipsec_spd_entry_add_del_338b7411");
+-  mp->_vl_msg_id = ntohs (msg_id);
+-  mp->is_add = add;
+-  mp->entry.sa_id = ntohl (sa_id);
+-  mp->entry.spd_id = ntohl (spd_id);
+-  mp->entry.priority = ntohl (priority - POLICY_PRIORITY_PASS);
+-  mp->entry.policy = ntohl (IPSEC_API_SPD_ACTION_BYPASS);
+-  memset (mp->entry.local_address_stop.un.ip6, 0xFF, 16);
+-  memset (mp->entry.remote_address_stop.un.ip6, 0xFF, 16);
+-  mp->entry.is_outbound = 0;
+-  mp->entry.remote_port_start = mp->entry.local_port_start = ntohs (port);
+-  mp->entry.remote_port_stop = mp->entry.local_port_stop = ntohs (port);
+-  mp->entry.protocol = IP_API_PROTO_UDP;
+-
+-  if (vac->send (vac, (char *) mp, sizeof (*mp), &out, &out_len))
+-    {
+-      DBG1 (DBG_KNL, "vac %s SPD entry failed", add ? "adding" : "removing");
+-      goto error;
+-    }
+-  rmp = (void *) out;
+-  if (rmp->retval)
+-    {
+-      DBG1 (DBG_KNL, "%s SPD entry failed rv:%d", add ? "add" : "remove",
+-	    ntohl (rmp->retval));
+-      goto error;
+-    }
+-  /* address "out" needs to be freed after vec->send */
+-  if (out != NULL)
+-    {
+-      free (out);
+-      out = NULL;
+-    }
+-  mp->entry.is_outbound = 1;
+-  if (vac->send (vac, (char *) mp, sizeof (*mp), &out, &out_len))
+-    {
+-      DBG1 (DBG_KNL, "vac %s SPD entry failed", add ? "adding" : "removing");
+-      goto error;
+-    }
+-  rmp = (void *) out;
+-  if (rmp->retval)
+-    {
+-      DBG1 (DBG_KNL, "%s SPD entry failed rv:%d", add ? "add" : "remove",
+-	    ntohl (rmp->retval));
+-      goto error;
+-    }
+-  rv = SUCCESS;
+-
+-error:
+-  if (out)
+-    free (out);
+-  vl_msg_api_free (mp);
+-
+-  return rv;
+-}
+-
+-/**
+- * Add or remove a bypass policy
+- */
++/* Preserve ordinary WAN forwarding; protect selectors take precedence. */
+ static status_t
+ manage_bypass (bool add, uint32_t spd_id, uint32_t sa_id, uint32_t priority)
+ {
+-  uint16_t port;
+-  status_t rv;
+-
+-  bypass_all (add, spd_id, sa_id, priority);
+-
+-  port =
+-    lib->settings->get_int (lib->settings, "%s.port", IKEV2_UDP_PORT, lib->ns);
+-
+-  if (port)
+-    {
+-      rv = bypass_port (add, spd_id, sa_id, port, priority);
+-      if (rv != SUCCESS)
+-	{
+-	  return rv;
+-	}
+-    }
+-
+-  port = lib->settings->get_int (lib->settings, "%s.port_nat_t",
+-				 IKEV2_NATT_PORT, lib->ns);
+-  if (port)
+-    {
+-      rv = bypass_port (add, spd_id, sa_id, port, priority);
+-      if (rv != SUCCESS)
+-	{
+-	  return rv;
+-	}
+-    }
+-
++  for (int family = 0; family < 2; family++)
++    for (int outbound = 0; outbound < 2; outbound++)
++      {
++        vl_api_ipsec_spd_entry_add_del_t *mp = vl_msg_api_alloc (sizeof (*mp));
++        memset (mp, 0, sizeof (*mp));
++        mp->_vl_msg_id = htons (vl_msg_api_get_msg_index ((u8 *) "ipsec_spd_entry_add_del_338b7411"));
++        mp->is_add = add;
++        mp->entry.spd_id = htonl (spd_id);
++        mp->entry.sa_id = htonl (sa_id);
++        mp->entry.priority = htonl (0);
++        mp->entry.is_outbound = outbound;
++        mp->entry.policy = htonl (IPSEC_API_SPD_ACTION_BYPASS);
++        mp->entry.local_address_start.af = family;
++        mp->entry.local_address_stop.af = family;
++        mp->entry.remote_address_start.af = family;
++        mp->entry.remote_address_stop.af = family;
++        memset (mp->entry.local_address_stop.un.ip6, 255, 16);
++        memset (mp->entry.remote_address_stop.un.ip6, 255, 16);
++        mp->entry.local_port_stop = mp->entry.remote_port_stop = htons (65535);
++        char *out = NULL;
++        int out_len;
++        int failed = vac->send (vac, (char *) mp, sizeof (*mp), &out, &out_len);
++        if (!failed) failed = ((vl_api_ipsec_spd_entry_add_del_reply_t *) out)->retval;
++        free (out);
++        vl_msg_api_free (mp);
++        if (failed) return FAILED;
++      }
+   return SUCCESS;
+ }
+ 
+@@ -1148,17 +967,17 @@
+   if (id->src_ts->get_type (id->src_ts) == TS_IPV6_ADDR_RANGE)
+     {
+       is_ipv6 = true;
+-      mp->entry.local_address_start.af = htonl (ADDRESS_IP6);
+-      mp->entry.local_address_stop.af = htonl (ADDRESS_IP6);
+-      mp->entry.remote_address_start.af = htonl (ADDRESS_IP6);
+-      mp->entry.remote_address_stop.af = htonl (ADDRESS_IP6);
++      mp->entry.local_address_start.af = ADDRESS_IP6;
++      mp->entry.local_address_stop.af = ADDRESS_IP6;
++      mp->entry.remote_address_start.af = ADDRESS_IP6;
++      mp->entry.remote_address_stop.af = ADDRESS_IP6;
+     }
+   else
+     {
+-      mp->entry.local_address_start.af = htonl (ADDRESS_IP4);
+-      mp->entry.local_address_stop.af = htonl (ADDRESS_IP4);
+-      mp->entry.remote_address_start.af = htonl (ADDRESS_IP4);
+-      mp->entry.remote_address_stop.af = htonl (ADDRESS_IP4);
++      mp->entry.local_address_start.af = ADDRESS_IP4;
++      mp->entry.local_address_stop.af = ADDRESS_IP4;
++      mp->entry.remote_address_start.af = ADDRESS_IP4;
++      mp->entry.remote_address_stop.af = ADDRESS_IP4;
+     }
+   mp->entry.protocol = id->src_ts->get_protocol (id->src_ts);
+ 
+@@ -1601,17 +1420,16 @@
+     flags |= IPSEC_API_SAD_FLAG_USE_ESN;
+   if (this->use_tunnel_mode_sa && data->mode == MODE_TUNNEL)
+     {
++      flags |= IPSEC_API_SAD_FLAG_IS_TUNNEL;
+       if (id->src->get_family (id->src) == AF_INET6)
+ 	flags |= IPSEC_API_SAD_FLAG_IS_TUNNEL_V6;
+-      else
+-	flags |= IPSEC_API_SAD_FLAG_IS_TUNNEL;
+     }
+   if (data->encap)
+     {
+       DBG1 (DBG_KNL, "UDP encap");
+       flags |= IPSEC_API_SAD_FLAG_UDP_ENCAP;
+-      mp->entry.udp_src_port = htons (natt_port);
+-      mp->entry.udp_dst_port = htons (natt_port);
++      mp->entry.udp_src_port = htons (id->src->get_port (id->src));
++      mp->entry.udp_dst_port = htons (id->dst->get_port (id->dst));
+     }
+   mp->entry.flags = htonl (flags);
+ 
+@@ -1619,13 +1437,13 @@
+   if (id->src->get_family (id->src) == AF_INET6)
+     {
+       is_ipv6 = true;
+-      mp->entry.tunnel_src.af = htonl (ADDRESS_IP6);
+-      mp->entry.tunnel_dst.af = htonl (ADDRESS_IP6);
++      mp->entry.tunnel_src.af = ADDRESS_IP6;
++      mp->entry.tunnel_dst.af = ADDRESS_IP6;
+     }
+   else
+     {
+-      mp->entry.tunnel_src.af = htonl (ADDRESS_IP4);
+-      mp->entry.tunnel_dst.af = htonl (ADDRESS_IP4);
++      mp->entry.tunnel_src.af = ADDRESS_IP4;
++      mp->entry.tunnel_dst.af = ADDRESS_IP4;
+     }
+   src = id->src->get_address (id->src);
+   memcpy (is_ipv6 ? mp->entry.tunnel_src.un.ip6 : mp->entry.tunnel_src.un.ip4,
+--- a/kernel_vpp_shared.c
++++ b/kernel_vpp_shared.c
+@@ -596,7 +596,7 @@
+             .seq = 0,
+     );
+ 
+-  clib_mem_init_thread_safe (0, 256 << 20);
++  clib_mem_init (0, 256 << 20);
+ 
+   if (vl_client_api_map ("/vpe-api"))
+     {
+--- a/kernel_vpp_plugin.c
++++ b/kernel_vpp_plugin.c
+@@ -30,7 +30,6 @@
+ #include "kernel_vpp_plugin.h"
+ #include "kernel_vpp_shared.h"
+ #include "kernel_vpp_ipsec.h"
+-#include "kernel_vpp_net.h"
+ 
+ typedef struct private_kernel_vpp_plugin_t private_kernel_vpp_plugin_t;
+ 
+@@ -58,8 +57,6 @@
+   static plugin_feature_t f[] = {
+     PLUGIN_CALLBACK (kernel_ipsec_register, kernel_vpp_ipsec_create),
+     PLUGIN_PROVIDE (CUSTOM, "kernel-ipsec"),
+-    PLUGIN_CALLBACK (kernel_net_register, kernel_vpp_net_create),
+-    PLUGIN_PROVIDE (CUSTOM, "kernel-net"),
+   };
+   *features = f;
+   return countof (f);
+@@ -75,8 +72,7 @@
+   free (this);
+ }
+ 
+-plugin_t *
+-kernel_vpp_plugin_create ()
++PLUGIN_DEFINE (kernel_vpp)
+ {
+   private_kernel_vpp_plugin_t *this;
+ 

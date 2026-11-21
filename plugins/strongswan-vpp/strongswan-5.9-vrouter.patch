@@ -1,0 +1,28 @@
+--- a/kernel_vpp_plugin.c
++++ b/kernel_vpp_plugin.c
+@@ -72,7 +72,8 @@
+   free (this);
+ }
+ 
+-PLUGIN_DEFINE (kernel_vpp)
++plugin_t *
++kernel_vpp_plugin_create ()
+ {
+   private_kernel_vpp_plugin_t *this;
+ 
+--- a/kernel_vpp_shared.c
++++ b/kernel_vpp_shared.c
+@@ -598,7 +598,12 @@
+ 
+   clib_mem_init (0, 256 << 20);
+ 
+-  if (vl_client_api_map ("/vpe-api"))
++  char *prefix = lib->settings->get_str (
++    lib->settings, "%s.plugins.kernel-vpp.api_prefix", NULL, lib->ns);
++  if (prefix)
++    vl_set_memory_root_path (prefix);
++
++  if (vl_client_api_map ("/vpe-api"))
+     {
+       DBG1 (DBG_KNL, "vac unable to map");
+       destroy (this);

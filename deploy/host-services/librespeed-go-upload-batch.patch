@@ -1,0 +1,68 @@
+diff --git a/web/web.go b/web/web.go
+index 9fcc21f..45525b5 100644
+--- a/web/web.go
++++ b/web/web.go
+@@ -5,12 +5,12 @@ import (
+ 	"encoding/json"
+ 	"io"
+ 	"io/fs"
+-	"io/ioutil"
+ 	"net"
+ 	"net/http"
+ 	"os"
+ 	"regexp"
+ 	"strconv"
++	"sync"
+ 
+ 	"github.com/go-chi/chi/v5"
+ 	"github.com/go-chi/chi/v5/middleware"
+@@ -26,8 +26,18 @@ import (
+ const (
+ 	// chunk size is 1 mib
+ 	chunkSize = 1048576
++
++	// Upload bodies are drained without retaining their contents. A larger
++	// buffer reduces read/epoll calls on fast upload paths.
++	uploadReadBufferSize = 64 * 1024
+ )
++
++var uploadReadBufferPool = sync.Pool{
++	New: func() any {
++		return make([]byte, uploadReadBufferSize)
++	},
++}
+ 
+ //go:embed assets
+ var defaultAssets embed.FS
+ 
+@@ -146,7 +156,7 @@ func sendPHPCORSHeaders(w http.ResponseWriter, r *http.Request) {
+ }
+ 
+ func empty(w http.ResponseWriter, r *http.Request) {
+-	_, err := io.Copy(ioutil.Discard, r.Body)
++	err := drainUploadBody(r.Body)
+ 	if err != nil {
+ 		w.WriteHeader(http.StatusBadRequest)
+ 		return
+@@ -158,6 +168,21 @@ func empty(w http.ResponseWriter, r *http.Request) {
+ 	w.WriteHeader(http.StatusOK)
+ }
++
++func drainUploadBody(r io.Reader) error {
++	buf := uploadReadBufferPool.Get().([]byte)
++	defer uploadReadBufferPool.Put(buf)
++
++	for {
++		_, err := r.Read(buf)
++		if err == io.EOF {
++			return nil
++		}
++		if err != nil {
++			return err
++		}
++	}
++}
+ 
+ func garbage(w http.ResponseWriter, r *http.Request) {
+ 	sendPHPCORSHeaders(w, r)
+ 	w.Header().Set("Content-Description", "File Transfer")

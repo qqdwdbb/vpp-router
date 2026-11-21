@@ -1,0 +1,233 @@
+--- a/drivers/net/r8169/r8169_compat.h
++++ b/drivers/net/r8169/r8169_compat.h
+@@ -31,6 +31,34 @@
+ 	u64 rx_broadcast;
+ 	u32 rx_multicast;
+ 	u16 tx_aborted;
++	u16 tx_underrun;
++	/* RTL8125 extended DMA tally, offsets 64 through 191. */
++	u64 tx_octets;
++	u64 rx_octets;
++	u64 rx_multicast64;
++	u64 tx_unicast64;
++	u64 tx_broadcast64;
++	u64 tx_multicast64;
++	u32 tx_pause_on;
++	u32 tx_pause_off;
++	u32 tx_pause_all;
++	u32 tx_deferred;
++	u32 tx_late_collision;
++	u32 tx_all_collision;
++	u32 tx_aborted32;
++	u32 align_errors32;
++	u32 rx_frame_too_long;
++	u32 rx_runt;
++	u32 rx_pause_on;
++	u32 rx_pause_off;
++	u32 rx_pause_all;
++	u32 rx_unknown_opcode;
++	u32 rx_mac_error;
++	u32 tx_underrun32;
++	u32 rx_mac_missed;
++	u32 rx_tcam_dropped;
++	u32 tdu;
++	u32 rdu;
+ };
+ 
+ enum mcfg {
+--- a/drivers/net/r8169/r8169_hw.c
++++ b/drivers/net/r8169/r8169_hw.c
+@@ -2473,7 +2473,7 @@
+ 	rtl_disable_cfg9346_write(hw);
+ }
+ 
+-void
++int
+ rtl_get_tally_stats(struct rtl_hw *hw, struct rte_eth_stats *rte_stats)
+ {
+ 	struct rtl_counters *counters;
+@@ -2484,7 +2484,10 @@
+ 	counters = hw->tally_vaddr;
+ 	paddr = hw->tally_paddr;
+ 	if (!counters)
+-		return;
++		return -ENODEV;
++
++	/* Discard CPU cache lines before the NIC writes the DMA snapshot. */
++	rtl_sync_tally_dma(hw);
+ 
+ 	RTL_W32(hw, CounterAddrHigh, (u64)paddr >> 32);
+ 	cmd = (u64)paddr & DMA_BIT_MASK(32);
+@@ -2497,18 +2500,22 @@
+ 
+ 		wait_cnt++;
+ 		if (wait_cnt > 20)
+-			break;
+-	}
++			return -ETIMEDOUT;
++	}
++
++	/* CounterDump completion orders MMIO, not non-coherent DMA memory. */
++	rtl_sync_tally_dma(hw);
+ 
+ 	/* RX errors */
+-	rte_stats->imissed = rte_le_to_cpu_64(counters->rx_missed);
+-	rte_stats->ierrors = rte_le_to_cpu_64(counters->rx_errors);
++	rte_stats->imissed = rte_le_to_cpu_16(counters->rx_missed);
++	rte_stats->ierrors = rte_le_to_cpu_32(counters->rx_errors);
+ 
+ 	/* TX errors */
+ 	rte_stats->oerrors = rte_le_to_cpu_64(counters->tx_errors);
+ 
+ 	rte_stats->ipackets = rte_le_to_cpu_64(counters->rx_packets);
+ 	rte_stats->opackets = rte_le_to_cpu_64(counters->tx_packets);
++	return 0;
+ }
+ 
+ void
+@@ -2536,6 +2543,8 @@
+ 
+ 	hw->tally_vaddr = mz->addr;
+ 	hw->tally_paddr = mz->iova;
++	memset(hw->tally_vaddr, 0, sizeof(struct rtl_counters));
++	rtl_sync_tally_dma(hw);
+ 
+ 	/* Fill tally addrs */
+ 	RTL_W32(hw, CounterAddrHigh, (u64)hw->tally_paddr >> 32);
+--- a/drivers/net/r8169/r8169_hw.h
++++ b/drivers/net/r8169/r8169_hw.h
+@@ -57,7 +57,8 @@
+ void rtl_set_link_option(struct rtl_hw *hw, u8 autoneg, u32 speed, u8 duplex,
+ 			 enum rtl_fc_mode fc);
+ 
+-void rtl_get_tally_stats(struct rtl_hw *hw, struct rte_eth_stats *rte_stats);
++void rtl_sync_tally_dma(struct rtl_hw *hw);
++int rtl_get_tally_stats(struct rtl_hw *hw, struct rte_eth_stats *rte_stats);
+ void rtl_clear_tally_stats(struct rtl_hw *hw);
+ 
+ int rtl_tally_init(struct rte_eth_dev *dev);
+--- a/drivers/net/r8169/r8169_rxtx.c
++++ b/drivers/net/r8169/r8169_rxtx.c
+@@ -66,6 +66,16 @@
+ 	RTE_SET_USED(length);
+ 	RTE_SET_USED(invalidate);
+ #endif
++}
++
++/* The tally buffer is device-owned, just like RX descriptors. Keep the
++ * control-path synchronization on the same platform-specific DMA mechanism. */
++void
++rtl_sync_tally_dma(struct rtl_hw *hw)
++{
++	if (!rtl_nc_dma)
++		rtl_nc_init();
++	rtl_nc_sync(hw->tally_vaddr, sizeof(struct rtl_counters), 1);
+ }
+ 
+ /* Bit mask to indicate what bits required for building TX context */
+--- a/drivers/net/r8169/r8169_ethdev.c
++++ b/drivers/net/r8169/r8169_ethdev.c
+@@ -40,6 +40,10 @@
+ 			     struct rte_eth_stats *rte_stats,
+ 			     struct eth_queue_stats *qstats __rte_unused);
+ static int rtl_dev_stats_reset(struct rte_eth_dev *dev);
++static int rtl_xstats_get_names(struct rte_eth_dev *dev,
++		struct rte_eth_xstat_name *names, unsigned int size);
++static int rtl_xstats_get(struct rte_eth_dev *dev,
++		struct rte_eth_xstat *stats, unsigned int size);
+ static int rtl_promiscuous_enable(struct rte_eth_dev *dev);
+ static int rtl_promiscuous_disable(struct rte_eth_dev *dev);
+ static int rtl_allmulticast_enable(struct rte_eth_dev *dev);
+@@ -105,6 +109,8 @@
+ 
+ 	.stats_get            = rtl_dev_stats_get,
+ 	.stats_reset          = rtl_dev_stats_reset,
++	.xstats_get_names     = rtl_xstats_get_names,
++	.xstats_get           = rtl_xstats_get,
+ 
+ 	.mtu_set              = rtl_dev_mtu_set,
+ 	.mac_addr_set         = rtl_mac_addr_set,
+@@ -585,11 +591,81 @@
+ {
+ 	struct rtl_adapter *adapter = RTL_DEV_PRIVATE(dev);
+ 	struct rtl_hw *hw = &adapter->hw;
+-
+-	rtl_get_tally_stats(hw, rte_stats);
++	int ret;
++
++	ret = rtl_get_tally_stats(hw, rte_stats);
++	if (ret)
++		return ret;
+ 	rtl_sw_stats_get(dev, rte_stats);
+ 
+ 	return 0;
++}
++
++/* RTL8125 diagnostics are distinct hardware counters, not additive losses. */
++static const struct {
++	const char *name;
++	size_t offset;
++	size_t size;
++} rtl_tally_xstats[] = {
++#define RTL_TALLY_FIELD(field) {#field, offsetof(struct rtl_counters, field), \
++				 sizeof(((struct rtl_counters *)0)->field)}
++	RTL_TALLY_FIELD(rx_octets),
++	RTL_TALLY_FIELD(tx_octets),
++	RTL_TALLY_FIELD(tx_pause_on),
++	RTL_TALLY_FIELD(tx_pause_off),
++	RTL_TALLY_FIELD(tx_pause_all),
++	RTL_TALLY_FIELD(rx_mac_missed),
++	RTL_TALLY_FIELD(rx_tcam_dropped),
++	RTL_TALLY_FIELD(rx_mac_error),
++	RTL_TALLY_FIELD(rx_frame_too_long),
++	RTL_TALLY_FIELD(rx_runt),
++	RTL_TALLY_FIELD(rx_pause_on),
++	RTL_TALLY_FIELD(rx_pause_off),
++	RTL_TALLY_FIELD(rx_pause_all),
++	RTL_TALLY_FIELD(tdu),
++	RTL_TALLY_FIELD(rdu),
++#undef RTL_TALLY_FIELD
++};
++
++static int
++rtl_xstats_get_names(struct rte_eth_dev *dev,
++		struct rte_eth_xstat_name *names, unsigned int size)
++{
++	struct rtl_adapter *adapter = RTL_DEV_PRIVATE(dev);
++	unsigned int count = rtl_is_8125(&adapter->hw) ? RTE_DIM(rtl_tally_xstats) : 0;
++	unsigned int i;
++
++	if (!names || size < count)
++		return count;
++	for (i = 0; i < count; i++)
++		snprintf(names[i].name, sizeof(names[i].name), "%s", rtl_tally_xstats[i].name);
++	return count;
++}
++
++static int
++rtl_xstats_get(struct rte_eth_dev *dev, struct rte_eth_xstat *stats, unsigned int size)
++{
++	struct rtl_adapter *adapter = RTL_DEV_PRIVATE(dev);
++	struct rtl_hw *hw = &adapter->hw;
++	struct rte_eth_stats basic = {0};
++	unsigned int count = rtl_is_8125(hw) ? RTE_DIM(rtl_tally_xstats) : 0;
++	unsigned int i;
++	int ret;
++
++	if (!stats || size < count || !count)
++		return count;
++	ret = rtl_get_tally_stats(hw, &basic);
++	if (ret)
++		return ret;
++	for (i = 0; i < count; i++) {
++		u64 value = 0;
++		memcpy(&value, (const char *)hw->tally_vaddr + rtl_tally_xstats[i].offset,
++		       rtl_tally_xstats[i].size);
++		stats[i].id = i;
++		stats[i].value = rtl_tally_xstats[i].size == sizeof(u64) ?
++			rte_le_to_cpu_64(value) : rte_le_to_cpu_32((u32)value);
++	}
++	return count;
+ }
+ 
+ /* Return 0 means link status changed, -1 means not changed */

@@ -1,0 +1,7 @@
+# Apply once after wg0 and the actual IPv6 WAN interface exist.
+# Replace WAN_INTERFACE with the VPP VLAN 100 interface; do not apply to LAN BVI.
+nat66 plugin enable
+set interface nat66 in wg0
+set interface nat66 out WAN_INTERFACE
+# pd-sync.py installs only explicit fd42:1111:2222:90::/64 peer /128 mappings from the static policy.
+# Native LAN IPv6 traffic is never a NAT66 inside interface.

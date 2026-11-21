@@ -1,0 +1,180 @@
+# VROUTER Linux Host Unified Firewall Ruleset (nftables)
+# Protects the Linux control plane, enforces DNS gate redirection and anti-bypass,
+# transparent proxy (TPROXY), and inter-zone host filtering.
+# Contains all production nftsets matching /etc/nftables.conf and dnsmasq configurations.
+
+table inet vrouter_firewall {
+    # 1. Management Access Sets
+    set trusted_mgmt {
+        type ipv4_addr
+        flags interval
+        elements = { 10.61.20.0/24 }
+    }
+
+    set trusted_mgmt6 {
+        type ipv6_addr
+        flags interval
+        elements = { fd42:1111:2222:10::/64 }
+    }
+
+    # 2. Security & Threat Defense Sets (matching /etc/nftables.conf)
+    set blacklist {
+        type ipv4_addr
+        flags interval
+    }
+
+    set black6 {
+        type ipv6_addr
+        flags interval
+    }
+
+    # 3. Policy Routing & Steering Sets (matching dnsmasq nftsets)
+    set altroute {
+        type ipv4_addr
+        flags interval, timeout
+        timeout 1h
+    }
+
+    set vpn {
+        type ipv4_addr
+        size 65535
+        flags interval, timeout
+        timeout 1h
+    }
+
+    set vpn6 {
+        type ipv6_addr
+        flags interval, timeout
+        timeout 1h
+    }
+
+    set uk {
+        type ipv4_addr
+        flags interval
+        elements = { 203.0.113.57 }
+    }
+
+    set local {
+        type ipv4_addr
+        flags interval
+        elements = { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 224.0.0.0/4 }
+    }
+
+    set carrier6 {
+        type ipv6_addr
+        flags interval
+        elements = { 2001:db8:ffff::/48 }
+    }
+
+    # 4. Transparent Proxy (TPROXY) Sets
+    set proxylist {
+        type ipv4_addr
+        size 65535
+        flags interval, timeout
+        timeout 1h
+    }
+
+    set proxylist6 {
+        type ipv6_addr
+        size 65535
+        flags interval, timeout
+        timeout 1h
+    }
+
+    chain input {
+        type filter hook input priority filter; policy drop;
+
+        # 1. State tracking
+        ct state established,related accept
+        ct state invalid drop
+
+        # 2. Loopback interface
+        iifname "lo" accept
+
+        # 3. Threat defense: drop blacklisted traffic
+        ip saddr @blacklist counter drop
+        ip6 saddr @black6 counter drop
+
+        # 4. LAN Management Bridge (br-mgmt / vpp-lan)
+        # Allow DHCP server for dnsmasq
+        iifname "br-mgmt" udp dport { 67, 68 } accept
+        # Allow redirected DNS to DNS gate (port 1053)
+        iifname "br-mgmt" meta l4proto { tcp, udp } th dport 1053 accept
+        # Allow DNS to dnsmasq if forwarded internally
+        iifname "br-mgmt" meta l4proto { tcp, udp } th dport 53 accept
+        # Allow SSH only from trusted management sources
+        iifname "br-mgmt" tcp dport 22 ip saddr @trusted_mgmt accept
+        iifname "br-mgmt" tcp dport 22 ip6 saddr @trusted_mgmt6 accept
+        # Allow ICMP & ICMPv6 essential control packets
+        iifname "br-mgmt" icmp type { echo-request, destination-unreachable, time-exceeded } accept
+        iifname "br-mgmt" icmpv6 type { echo-request, destination-unreachable, packet-too-big, time-exceeded, nd-router-solicit, nd-router-advert, nd-neighbor-solicit, nd-neighbor-advert } accept
+        # Block direct access to internal proxy ports (ipt2socks / tproxy)
+        iifname "br-mgmt" meta l4proto { tcp, udp } th dport { 1080, 2080 } counter drop
+        # Drop all other traffic on br-mgmt
+        iifname "br-mgmt" counter drop
+
+        # 5. IPsec Control TAP (IKE punt)
+        iifname "vrouter-ipsec-ctrl" udp dport { 500, 4500 } accept
+        iifname "vrouter-ipsec-ctrl" counter drop
+
+        # 6. WireGuard Proxy Loopback TAP
+        iifname "vpp-wg-proxy" udp dport 44441 accept
+        iifname "vpp-wg-proxy" counter drop
+
+        # 7. VPS Bridge (br0 / Nebula)
+        iifname "br0" ct state established,related accept
+        iifname "br0" ip saddr 10.61.50.0/24 accept
+        iifname "br0" ip6 saddr fd42:1111:2222:20::/64 accept
+        iifname "br0" counter drop
+
+        # Default drop counter
+        counter drop
+    }
+
+    chain forward {
+        type filter hook forward priority filter; policy drop;
+
+        # Threat defense: drop blacklisted traffic
+        ip saddr @blacklist counter drop
+        ip6 saddr @black6 counter drop
+
+        # Linux host is NOT the datapath router (VPP handles forwarding).
+        # Drop all unexpected forwarded traffic across Linux interfaces.
+        ct state established,related accept
+        iifname "br-mgmt" oifname "br-mgmt" icmp type destination-unreachable counter accept
+        iifname "br-mgmt" oifname "br-mgmt" icmpv6 type { destination-unreachable, packet-too-big } counter accept
+        counter drop
+    }
+
+    chain prerouting_nat {
+        type nat hook prerouting priority dstnat; policy accept;
+
+        # Redirect LAN DNS to DNS Route Gate (:1053)
+        iifname "br-mgmt" ip daddr 10.61.20.2 meta l4proto { tcp, udp } th dport 53 counter redirect to :1053
+        iifname "br-mgmt" ip6 daddr fd42:1111:2222:10::2 meta l4proto { tcp, udp } th dport 53 counter redirect to :1053
+
+        # Anti-bypass: rogue queries directed at arbitrary public DNS over br-mgmt redirected to gate
+        iifname "br-mgmt" ip daddr != 10.61.20.2 meta l4proto { tcp, udp } th dport 53 counter redirect to :1053
+    }
+
+    chain prerouting_mangle {
+        type filter hook prerouting priority mangle; policy accept;
+
+        # Local destination and domestic IPv6 bypass
+        fib daddr type local return
+        ip daddr @local return
+        ip6 daddr @carrier6 return
+        ip daddr { 224.0.0.0/4, 255.255.255.255 } return
+        ip6 daddr { ff00::/8, fe80::/10 } return
+
+        # VPP FIB/NAT owns uk/altroute/vpn/vpn6. Linux mangle only marks TPROXY.
+
+        # Reject QUIC (UDP 443) for proxy domains to force HTTP/2 / HTTP/3 fallback
+        iifname "br-mgmt" ip daddr @proxylist udp dport 443 counter reject with icmp port-unreachable
+        iifname "br-mgmt" ip6 daddr @proxylist6 udp dport 443 counter reject with icmpv6 port-unreachable
+
+        # Transparent Proxy (TPROXY) redirection for proxy domains
+        iifname "br-mgmt" ip daddr @proxylist meta l4proto { tcp, udp } counter tproxy ip to 127.0.0.1:2080 meta mark set 0x2080 accept
+        iifname "br-mgmt" ip6 daddr @proxylist6 meta l4proto { tcp, udp } counter tproxy ip6 to [::1]:2080 meta mark set 0x2080 accept
+    }
+}

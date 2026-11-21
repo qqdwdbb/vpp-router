@@ -1,0 +1,9 @@
+{
+  "sync_program": "/usr/local/sbin/vpp-nft-route-sync",
+  "route_config": "/etc/vpp/nftset-route-sync.json",
+  "domain_routes_file": "/etc/vpp/dns-route-domains.json",
+  "legacy_rules_directory": "/etc/dnsmasq.d",
+  "lease_file": "/var/lib/vpp-nft-route-sync/dns-leases.json",
+  "upstream": ["10.61.30.2", 53],
+  "listen": [["10.61.30.2", 1053], ["fe80::76:70ff:fe70:802%br-vpp-lan", 1053]]
+}

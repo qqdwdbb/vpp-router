@@ -1,0 +1,4 @@
+# Fixed Fake-IP pool
+2001:2::/48
+
+# Add the destination ranges to route through the proxy, one per line.

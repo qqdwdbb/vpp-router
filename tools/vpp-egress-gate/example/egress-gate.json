@@ -1,0 +1,50 @@
+{
+  "listen": [
+    ["10.61.20.2", 1053],
+    ["fd42:1111:2222:10::2", 1053]
+  ],
+  "hijack_dns": true,
+  "hijack_interfaces": ["br-mgmt"],
+  "upstream": ["10.61.20.2", 53],
+  "lease_file": "/var/lib/vpp-egress-gate/dns-leases.json",
+  "state_file": "/var/lib/vpp-egress-gate/state.json",
+  "state_socket": "/run/vpp-egress-gate/state.sock",
+  "vpp_socket": "/run/vpp/cli.sock",
+  "api_socket": "/run/vpp/api.sock",
+  "vpp_service": "vrouter-vpp.service",
+  "overlap_policy": "first",
+  "dns_upstream_policy": "first",
+  "lock_files": [],
+  "exclude_prefixes": [
+    "10.0.0.0/8",
+    "172.16.0.0/12",
+    "192.168.0.0/16",
+    "127.0.0.0/8",
+    "::1/128",
+    "fe80::/10"
+  ],
+  "routes": [
+    {
+      "name": "altroute",
+      "interface": "wg1",
+      "via": "10.62.30.1",
+      "domain_files": ["altroute.domains"]
+    },
+    {
+      "name": "vpn",
+      "interface": "loop10",
+      "via": ["10.61.50.1", "fd42:1111:2222:20::1"],
+      "domain_files": ["vpn.domains"]
+    },
+    {
+      "name": "proxy",
+      "interface": "tap2490",
+      "via": ["10.63.30.2", "fd42:1111:2222:30::2"],
+      "domain_files": ["proxy.domains"],
+      "fake_dns": ["127.0.0.1", 5354],
+      "fakeip_range": ["198.18.0.0/15", "2001:2::/48"],
+      "tproxy_port": 2082,
+      "tproxy_interface": "vpp-tproxy"
+    }
+  ]
+}

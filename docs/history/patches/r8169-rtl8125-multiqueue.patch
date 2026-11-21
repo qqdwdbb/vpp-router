@@ -1,0 +1,325 @@
+--- a/drivers/net/r8169/r8169_hw.h	2026-04-01 01:42:38
++++ b/drivers/net/r8169/r8169_hw.h	2026-10-16 16:37:34
+@@ -65,6 +65,25 @@
+ 
+ bool rtl_is_8125(struct rtl_hw *hw);
+ 
++static inline bool
++rtl_hw_supports_rss(struct rtl_hw *hw)
++{
++	switch (hw->chipset_name) {
++	case RTL8125A:
++	case RTL8125B:
++	case RTL8125BP:
++	case RTL8125D:
++	case RTL8125CP:
++	case RTL9151A:
++	case RTL8125K:
++	case RTL8126A:
++	case RTL8127:
++		return true;
++	default:
++		return false;
++	}
++}
++
+ u32 rtl_eri_read(struct rtl_hw *hw, int addr, int len, int type);
+ int rtl_eri_write(struct rtl_hw *hw, int addr, int len, u32 value, int type);
+ 
+--- a/drivers/net/r8169/r8169_hw.c	2026-04-01 01:42:38
++++ b/drivers/net/r8169/r8169_hw.c	2026-10-16 16:37:34
+@@ -892,21 +892,21 @@
+ static void
+ rtl8125_set_rx_desc_type(struct rtl_hw *hw)
+ {
+-	switch (hw->mcfg) {
+-	case CFG_METHOD_54:
+-	case CFG_METHOD_55:
+-	case CFG_METHOD_56:
+-	case CFG_METHOD_57:
+-	case CFG_METHOD_58:
+-	case CFG_METHOD_59:
+-	case CFG_METHOD_60:
+-	case CFG_METHOD_61:
+-		RTL_W8(hw, 0xD8, RTL_R8(hw, 0xD8) & ~EnableRxDescV4_0);
++	/* Type-4 chips select the 32-byte RSS descriptor via 0xD8. */
++	switch (hw->chipset_name) {
++	case RTL8125BP:
++	case RTL8125D:
++	case RTL8125CP:
++	case RTL9151A:
++	case RTL8125K:
++	case RTL8126A:
++	case RTL8127:
++		if (hw->HwSuppRxDescType == RX_DESC_RING_TYPE_4)
++			RTL_W8(hw, 0xD8, RTL_R8(hw, 0xD8) | EnableRxDescV4_0);
++		else
++			RTL_W8(hw, 0xD8, RTL_R8(hw, 0xD8) & ~EnableRxDescV4_0);
+ 		break;
+-	case CFG_METHOD_70:
+-	case CFG_METHOD_71:
+-	case CFG_METHOD_91:
+-		RTL_W8(hw, 0xD8, RTL_R8(hw, 0xD8) | EnableRxDescV4_0);
++	default:
+ 		break;
+ 	}
+ }
+@@ -1812,10 +1812,7 @@
+ 		hw->mcu_pme_setting = rtl_mac_ocp_read(hw, 0xE00A);
+ 	}
+ 
+-	if (hw->mcfg >= CFG_METHOD_70)
+-		hw->EnableRss = 1;
+-	else
+-		hw->EnableRss = 0;
++	hw->EnableRss = rtl_hw_supports_rss(hw);
+ 
+ 	if (hw->mcfg == CFG_METHOD_49 || hw->mcfg == CFG_METHOD_52) {
+ 		if ((rtl_mac_ocp_read(hw, 0xD442) & BIT_5) &&
+@@ -1851,12 +1848,36 @@
+ 		break;
+ 	}
+ 
+-	switch (hw->mcfg) {
+-	case CFG_METHOD_70:
+-	case CFG_METHOD_71:
+-	case CFG_METHOD_91:
+-		hw->HwSuppRxDescType = RX_DESC_RING_TYPE_4;
+-		hw->RxDescLength = RX_DESC_LEN_TYPE_4;
++	/*
++	 * RTL8125A/B report RSS in 32-byte type-3 RX descriptors.
++	 * Later 8125/8126/8127 use type-4. Linux r8125 only switches
++	 * away from type-1 when RSS is enabled.
++	 */
++	switch (hw->chipset_name) {
++	case RTL8125A:
++	case RTL8125B:
++		if (hw->EnableRss) {
++			hw->HwSuppRxDescType = RX_DESC_RING_TYPE_3;
++			hw->RxDescLength = RX_DESC_LEN_TYPE_3;
++		} else {
++			hw->HwSuppRxDescType = RX_DESC_RING_TYPE_1;
++			hw->RxDescLength = RX_DESC_LEN_TYPE_1;
++		}
++		break;
++	case RTL8125BP:
++	case RTL8125D:
++	case RTL8125CP:
++	case RTL9151A:
++	case RTL8125K:
++	case RTL8126A:
++	case RTL8127:
++		if (hw->EnableRss) {
++			hw->HwSuppRxDescType = RX_DESC_RING_TYPE_4;
++			hw->RxDescLength = RX_DESC_LEN_TYPE_4;
++		} else {
++			hw->HwSuppRxDescType = RX_DESC_RING_TYPE_1;
++			hw->RxDescLength = RX_DESC_LEN_TYPE_1;
++		}
+ 		break;
+ 	default:
+ 		hw->HwSuppRxDescType = RX_DESC_RING_TYPE_1;
+--- a/drivers/net/r8169/r8169_ethdev.c	2026-04-01 01:42:38
++++ b/drivers/net/r8169/r8169_ethdev.c	2026-10-16 16:37:34
+@@ -439,7 +439,7 @@
+ 		break;
+ 	}
+ 
+-	if (hw->mcfg >= CFG_METHOD_70) {
++	if (rtl_hw_supports_rss(hw)) {
+ 		dev_info->max_rx_queues = 4;
+ 		dev_info->max_tx_queues = 2;
+ 	} else {
+@@ -487,9 +487,11 @@
+ 				     dev_info->rx_queue_offload_capa);
+ 	dev_info->tx_offload_capa = rtl_get_tx_port_offloads();
+ 
+-	dev_info->hash_key_size = RTL_RSS_KEY_SIZE;
+-	dev_info->reta_size = RTL_MAX_INDIRECTION_TABLE_ENTRIES;
+-	dev_info->flow_type_rss_offloads = RTL_RSS_CTRL_OFFLOAD_ALL;
++	if (hw->EnableRss) {
++		dev_info->hash_key_size = RTL_RSS_KEY_SIZE;
++		dev_info->reta_size = RTL_MAX_INDIRECTION_TABLE_ENTRIES;
++		dev_info->flow_type_rss_offloads = RTL_RSS_OFFLOAD_ALL;
++	}
+ 
+ 	return 0;
+ }
+--- a/drivers/net/r8169/r8169_rxtx.c	2026-04-01 01:42:38
++++ b/drivers/net/r8169/r8169_rxtx.c	2026-10-16 16:38:14
+@@ -519,6 +519,11 @@
+ 		rx_config |= (EnableInnerVlan | EnableOuterVlan);
+ 	else
+ 		rx_config &= ~(EnableInnerVlan | EnableOuterVlan);
++
++	if (hw->HwSuppRxDescType == RX_DESC_RING_TYPE_3)
++		rx_config |= EnableRxDescV3;
++	else if (hw->HwSuppRxDescType == RX_DESC_RING_TYPE_4)
++		rx_config &= ~EnableRxDescV3;
+ 
+ 	RTL_W32(hw, RxConfig, rx_config);
+ 
+@@ -565,11 +570,17 @@
+ rtl_hw_set_rx_packet_filter(struct rtl_hw *hw)
+ {
+ 	int rx_mode;
++	u32 rx_config;
+ 
+ 	hw->hw_ops.hw_init_rxcfg(hw);
+ 
+ 	rx_mode = AcceptBroadcast | AcceptMyPhys;
+-	RTL_W32(hw, RxConfig, rx_mode | (RTL_R32(hw, RxConfig)));
++	rx_config = rx_mode | RTL_R32(hw, RxConfig);
++	if (hw->HwSuppRxDescType == RX_DESC_RING_TYPE_3)
++		rx_config |= EnableRxDescV3;
++	else if (hw->HwSuppRxDescType == RX_DESC_RING_TYPE_4)
++		rx_config &= ~EnableRxDescV3;
++	RTL_W32(hw, RxConfig, rx_config);
+ }
+ 
+ static void
+@@ -594,7 +605,7 @@
+ 	int i;
+ 
+ 	for (i = 0; i < RTL_MAX_INDIRECTION_TABLE_ENTRIES; i++)
+-		hw->rss_indir_tbl[i] = i & (nb_rx_queues - 1);
++		hw->rss_indir_tbl[i] = (u8)(i % nb_rx_queues);
+ 
+ 	for (i = 0; i < RTL_RSS_KEY_SIZE; i += sizeof(u64)) {
+ 		rand = rte_rand();
+@@ -700,16 +711,18 @@
+ 	else
+ 		rtl_clear_rdu = rtl8168_clear_rdu;
+ 
+-	/* RSS_control_0 */
+-	if (hw->EnableRss) {
+-		rtl_init_rss(hw, nb_rx_queues);
+-		rtl8125_config_rss(hw, nb_rx_queues);
+-	} else {
+-		RTL_W32(hw, RSS_CTRL_8125, 0x00);
+-	}
++	if (rtl_is_8125(hw)) {
++		/* RSS_control_0 */
++		if (hw->EnableRss) {
++			rtl_init_rss(hw, nb_rx_queues);
++			rtl8125_config_rss(hw, nb_rx_queues);
++		} else {
++			RTL_W32(hw, RSS_CTRL_8125, 0x00);
++		}
+ 
+-	/* VMQ_control */
+-	rtl8125_set_rx_q_num(hw, nb_rx_queues);
++		/* VMQ_control: hardware RX queue count */
++		rtl8125_set_rx_q_num(hw, nb_rx_queues);
++	}
+ 
+ 	RTL_W8(hw, ChipCmd, RTL_R8(hw, ChipCmd) | CmdRxEnb);
+ 
+@@ -809,6 +822,20 @@
+ 	return rte_le_to_cpu_32(opts2);
+ }
+ 
++#define RXS_8125B_RSS_UDP	(1U << 9)
++#define RXS_8125_RSS_IPV4	(1U << 10)
++#define RXS_8125_RSS_IPV6	(1U << 12)
++#define RXS_8125_RSS_TCP	(1U << 13)
++#define RTL8125_RXS_RSS_L3_TYPE_MASK \
++	(RXS_8125_RSS_IPV4 | RXS_8125_RSS_IPV6)
++
++#define RXS_8125B_RSS_UDP_V4	(1U << 27)
++#define RXS_8125_RSS_IPV4_V4	(1U << 28)
++#define RXS_8125_RSS_IPV6_V4	(1U << 29)
++#define RXS_8125_RSS_TCP_V4	(1U << 30)
++#define RTL8125_RXS_RSS_L3_TYPE_MASK_V4 \
++	(RXS_8125_RSS_IPV4_V4 | RXS_8125_RSS_IPV6_V4)
++
+ static u32
+ rtl_get_rx_desc_hash(struct rtl_hw *hw, struct rtl_rx_desc *desc)
+ {
+@@ -826,6 +853,36 @@
+ 	return rte_le_to_cpu_32(rss);
+ }
+ 
++static void
++rtl_rx_set_rss_hash(struct rtl_hw *hw, struct rtl_rx_desc *desc,
++		    struct rte_mbuf *mb)
++{
++	u32 rss_info;
++
++	if (!hw->EnableRss)
++		return;
++
++	switch (hw->HwSuppRxDescType) {
++	case RX_DESC_RING_TYPE_3:
++		rss_info = rte_le_to_cpu_16(((struct rtl_rx_descv3 *)desc)
++					    ->RxDescNormalDDWord2.HeaderInfo);
++		if (!(rss_info & RTL8125_RXS_RSS_L3_TYPE_MASK))
++			return;
++		break;
++	case RX_DESC_RING_TYPE_4:
++		rss_info = rte_le_to_cpu_32(((struct rtl_rx_descv4 *)desc)
++					    ->RxDescNormalDDWord1.RSSInfo);
++		if (!(rss_info & RTL8125_RXS_RSS_L3_TYPE_MASK_V4))
++			return;
++		break;
++	default:
++		return;
++	}
++
++	mb->hash.rss = rtl_get_rx_desc_hash(hw, desc);
++	mb->ol_flags |= RTE_MBUF_F_RX_RSS_HASH;
++}
++
+ static inline int
+ rtl_check_rx_desc_error(struct rtl_hw *hw, uint32_t opts1)
+ {
+@@ -933,14 +990,12 @@
+ 		rmb->pkt_len = pkt_len;
+ 		rmb->data_len = pkt_len;
+ 		rmb->port = rxq->port_id;
+-
+-		if (hw->EnableRss)
+-			rmb->hash.rss = rtl_get_rx_desc_hash(hw, rxd);
+ 
+ 		if (opts2 & RxVlanTag)
+ 			rmb->vlan_tci = rte_bswap16(opts2 & 0xffff);
+ 
+ 		rmb->ol_flags = rtl_rx_desc_error_to_pkt_flags(rxq, opts1, opts2);
++		rtl_rx_set_rss_hash(hw, rxd, rmb);
+ 
+ 		/*
+ 		 * Store the mbuf address into the next entry of the array
+@@ -1125,13 +1180,12 @@
+ 		}
+ 
+ 		first_seg->port = rxq->port_id;
+-		if (hw->EnableRss)
+-			first_seg->hash.rss = rtl_get_rx_desc_hash(hw, rxd);
+ 
+ 		if (opts2 & RxVlanTag)
+ 			first_seg->vlan_tci = rte_bswap16(opts2 & 0xffff);
+ 
+ 		first_seg->ol_flags = rtl_rx_desc_error_to_pkt_flags(rxq, opts1, opts2);
++		rtl_rx_set_rss_hash(hw, rxd, first_seg);
+ 
+ 		rte_prefetch1((char *)first_seg->buf_addr + first_seg->data_off);
+ 
+@@ -1445,7 +1499,8 @@
+ 
+ 	rtl_disable_cfg9346_write(hw);
+ 
+-	rtl8125_set_tx_q_num(hw, nb_tx_queues);
++	if (rtl_is_8125(hw))
++		rtl8125_set_tx_q_num(hw, nb_tx_queues);
+ 
+ 	RTL_W8(hw, ChipCmd, RTL_R8(hw, ChipCmd) | CmdTxEnb);
+ 
+@@ -1931,7 +1986,7 @@
+ 		else
+ 			RTL_W16(hw, txq->sw_tail_ptr_reg, txq->tx_tail);
+ 	else
+-		RTL_W16(hw, TPPOLL_8125, BIT_0);
++		RTL_W16(hw, TPPOLL_8125, (u16)(1U << txq->queue_id));
+ }
+ 
+ static void

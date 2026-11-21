@@ -1,0 +1,12 @@
+[Unit]
+Description=Periodically refresh the WireGuard hostname endpoint
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=30s
+AccuracySec=1s
+Persistent=true
+Unit=vpp-wireguard-endpoint-refresh.service
+
+[Install]
+WantedBy=multi-user.target

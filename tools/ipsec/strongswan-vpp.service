@@ -1,0 +1,20 @@
+[Unit]
+Description=strongSwan IKE control plane with VPP IPsec dataplane
+Requires=vpp.service
+After=vpp.service
+PartOf=vpp.service
+
+[Service]
+Type=simple
+Environment=STRONGSWAN_CONF=/etc/strongswan-vpp.conf
+ExecStartPre=/usr/local/sbin/vpp-ipsec-prepare
+ExecStart=/usr/bin/ip netns exec vpp-ipsec /usr/sbin/ipsec start --nofork
+ExecStartPost=/usr/local/sbin/vpp-ipsec-prepare --check-ready
+ExecReload=/usr/bin/ip netns exec vpp-ipsec /usr/sbin/ipsec reload
+Restart=on-failure
+RestartSec=3
+TimeoutStartSec=90
+LimitNOFILE=65536
+
+[Install]
+WantedBy=vpp.service

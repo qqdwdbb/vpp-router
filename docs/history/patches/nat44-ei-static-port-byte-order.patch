@@ -1,0 +1,19 @@
+--- a/src/plugins/nat/nat44-ei/nat44_ei.c
++++ b/src/plugins/nat/nat44-ei/nat44_ei.c
+@@ -2138,6 +2138,8 @@
+ int
+ nat44_ei_reserve_port (ip4_address_t addr, u16 port, nat_protocol_t proto)
+ {
++  /* Static mapping keys use network order; the allocator bitmap uses host order. */
++  port = clib_net_to_host_u16 (port);
+   u32 ti = nat44_ei_get_thread_idx_by_port (port);
+   nat44_ei_main_t *nm = &nat44_ei_main;
+   nat44_ei_address_t *a = 0;
+@@ -2168,6 +2170,7 @@
+ int
+ nat44_ei_free_port (ip4_address_t addr, u16 port, nat_protocol_t proto)
+ {
++  port = clib_net_to_host_u16 (port);
+   u32 ti = nat44_ei_get_thread_idx_by_port (port);
+   nat44_ei_main_t *nm = &nat44_ei_main;
+   nat44_ei_address_t *a = 0;

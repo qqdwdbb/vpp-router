@@ -1,0 +1,10 @@
+# Replace this table atomically before enabling wg1; safe to reload on restart.
+# Enable net.ipv4.conf.vpp-wg-proxy.route_localnet=1 on this TAP only.
+add table ip vpp_wg_proxy
+flush table ip vpp_wg_proxy
+table ip vpp_wg_proxy {
+    chain prerouting {
+        type nat hook prerouting priority dstnat; policy accept;
+        iifname "vpp-wg-proxy" ip saddr 10.63.50.1 ip daddr 10.63.50.2 udp dport 44441 counter dnat to 127.0.0.1:44441
+    }
+}

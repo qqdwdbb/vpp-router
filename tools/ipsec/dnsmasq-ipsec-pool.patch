@@ -1,0 +1,5 @@
+--- a/etc/dnsmasq.d/vpp-lan.conf
++++ b/etc/dnsmasq.d/vpp-lan.conf
+@@ -18 +18 @@
+-dhcp-range=::100,::1ff,constructor:br-vpp-lan,64,12h
++dhcp-range=::1000,::1fff,constructor:br-vpp-lan,64,12h

@@ -1,0 +1,14 @@
+--- a/src/plugins/dpdk/device/driver.c
++++ b/src/plugins/dpdk/device/driver.c
+@@ -22,2 +22,11 @@
+ static dpdk_driver_t dpdk_drivers[] = {
++  {
++    .drivers = DPDK_DRIVERS ({ "net_n1_dwmac", "N1 Synopsys DWMAC1000" }),
++    .interface_number_from_port_id = 1,
++    .mq_mode_none = 1,
++    .disable_rx_scatter = 1,
++    .enable_rxq_int = 1,
++    .n_rx_desc = 256,
++    .n_tx_desc = 256,
++  },
+   {

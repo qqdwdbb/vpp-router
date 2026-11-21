@@ -1,0 +1,72 @@
+--- a/src/plugins/tap/internal.h
++++ b/src/plugins/tap/internal.h
+@@ -77,6 +77,7 @@
+   i8 offset;
+   CLIB_CACHE_LINE_ALIGN_MARK (cacheline1);
+   u32 queue_index;
++  u32 refill_pending;
+ } tap_rxq_t;
+ 
+ typedef struct
+--- a/src/plugins/tap/rx_node.c
++++ b/src/plugins/tap/rx_node.c
+@@ -42,7 +42,10 @@
+   used = rxq->desc_in_use;
+ 
+   if (sz - used < sz / 8)
+-    return;
++    {
++      __atomic_store_n (&rxq->refill_pending, 0, __ATOMIC_RELEASE);
++      return;
++    }
+ 
+   /* deliver free buffers in chunks of 64 */
+   n_refill = clib_min (sz - used, 64);
+@@ -57,7 +60,10 @@
+       vlib_error_count (vm, node_index, TAP_RX_ERROR_BUFFER_ALLOC,
+ 			n_refill - n_slots);
+       if (n_slots == 0)
+-	return;
++        {
++          __atomic_store_n (&rxq->refill_pending, 1, __ATOMIC_RELEASE);
++          return;
++        }
+     }
+ 
+   while (n_slots)
+@@ -419,3 +425,35 @@
+   .n_errors = TAP_RX_N_ERROR,
+   .error_strings = tap_input_error_strings,
+ };
++
++/* A drained interrupt queue cannot produce another completion interrupt.
++ * Retry only failed refills; the owning worker remains the sole ring writer.
++ * Main-thread interface mutations cannot interleave with this process scan.
++ */
++static uword
++tap_refill_retry_process (vlib_main_t *vm, vlib_node_runtime_t *node,
++                          vlib_frame_t *frame)
++{
++  vnet_main_t *vnm = vnet_get_main ();
++  while (1)
++    {
++      vlib_process_suspend (vm, 0.01);
++      tap_if_t *tif;
++      pool_foreach (tif, tap_main.interfaces)
++        {
++          if (!tif->admin_up)
++            continue;
++          tap_rxq_t *rxq;
++          vec_foreach (rxq, tif->rx_queues)
++            if (__atomic_load_n (&rxq->refill_pending, __ATOMIC_ACQUIRE))
++              vnet_hw_if_rx_queue_set_int_pending (vnm, rxq->queue_index);
++        }
++    }
++  return 0;
++}
++
++VLIB_REGISTER_NODE (tap_refill_retry_node) = {
++  .function = tap_refill_retry_process,
++  .type = VLIB_NODE_TYPE_PROCESS,
++  .name = "tap-refill-retry",
++};

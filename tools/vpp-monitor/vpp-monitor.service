@@ -1,0 +1,35 @@
+[Unit]
+Description=VPP stats dashboard
+# No ordering on VPP: the program waits for the stats socket and follows VPP restarts.
+After=network.target
+
+[Service]
+ExecStart=/usr/local/bin/vpp-monitor
+StateDirectory=vpp-monitor
+StateDirectoryMode=0700
+Restart=always
+RestartSec=5
+
+# Stay out of the way on a small host. Set CPUAffinity= to cores VPP does not poll on,
+# for example CPUAffinity=0 when the workers run on the other cores. No CPUQuota=: a
+# login's password hash is slow on purpose, and 20% made it 0.25 s -> 5.8 s on an i5.
+Environment=GOGC=50 GOMEMLIMIT=48MiB
+Nice=10
+MemoryMax=96M
+
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+
+[Install]
+WantedBy=multi-user.target

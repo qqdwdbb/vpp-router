@@ -1,0 +1,98 @@
+--- a/drivers/net/r8169/r8169_rxtx.c
++++ b/drivers/net/r8169/r8169_rxtx.c
+@@ -585,28 +585,45 @@
+ /* Publish only cache lines entirely consumed by software. A per-descriptor
+  * writeback could overwrite status in a neighbouring NIC-owned descriptor. */
+ static void
+-rtl_nc_rearm(struct rtl_rx_queue *rxq, uint16_t consumed)
++rtl_nc_rearm(struct rtl_rx_queue *rxq, uint16_t first, uint16_t count)
+ {
+ 	struct rtl_hw *hw = rxq->hw;
+-	unsigned int per_line = rtl_nc_line / hw->RxDescLength;
+-	unsigned int first, i;
+-	if ((consumed + 1) % per_line)
+-		return;
+-	first = consumed + 1 - per_line;
+-	for (i = first; i <= consumed; i++) {
++	unsigned int i;
++
++	for (i = first; i < (unsigned int)first + count; i++) {
+ 		struct rte_mbuf *mb = rxq->sw_ring[i].mbuf;
+ 		rtl_nc_sync_range((char *)mb->buf_addr + RTE_PKTMBUF_HEADROOM,
+ 				  hw->rx_buf_sz, 1);
+ 	}
+-	/* All buffers must be ready before any OWN store: a dirty descriptor
+-	 * line can reach memory through eviction before the explicit clean. */
++	/* Prepare every buffer before any OWN store: dirty descriptor lines
++	 * may reach memory through eviction before the explicit clean. */
+ 	rtl_nc_sync_complete();
+-	for (i = first; i <= consumed; i++) {
++	for (i = first; i < (unsigned int)first + count; i++) {
+ 		struct rte_mbuf *mb = rxq->sw_ring[i].mbuf;
+ 		rtl_map_to_asic(hw, rtl_get_rxdesc(hw, rxq->hw_ring, i),
+ 			rte_cpu_to_le_64(rte_mbuf_data_iova_default(mb)));
+ 	}
+-	rtl_nc_sync(rtl_get_rxdesc(hw, rxq->hw_ring, first), rtl_nc_line, 0);
++	rtl_nc_sync(rtl_get_rxdesc(hw, rxq->hw_ring, first),
++		    count * hw->RxDescLength, 0);
++}
++
++/* Collect at most four complete lines; flush at the ring end so a batch
++ * never wraps or leaves consumed entries pending when polling them again. */
++static inline void
++rtl_nc_rearm_consumed(struct rtl_rx_queue *rxq, uint16_t consumed,
++		      uint16_t *first, uint16_t *count)
++{
++	unsigned int per_line = rtl_nc_line / rxq->hw->RxDescLength;
++
++	if ((consumed + 1) % per_line)
++		return;
++	if (!*count)
++		*first = consumed + 1 - per_line;
++	*count += per_line;
++	if (*count >= 4 * per_line || consumed + 1 == rxq->nb_rx_desc) {
++		rtl_nc_rearm(rxq, *first, *count);
++		*count = 0;
++	}
+ }
+ 
+ static void
+@@ -1028,6 +1045,7 @@
+ 	uint32_t opts2;
+ 	uint64_t dma_addr;
+ 	uintptr_t synced_line = UINTPTR_MAX;
++	uint16_t rearm_first = 0, rearm_count = 0;
+ 
+ 	RTE_ASSERT(RTL_R8(hw, ChipCmd) & CmdRxEnb);
+ 
+@@ -1058,7 +1076,8 @@
+ 		if (unlikely(rtl_check_rx_desc_error(hw, opts1))) {
+ 			stats->rx_errors++;
+ 			if (rtl_nc_dma)
+-				rtl_nc_rearm(rxq, tail);
++				rtl_nc_rearm_consumed(rxq, tail,
++					      &rearm_first, &rearm_count);
+ 			else
+ 				rtl_mark_to_asic(hw, rxd);
+ 			nb_hold++;
+@@ -1124,7 +1143,8 @@
+ 		rmb->ol_flags = rtl_rx_desc_error_to_pkt_flags(rxq, opts1, opts2);
+ 		rtl_rx_set_rss_hash(hw, rxd, rmb);
+ 		if (rtl_nc_dma)
+-			rtl_nc_rearm(rxq, (tail + nb_rx_desc - 1) % nb_rx_desc);
++			rtl_nc_rearm_consumed(rxq, (tail + nb_rx_desc - 1) % nb_rx_desc,
++				      &rearm_first, &rearm_count);
+ 
+ 		/*
+ 		 * Store the mbuf address into the next entry of the array
+@@ -1136,6 +1156,10 @@
+ 		stats->rx_packets++;
+ 	}
+ 
++	/* Flush even on an error-only burst or allocation failure. Partial
++	 * descriptor lines remain withheld until all neighbours are consumed. */
++	if (rtl_nc_dma && rearm_count)
++		rtl_nc_rearm(rxq, rearm_first, rearm_count);
+ 	if (nb_rx)
+ 		rtl_nc_sync_complete();
+ 	rxq->rx_tail = tail;

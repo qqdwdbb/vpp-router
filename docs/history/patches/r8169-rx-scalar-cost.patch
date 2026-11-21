@@ -1,0 +1,100 @@
+--- a/drivers/net/r8169/r8169_rxtx.c
++++ b/drivers/net/r8169/r8169_rxtx.c
+@@ -611,11 +611,11 @@
+  * never wraps or leaves consumed entries pending when polling them again. */
+ static inline void
+ rtl_nc_rearm_consumed(struct rtl_rx_queue *rxq, uint16_t consumed,
+-		      uint16_t *first, uint16_t *count)
+-{
+-	unsigned int per_line = rtl_nc_line / rxq->hw->RxDescLength;
+-
+-	if ((consumed + 1) % per_line)
++		      unsigned int per_line, uint16_t *first, uint16_t *count)
++{
++	/* Non-coherent init requires power-of-two type-3 descriptor stride
++	 * dividing the CTR-derived power-of-two cache line. */
++	if ((consumed + 1) & (per_line - 1))
+ 		return;
+ 	if (!*count)
+ 		*first = consumed + 1 - per_line;
+@@ -1046,10 +1046,13 @@
+ 	uint64_t dma_addr;
+ 	uintptr_t synced_line = UINTPTR_MAX;
+ 	uint16_t rearm_first = 0, rearm_count = 0;
++	const unsigned int per_line = rtl_nc_dma ? rtl_nc_line / hw->RxDescLength : 0;
++	uint64_t rx_bytes = 0;
+ 
+ 	RTE_ASSERT(RTL_R8(hw, ChipCmd) & CmdRxEnb);
+ 
+ 	while (nb_rx < nb_pkts) {
++		uint16_t consumed = tail;
+ 		rxd = rtl_get_rxdesc(hw, rxq->hw_ring, tail);
+ 		if (rtl_nc_dma) {
+ 			uintptr_t line = (uintptr_t)rxd &
+@@ -1076,12 +1079,13 @@
+ 		if (unlikely(rtl_check_rx_desc_error(hw, opts1))) {
+ 			stats->rx_errors++;
+ 			if (rtl_nc_dma)
+-				rtl_nc_rearm_consumed(rxq, tail,
++				rtl_nc_rearm_consumed(rxq, tail, per_line,
+ 					      &rearm_first, &rearm_count);
+ 			else
+ 				rtl_mark_to_asic(hw, rxd);
+ 			nb_hold++;
+-			tail = (tail + 1) % nb_rx_desc;
++			if (++tail == nb_rx_desc)
++				tail = 0;
+ 			continue;
+ 		}
+ 
+@@ -1102,7 +1106,8 @@
+ 		rmb = rxe->mbuf;
+ 
+ 		/* Prefetch next mbufs */
+-		tail = (tail + 1) % nb_rx_desc;
++		if (++tail == nb_rx_desc)
++			tail = 0;
+ 		rte_prefetch0(sw_ring[tail].mbuf);
+ 
+ 		/*
+@@ -1131,8 +1136,8 @@
+ 		 * caller after the burst's completion barrier. */
+ 		rtl_nc_sync_range(rte_pktmbuf_mtod(rmb, void *), pkt_len, 1);
+ 		rte_prefetch1((char *)rmb->buf_addr + rmb->data_off);
+-		rmb->nb_segs = 1;
+-		rmb->next = NULL;
++		/* raw alloc guarantees nb_segs=1 and next=NULL; the RX ring
++		 * preserves those fields until this single-segment receive. */
+ 		rmb->pkt_len = pkt_len;
+ 		rmb->data_len = pkt_len;
+ 		rmb->port = rxq->port_id;
+@@ -1143,7 +1148,7 @@
+ 		rmb->ol_flags = rtl_rx_desc_error_to_pkt_flags(rxq, opts1, opts2);
+ 		rtl_rx_set_rss_hash(hw, rxd, rmb);
+ 		if (rtl_nc_dma)
+-			rtl_nc_rearm_consumed(rxq, (tail + nb_rx_desc - 1) % nb_rx_desc,
++			rtl_nc_rearm_consumed(rxq, consumed, per_line,
+ 				      &rearm_first, &rearm_count);
+ 
+ 		/*
+@@ -1152,8 +1157,7 @@
+ 		 */
+ 		rx_pkts[nb_rx++] = rmb;
+ 
+-		stats->rx_bytes += pkt_len;
+-		stats->rx_packets++;
++		rx_bytes += pkt_len;
+ 	}
+ 
+ 	/* Flush even on an error-only burst or allocation failure. Partial
+@@ -1163,6 +1167,10 @@
+ 	if (nb_rx)
+ 		rtl_nc_sync_complete();
+ 	rxq->rx_tail = tail;
++	if (nb_rx) {
++		stats->rx_bytes += rx_bytes;
++		stats->rx_packets += nb_rx;
++	}
+ 
+ 	nb_hold = (uint16_t)(nb_hold + rxq->nb_rx_hold);
+ 	if (nb_hold > rxq->rx_free_thresh) {

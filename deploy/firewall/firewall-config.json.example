@@ -1,0 +1,26 @@
+{
+  "vpp": {
+    "socket": "/run/vpp/cli.sock",
+    "vppctl": "/opt/vpp-nic1-test/vpp/bin/vppctl",
+    "wan_interface": "nic1",
+    "wan_ipv4": "10.61.10.2",
+    "wan_gateway4": "10.61.10.1",
+    "lan_bvi": "loop200",
+    "lan_interfaces": ["REPLACE_WITH_ACTUAL_LAN_PORT"],
+    "lan_ipv4": "10.61.20.0/24",
+    "lan_ipv6": "fd42:1111:2222:10::/64",
+    "vpp_gw4": "10.61.20.1",
+    "vpp_gw6": "fd42:1111:2222:10::1",
+    "blocked_lan_tcp_destinations": ["8.8.8.8/32"],
+    "wireguard_ports": [42008, 42007, 42006],
+    "ipsec_ike_ports": [500, 4500],
+    "enabled": true
+  },
+  "nftables": {
+    "ruleset_path": "/opt/vpp-vrouter-migration/source/scripts/vrouter/firewall/vrouter-firewall.nft",
+    "table_name": "vrouter_firewall",
+    "trusted_mgmt_ipv4": ["10.61.20.0/24"],
+    "trusted_mgmt_ipv6": ["fd42:1111:2222:10::/64"],
+    "enabled": true
+  }
+}

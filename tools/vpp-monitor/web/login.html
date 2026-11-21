@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VPP 监控登录</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="login">
+  <form id="form" class="card">
+    <h1>VPP 监控</h1>
+    <label>用户名 <input id="user" name="username" autocomplete="username" required autofocus></label>
+    <label>密码 <input id="password" name="password" type="password" autocomplete="current-password" required></label>
+    <button id="submit">登录</button>
+    <p class="note" id="message" role="status"></p>
+  </form>
+</main>
+<script src="login.js"></script>
+</body>
+</html>

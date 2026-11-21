@@ -1,0 +1,73 @@
+vlib: make the busy-loop count before the next file poll settable
+
+After a main-loop iteration with two or more vectors, vlib_file_poll()
+skips the next 1024 iterations before it checks epoll or lets the thread
+sleep. On a small core that is about a millisecond. With interrupt or
+adaptive RX a worker under moderate, bursty load then never sleeps and
+shows near 100% CPU while doing little work, and an RX queue that was just
+switched to interrupt state is not served for that long, which can
+overflow its ring. `set file-poll busy-loops <n>` changes the count at run
+time (default 1024, unchanged behaviour); `show file-poll` prints it.
+
+--- a/src/vlib/file.c
++++ b/src/vlib/file.c
+@@ -22,6 +22,12 @@
+ 
+ clib_file_main_t file_main;
+ 
++/* Main-loop iterations a busy thread runs before it checks epoll (and may
++ * sleep) again. The historical value keeps a thread that just saw two or more
++ * vectors spinning for about 1024 loops, which is about a millisecond on a
++ * small core; between bursts of a moderate load it then never sleeps. */
++static u32 file_poll_busy_loops = 1024;
++
+ static void
+ vlib_file_update (clib_file_t *f, clib_file_update_type_t update_type)
+ {
+@@ -193,7 +199,7 @@
+ 
+ skip_loops:
+   /* Don't come back for a respectable number of dispatch cycles */
+-  vm->file_poll_skip_loops = 1024;
++  vm->file_poll_skip_loops = file_poll_busy_loops;
+ 
+ epoll:
+   n_fds_ready = epoll_wait (vm->epoll_fd, epoll_events,
+@@ -314,8 +320,37 @@
+   vec_free (s);
+ 
+   return error;
++}
++
++static clib_error_t *
++set_file_poll_command (vlib_main_t *vm, unformat_input_t *input, vlib_cli_command_t *cmd)
++{
++  u32 loops;
++  if (!unformat (input, "busy-loops %u", &loops) || loops < 1 || loops > 1 << 20)
++    return clib_error_return (0, "expected busy-loops <1-1048576>");
++  file_poll_busy_loops = loops;
++  return 0;
+ }
+ 
++VLIB_CLI_COMMAND (cli_set_file_poll, static) = {
++  .path = "set file-poll",
++  .short_help = "set file-poll busy-loops <n>",
++  .function = set_file_poll_command,
++};
++
++static clib_error_t *
++show_file_poll_command (vlib_main_t *vm, unformat_input_t *input, vlib_cli_command_t *cmd)
++{
++  vlib_cli_output (vm, "file-poll busy-loops %u", file_poll_busy_loops);
++  return 0;
++}
++
++VLIB_CLI_COMMAND (cli_show_file_poll, static) = {
++  .path = "show file-poll",
++  .short_help = "show file-poll",
++  .function = show_file_poll_command,
++};
++
+ VLIB_CLI_COMMAND (cli_show_files, static) = {
+   .path = "show files",
+   .short_help = "Show files in use",

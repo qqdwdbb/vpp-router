@@ -1,0 +1,36 @@
+{
+  "routes": [
+    {
+      "name": "altroute",
+      "interface": "wg1",
+      "via": "10.62.30.1",
+      "fib_table": 0,
+      "domain_files": ["altroute.domains"]
+    },
+    {
+      "name": "vpn6",
+      "interface": "loop10",
+      "via": "fd42:1111:2222:20::1",
+      "fib_table": 0,
+      "domain_files": ["vpn6.domains"]
+    },
+    {
+      "name": "sample-edge",
+      "interface": "loop10",
+      "via": "10.61.50.1",
+      "fib_table": 0,
+      "domain_keywords": ["demo-edge-node", "dualstack.demo-edge"],
+      "dns_upstream": ["127.0.0.1", 5354],
+      "fakeip_range": "198.18.0.0/15"
+    },
+    {
+      "name": "sample-edge6",
+      "interface": "loop10",
+      "via": "fd42:1111:2222:20::1",
+      "fib_table": 0,
+      "domain_keywords": ["demo-edge-node", "dualstack.demo-edge"],
+      "dns_upstream": ["127.0.0.1", 5354],
+      "fakeip_range": "2001:2::/48"
+    }
+  ]
+}

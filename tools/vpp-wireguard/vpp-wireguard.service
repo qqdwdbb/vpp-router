@@ -1,0 +1,12 @@
+[Unit]
+Description=VPP WireGuard configurations
+# VPP keeps nothing across a restart. This puts the started configurations back, and watches
+# for that on its own, so it needs no ordering on VPP.
+
+[Service]
+ExecStart=/usr/local/bin/vpp-wireguard
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

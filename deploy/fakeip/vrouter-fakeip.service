@@ -1,0 +1,17 @@
+[Unit]
+Description=Fake-IP DNS and transparent proxy with native Trojan outbound
+After=network.target
+Before=vrouter-dns-route-gate.service
+
+[Service]
+ExecStartPre=/usr/local/bin/sing-box check -c /etc/vpp/sing-box-fakeip.json
+ExecStart=/usr/local/bin/sing-box run -c /etc/vpp/sing-box-fakeip.json
+Restart=on-failure
+RestartSec=2
+StateDirectory=vrouter-fakeip
+StateDirectoryMode=0700
+UMask=0077
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

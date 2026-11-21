@@ -1,0 +1,7 @@
+# Preserve the former LAN gateway SOCKS endpoint without owning its address.
+table ip vrouter_socks_frontend {
+    chain prerouting {
+        type nat hook prerouting priority -105; policy accept;
+        iifname "br-mgmt" ip saddr 10.61.20.0/24 ip daddr 10.61.20.1 tcp dport 1080 counter dnat to 10.61.20.2:1080
+    }
+}

@@ -1,0 +1,181 @@
+--- a/drivers/net/r8169/r8169_rxtx.c
++++ b/drivers/net/r8169/r8169_rxtx.c
+@@ -5,6 +5,7 @@
+ #include <stdio.h>
+ #include <errno.h>
+ #include <stdint.h>
++#include <stdlib.h>
+ 
+ #include <rte_eal.h>
+ 
+@@ -24,6 +25,47 @@
+ #include "r8169_ethdev.h"
+ #include "r8169_hw.h"
+ #include "r8169_logs.h"
++
++/* Isolated RK3588 experiment; enable only after kernel coherence probing. */
++static int rtl_nc_dma;
++static unsigned int rtl_nc_line;
++
++static void
++rtl_nc_init(void)
++{
++#if defined(RTE_ARCH_ARM64)
++	const char *value = getenv("R8169_DMA_NONCOHERENT");
++	uint64_t ctr;
++	if (!value || strcmp(value, "1"))
++		return;
++	__asm__ volatile("mrs %0, ctr_el0" : "=r" (ctr));
++	rtl_nc_line = 4U << ((ctr >> 16) & 15);
++	rtl_nc_dma = 1;
++#endif
++}
++
++static inline void
++rtl_nc_sync(const void *address, size_t length, int invalidate)
++{
++#if defined(RTE_ARCH_ARM64)
++	uintptr_t start, end;
++	if (!rtl_nc_dma || !length)
++		return;
++	start = (uintptr_t)address & ~(uintptr_t)(rtl_nc_line - 1);
++	end = (uintptr_t)address + length;
++	for (; start < end; start += rtl_nc_line) {
++		if (invalidate)
++			__asm__ volatile("dc civac, %0" :: "r" (start) : "memory");
++		else
++			__asm__ volatile("dc cvac, %0" :: "r" (start) : "memory");
++	}
++	__asm__ volatile("dsb sy" ::: "memory");
++#else
++	RTE_SET_USED(address);
++	RTE_SET_USED(length);
++	RTE_SET_USED(invalidate);
++#endif
++}
+ 
+ /* Bit mask to indicate what bits required for building TX context */
+ #define RTL_TX_OFFLOAD_MASK (RTE_MBUF_F_TX_IPV6 |		\
+@@ -501,14 +543,36 @@
+ 		rtl_map_to_asic(hw, rtl_get_rxdesc(hw, rxq->hw_ring, i),
+ 				dma_addr);
+ 		rxe[i].mbuf = mbuf;
++		rtl_nc_sync((char *)mbuf->buf_addr + RTE_PKTMBUF_HEADROOM, hw->rx_buf_sz, 1);
+ 	}
+ 
+ 	rtl_mark_as_last_descriptor(hw, rtl_get_rxdesc(hw, rxq->hw_ring, i));
++	rtl_nc_sync(rxq->hw_ring, hw->RxDescLength * (rxq->nb_rx_desc + 1), 0);
+ 
+ 	return 0;
+ }
+ 
++/* Publish only cache lines entirely consumed by software. A per-descriptor
++ * writeback could overwrite status in a neighbouring NIC-owned descriptor. */
+ static void
++rtl_nc_rearm(struct rtl_rx_queue *rxq, uint16_t consumed)
++{
++	struct rtl_hw *hw = rxq->hw;
++	unsigned int per_line = rtl_nc_line / hw->RxDescLength;
++	unsigned int first, i;
++	if ((consumed + 1) % per_line)
++		return;
++	first = consumed + 1 - per_line;
++	for (i = first; i <= consumed; i++) {
++		struct rte_mbuf *mb = rxq->sw_ring[i].mbuf;
++		rtl_nc_sync((char *)mb->buf_addr + RTE_PKTMBUF_HEADROOM, hw->rx_buf_sz, 1);
++		rtl_map_to_asic(hw, rtl_get_rxdesc(hw, rxq->hw_ring, i),
++			rte_cpu_to_le_64(rte_mbuf_data_iova_default(mb)));
++	}
++	rtl_nc_sync(rtl_get_rxdesc(hw, rxq->hw_ring, first), rtl_nc_line, 0);
++}
++
++static void
+ rtl8125_hw_set_features(struct rtl_hw *hw, uint64_t offloads)
+ {
+ 	u16 cp_cmd;
+@@ -638,6 +702,14 @@
+ 	u32 csi_tmp, max_rx_pkt_size;
+ 	u16 nb_rx_queues = dev->data->nb_rx_queues;
+ 	u16 desc_start_addr_lo[QUEUE_NUM_LIMIT];
++
++	rtl_nc_init();
++	if (rtl_nc_dma && (hw->HwSuppRxDescType != RX_DESC_RING_TYPE_3 ||
++	    !hw->EnableTxNoClose || rtl_nc_line % hw->RxDescLength ||
++	    (dev->data->dev_conf.rxmode.offloads & RTE_ETH_RX_OFFLOAD_SCATTER))) {
++		PMD_INIT_LOG(ERR, "non-coherent experiment requires type-3 RX, TX no-close, no scatter");
++		return -ENOTSUP;
++	}
+ 
+ 	desc_start_addr_lo[0] = RxDescAddrLow;
+ 	for (i = 1; i < nb_rx_queues; i++)
+@@ -923,6 +995,7 @@
+ 
+ 	while (nb_rx < nb_pkts) {
+ 		rxd = rtl_get_rxdesc(hw, rxq->hw_ring, tail);
++		rtl_nc_sync(rxd, hw->RxDescLength, 1);
+ 
+ 		opts1 = rtl_rx_desc_opts1(hw, rxd);
+ 		if (opts1 & DescOwn)
+@@ -937,7 +1010,10 @@
+ 
+ 		if (unlikely(rtl_check_rx_desc_error(hw, opts1))) {
+ 			stats->rx_errors++;
+-			rtl_mark_to_asic(hw, rxd);
++			if (rtl_nc_dma)
++				rtl_nc_rearm(rxq, tail);
++			else
++				rtl_mark_to_asic(hw, rxd);
+ 			nb_hold++;
+ 			tail = (tail + 1) % nb_rx_desc;
+ 			continue;
+@@ -978,12 +1054,14 @@
+ 		dma_addr = rte_cpu_to_le_64(rte_mbuf_data_iova_default(new_mb));
+ 
+ 		/* Setup RX descriptor */
+-		rtl_map_to_asic(hw, rxd, dma_addr);
++		if (!rtl_nc_dma)
++			rtl_map_to_asic(hw, rxd, dma_addr);
+ 
+ 		pkt_len = opts1 & 0x00003fff;
+ 		pkt_len -= RTE_ETHER_CRC_LEN;
+ 
+ 		rmb->data_off = RTE_PKTMBUF_HEADROOM;
++		rtl_nc_sync(rte_pktmbuf_mtod(rmb, void *), pkt_len, 1);
+ 		rte_prefetch1((char *)rmb->buf_addr + rmb->data_off);
+ 		rmb->nb_segs = 1;
+ 		rmb->next = NULL;
+@@ -996,6 +1074,8 @@
+ 
+ 		rmb->ol_flags = rtl_rx_desc_error_to_pkt_flags(rxq, opts1, opts2);
+ 		rtl_rx_set_rss_hash(hw, rxd, rmb);
++		if (rtl_nc_dma)
++			rtl_nc_rearm(rxq, (tail + nb_rx_desc - 1) % nb_rx_desc);
+ 
+ 		/*
+ 		 * Store the mbuf address into the next entry of the array
+@@ -1448,6 +1528,8 @@
+ 	u16 hw_clo_ptr0_reg, sw_tail_ptr0_reg, reg_len;
+ 	int i;
+ 
++	rtl_nc_init();
++
+ 	desc_start_addr_lo[0] = TxDescStartAddrLow;
+ 	for (i = 1; i < nb_tx_queues; i++)
+ 		desc_start_addr_lo[i] = (u16)(TNPDS_Q1_LOW_8125 + (i - 1) * 8);
+@@ -1473,6 +1555,7 @@
+ 
+ 	for (i = 0; i < nb_tx_queues; i++) {
+ 		txq = dev->data->tx_queues[i];
++		rtl_nc_sync(txq->hw_ring, sizeof(*txq->hw_ring) * txq->nb_tx_desc, 0);
+ 
+ 		RTL_W32(hw, desc_start_addr_lo[i],
+ 			(u64)txq->hw_ring_phys_addr & DMA_BIT_MASK(32));
+@@ -1703,6 +1786,8 @@
+ 		txd->opts2 = rte_cpu_to_le_32(opts2);
+ 		rte_wmb();
+ 		txd->opts1 = rte_cpu_to_le_32(opts1);
++		rtl_nc_sync(rte_pktmbuf_mtod(m_seg, void *), len, 0);
++		rtl_nc_sync(txd, sizeof(*txd), 0);
+ 
+ 		tail = (tail + 1) % nb_tx_desc;
+ 

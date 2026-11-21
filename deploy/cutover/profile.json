@@ -1,0 +1,64 @@
+{
+  "management": {
+    "interface": "mgmt0",
+    "address": "10.61.60.1",
+    "peer": "10.61.60.2"
+  },
+  "pci": "0000:01:00.0",
+  "parent": "nic0-dpdk",
+  "wan": "nic0-dpdk.100",
+  "wan_address": "10.61.10.2/24",
+  "wan_gateway": "10.61.10.1",
+  "wan_gateway_mac": "02:00:00:00:10:08",
+  "wan_mac": "02:00:00:00:10:01",
+  "lan_gateway": "10.61.20.1/24",
+  "lan_host": "10.61.20.2/24",
+  "lan_ula_gateway": "fd42:1111:2222:10::1/64",
+  "lan_ula_host": "fd42:1111:2222:10::2/64",
+  "lan_gateway_mac": "02:00:00:00:10:02",
+  "lan_host_mac": "02:76:70:70:02:02",
+  "linux_lan_member": "nic1",
+  "vps_gateway": "10.61.50.1",
+  "vps_gateway6": "fd42:1111:2222:20::1",
+  "namespace": "vrouter-ipsec",
+  "wireguard": [
+    {
+      "source": "wg0",
+      "instance": 0
+    },
+    {
+      "source": "wg1",
+      "instance": 1
+    },
+    {
+      "source": "sg",
+      "instance": 8
+    }
+  ],
+  "rollback_seconds": 600,
+  "nat44_ei": {
+    "sessions": 65536,
+    "users": 4096,
+    "user_sessions": 16384,
+    "tcp_established": 1800,
+    "tcp_transitory": 120
+  },
+  "wan_identity_udp_ports": [
+    500,
+    4500,
+    42008,
+    42007,
+    42006
+  ],
+  "lan_tcp_services": [
+    1080
+  ],
+  "wan_host_tcp_ports": [
+    42002
+  ],
+  "wan_host_tcp_sources": {
+    "42002": [
+      "198.18.16.0/20"
+    ]
+  }
+}

@@ -1,0 +1,126 @@
+dpdk: take the RX mode of a stopped port, apply it when the port starts
+
+A port that is admin down has not been started, so it has not been probed
+for RX interrupts (DPDK_DEVICE_FLAG_INT_SUPPORTED is set by the probe in
+dpdk_setup_interrupts, run by dpdk_device_start). Setting such a port's
+queues to interrupt or adaptive failed with "unsupported op (is the
+interface up?)", and the queues stayed polling. A polling queue keeps its
+worker from ever sleeping, though a stopped port receives nothing: on a
+ConnectX-3 router with a second, unconfigured port, both workers spun at
+100% with every other queue adaptive (28 W package, 69 C instead of 3.5 W,
+43 C). The router's startup sets adaptive on every port once VPP is up,
+and a port that comes up later stays polling.
+
+dpdk_interface_rx_mode_change now accepts the mode while the port is not
+started and the driver may have interrupts; vnet keeps it on the queue.
+dpdk_setup_interrupts, after the probe, applies each queue's mode: it arms
+the interrupt (or adds the file of an unmaskable queue) for interrupt and
+adaptive queues, and puts them back to polling, with a notice, when the
+PMD has no interrupts after all.
+
+Each start also added the queues' interrupt files again: the same fd went
+into epoll a second time (epoll_ctl EEXIST in the log on every down/up)
+and the old file was left behind. dpdk_device_stop now deletes the files,
+keeping the fds, which belong to the PMD, and clears INT_SUPPORTED for the
+next probe.
+
+Tested on a ConnectX-3 (mlx4, 2 workers, 2 queues each port): the unused
+port's queues take adaptive while down and the workers sleep (0.5% CPU);
+interrupt, polling and adaptive set while down hold after the port comes
+up; five down/up cycles leave one file per queue and no epoll errors;
+after three down/up cycles of the WAN port, pings through sleeping workers
+are all answered.
+
+--- a/src/plugins/dpdk/device/common.c
++++ b/src/plugins/dpdk/device/common.c
+@@ -456,6 +456,35 @@
+ 	}
+     }
+ 
++  /* Apply the mode each queue was given, possibly while the port was
++     stopped: the probe above left interrupts disabled. */
++  for (int q = 0; q < vec_len (xd->rx_queues); q++)
++    {
++      dpdk_rx_queue_t *rxq = vec_elt_at_index (xd->rx_queues, q);
++      vnet_hw_if_rx_queue_t *hq =
++	vnet_hw_if_get_rx_queue (vnm, rxq->queue_index);
++
++      if (hq->mode == VNET_HW_IF_RX_MODE_POLLING ||
++	  hq->mode == VNET_HW_IF_RX_MODE_UNKNOWN)
++	continue;
++      if (!int_mode)
++	{
++	  dpdk_log_notice ("[%u] queue %u has no RX interrupts, back to "
++			   "polling",
++			   xd->port_id, q);
++	  hq->mode = VNET_HW_IF_RX_MODE_POLLING;
++	}
++      else if (xd->flags & DPDK_DEVICE_FLAG_INT_UNMASKABLE)
++	{
++	  clib_file_main_t *fm = &file_main;
++	  fm->file_update (clib_file_get (fm, rxq->clib_file_index),
++			   UNIX_FILE_UPDATE_ADD);
++	}
++      else if (rte_eth_dev_rx_intr_enable (xd->port_id, q) == 0 &&
++	       rxq->queue_index < vec_len (dpdk_rxq_int_armed))
++	dpdk_rxq_int_armed[rxq->queue_index] = 1;
++    }
++
+   if (int_mode)
+     vnet_hw_if_set_caps (vnm, hi->hw_if_index, VNET_HW_IF_CAP_INT_MODE);
+   else
+@@ -514,6 +543,37 @@
+   rte_eth_dev_stop (xd->port_id);
+   clib_memset (&xd->link, 0, sizeof (struct rte_eth_link));
+ 
++  /* dpdk_setup_interrupts adds the queues' interrupt files each time the
++     port starts. Drop them here, keeping the fds, which belong to the PMD:
++     otherwise every restart of the port added the same fd to epoll again
++     (EEXIST) and left the old file behind. */
++  if (xd->flags & DPDK_DEVICE_FLAG_INT_SUPPORTED)
++    {
++      vnet_main_t *vnm = vnet_get_main ();
++      clib_file_main_t *fm = &file_main;
++      for (int q = 0; q < vec_len (xd->rx_queues); q++)
++	{
++	  dpdk_rx_queue_t *rxq = vec_elt_at_index (xd->rx_queues, q);
++	  vnet_hw_if_rx_queue_t *hq =
++	    vnet_hw_if_get_rx_queue (vnm, rxq->queue_index);
++	  clib_file_t *f;
++
++	  if (rxq->efd <= 0 ||
++	      !(f = clib_file_get (fm, rxq->clib_file_index)))
++	    continue;
++	  /* An unmaskable queue's file is out of epoll while it polls; put
++	     it back so the deletion finds it. */
++	  if ((xd->flags & DPDK_DEVICE_FLAG_INT_UNMASKABLE) &&
++	      hq->mode == VNET_HW_IF_RX_MODE_POLLING)
++	    fm->file_update (f, UNIX_FILE_UPDATE_ADD);
++	  f->dont_close = 1;
++	  clib_file_del (fm, f);
++	  hq->file_index = ~0;
++	  rxq->efd = 0;
++	}
++      xd->flags &= ~DPDK_DEVICE_FLAG_INT_SUPPORTED;
++    }
++
+   dpdk_log_info ("Interface %U stopped", format_dpdk_device_name,
+ 		 xd->device_index);
+ }
+--- a/src/plugins/dpdk/device/device.c
++++ b/src/plugins/dpdk/device/device.c
+@@ -736,6 +736,14 @@
+   dpdk_rx_queue_t *rxq;
+   clib_file_t *f;
+   int rv = 0;
++  /* A port that is not started (admin down) cannot be probed for RX
++     interrupts or have them armed. Take the mode: vnet keeps it on the queue
++     and dpdk_setup_interrupts applies it when the port starts, or puts the
++     queue back to polling if the PMD turns out to have no interrupts. Before,
++     the change failed, the queue stayed polling and kept its worker from ever
++     sleeping, though the port received nothing. */
++  if (!(xd->flags & DPDK_DEVICE_FLAG_ADMIN_UP) && xd->conf.enable_rxq_int)
++    return 0;
+   if (!(xd->flags & DPDK_DEVICE_FLAG_INT_SUPPORTED))
+     return clib_error_return (0, "unsupported op (is the interface up?)", rv);
+   if (mode == VNET_HW_IF_RX_MODE_POLLING &&

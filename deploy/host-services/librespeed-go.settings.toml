@@ -1,0 +1,26 @@
+# Socket activation supplies the listener. Both must stay empty or
+# speedtest-go refuses to inherit the systemd fd.
+bind_address=""
+listen_port=""
+proxyprotocol_port=0
+url_base=""
+
+# nginx-hoststack serves /var/www/speedtest. Embedded assets are unused.
+assets_path=""
+
+server_lat=0
+server_lng=0
+ipinfo_api_key=""
+
+statistics_password="PASSWORD"
+redact_ip_addresses=false
+
+database_type="memory"
+database_hostname=""
+database_name=""
+database_username=""
+database_password=""
+database_file=""
+
+enable_tls=false
+enable_http2=false

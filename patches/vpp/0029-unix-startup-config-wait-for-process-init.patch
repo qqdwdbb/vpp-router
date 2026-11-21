@@ -1,0 +1,29 @@
+unix: wait for initial process dispatch before startup configuration
+
+The startup configuration must not race device creation by process nodes such
+as dpdk-process. CLI socket availability and unix_config_complete do not imply
+that those nodes have run. The main loop starts every process before entering
+its first iteration, so a nonzero main_loop_count provides the required
+ordering without the unconditional two-second delay. Keep the Unix config
+condition and yield while either prerequisite is pending.
+
+--- a/src/vlib/unix/main.c
++++ b/src/vlib/unix/main.c
+@@ -320,10 +320,13 @@
+   unix_main_t *um = &unix_main;
+   unformat_input_t in;
+ 
+-  vlib_process_suspend (vm, 2.0);
+-
+-  while (um->unix_config_complete == 0)
+-    vlib_process_suspend (vm, 0.1);
++  /* All init/config and main-loop-enter functions run before processes are
++   * started. Wait until the main loop has completed its first iteration so
++   * every process has also had its initial dispatch, regardless of node
++   * order. In particular, dpdk-process creates its interfaces before its
++   * first suspension. CLI socket availability alone does not ensure this. */
++  while (um->unix_config_complete == 0 || vm->main_loop_count == 0)
++    vlib_process_suspend (vm, 0.001);
+ 
+   if (!um->startup_config_filename)
+     {

@@ -1,0 +1,12 @@
+--- a/r8169_rxtx.c
++++ b/r8169_rxtx.c
+@@ -2040,7 +2040,8 @@
+ 			txe->mbuf = NULL;
+ 		}
+ 
+-		head = (head + 1) % nb_tx_desc;
++		if (++head == nb_tx_desc)
++			head = 0;
+ 		desc_freed++;
+ 		tx_left--;
+ 	}

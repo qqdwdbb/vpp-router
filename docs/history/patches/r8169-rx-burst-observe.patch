@@ -1,0 +1,27 @@
+--- a/r8169_rxtx.c
++++ b/r8169_rxtx.c
+@@ -1025,6 +1025,11 @@
+ 
+ /* Bound lookahead to eight descriptors and this ring segment. Keep the
+  * synchronized snapshot for the receive loop; never publish OWN here. */
++/* Single-worker diagnostic counters, off until explicitly enabled. */
++struct rtl_rx_observe_counts { volatile unsigned long long calls, packets, bins[65]; };
++struct rtl_rx_observe { volatile unsigned long long enabled; struct rtl_rx_observe_counts port[16]; };
++__attribute__((used, visibility("default"))) struct rtl_rx_observe rtl_rx_observe;
++
+ static inline unsigned int
+ rtl_rx_scan_ready(struct rtl_rx_queue *rxq, uint16_t tail, uint16_t limit,
+ 		  uintptr_t *synced_line, uint16_t *scanned)
+@@ -1260,6 +1265,12 @@
+ 
+ 	rxq->nb_rx_hold = nb_hold;
+ 
++	if (__builtin_expect(rtl_rx_observe.enabled != 0 && rxq->port_id < 16, 0)) {
++		rtl_rx_observe.port[rxq->port_id].calls++;
++		rtl_rx_observe.port[rxq->port_id].packets += nb_rx;
++		rtl_rx_observe.port[rxq->port_id].bins[nb_rx < 64 ? nb_rx : 64]++;
++	}
++
+ 	return nb_rx;
+ }
+ 

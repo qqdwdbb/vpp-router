@@ -1,0 +1,14 @@
+# Fresh-start fragment; reserve bridge/BVI 200 and TAP 2000 in the final config.
+create bridge-domain 200
+create loopback interface instance 200
+set interface state loop200 up
+set interface l2 bridge loop200 200 bvi
+set interface mtu packet 1500 loop200
+set interface ip address loop200 10.61.20.1/24
+create tap id 2000 host-if-name vpp-lan gso
+set interface mtu packet 1500 tap2000
+set interface state tap2000 up
+set interface rx-mode tap2000 interrupt
+set interface l2 bridge tap2000 200
+# Attach the actual untagged production LAN interface to BD 200 during cutover.
+# Linux vpp-lan joins br-mgmt; only br-mgmt holds 10.61.20.2/24.

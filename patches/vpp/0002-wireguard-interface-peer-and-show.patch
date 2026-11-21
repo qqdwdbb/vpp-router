@@ -1,0 +1,424 @@
+--- a/src/plugins/wireguard/wireguard_cli.c
++++ b/src/plugins/wireguard/wireguard_cli.c
+@@ -7,6 +7,7 @@
+ #include <wireguard/wireguard_key.h>
+ #include <wireguard/wireguard_peer.h>
+ #include <wireguard/wireguard_if.h>
++#include <time.h>
+ 
+ static clib_error_t *
+ wg_if_create_cli (vlib_main_t * vm,
+@@ -325,6 +326,243 @@
+   .function = wg_show_peer_command_fn,
+ };
+ 
++typedef struct
++{
++  vlib_main_t *vm;
++  u32 sw_if_index;
++  u8 first_interface;
++} wg_show_linux_ctx_t;
++
++static u8 *
++format_wg_show_bytes (u8 *s, va_list *args)
++{
++  static const char *units[] = { "B", "KB", "MB", "GB" };
++  u64 bytes = va_arg (*args, u64);
++  f64 value = bytes;
++  u32 unit = 0;
++
++  while (value >= 1024.0 && unit < ARRAY_LEN (units) - 1)
++    {
++      value /= 1024.0;
++      unit++;
++    }
++
++  if (unit == 0)
++    return format (s, "%llu %s", (unsigned long long) bytes, units[unit]);
++
++  return format (s, "%.2f %s", value, units[unit]);
++}
++
++static int
++wg_show_peer_ip_cmp (const wg_peer_t *a, const wg_peer_t *b)
++{
++  if (vec_len (a->allowed_ips) && vec_len (b->allowed_ips))
++    {
++      int rv = fib_prefix_cmp (&a->allowed_ips[0], &b->allowed_ips[0]);
++      if (rv)
++	return rv;
++    }
++  else if (vec_len (a->allowed_ips) != vec_len (b->allowed_ips))
++    return vec_len (a->allowed_ips) ? -1 : 1;
++
++  if (ip46_address_is_ip4 (&a->dst.addr) !=
++      ip46_address_is_ip4 (&b->dst.addr))
++    return ip46_address_is_ip4 (&a->dst.addr) ? -1 : 1;
++
++  if (ip46_address_is_ip4 (&a->dst.addr))
++    return clib_memcmp (&a->dst.addr.ip4, &b->dst.addr.ip4,
++			sizeof (ip4_address_t));
++
++  return clib_memcmp (&a->dst.addr.ip6, &b->dst.addr.ip6,
++			      sizeof (ip6_address_t));
++}
++
++static_always_inline u64
++wg_show_peer_latest_handshake (const wg_peer_t *peer)
++{
++  return __atomic_load_n (&peer->latest_handshake, __ATOMIC_RELAXED);
++}
++
++static u8 *
++format_wg_show_handshake (u8 *s, va_list *args)
++{
++  u64 seconds = va_arg (*args, u64);
++  u64 days = seconds / (24 * 60 * 60);
++  u64 hours = (seconds / (60 * 60)) % 24;
++  u64 minutes = (seconds / 60) % 60;
++  u64 remainder = seconds % 60;
++
++  if (days)
++    return format (s, "%llu day%s, %llu h, %llu minute%s, %llu second%s",
++                   (unsigned long long) days, days == 1 ? "" : "s",
++                   (unsigned long long) hours,
++                   (unsigned long long) minutes, minutes == 1 ? "" : "s",
++                   (unsigned long long) remainder,
++                   remainder == 1 ? "" : "s");
++
++  if (hours)
++    return format (s, "%llu h, %llu minute%s, %llu second%s",
++                   (unsigned long long) hours,
++                   (unsigned long long) minutes, minutes == 1 ? "" : "s",
++                   (unsigned long long) remainder,
++                   remainder == 1 ? "" : "s");
++
++  if (minutes)
++    return format (s, "%llu minute%s, %llu second%s",
++                   (unsigned long long) minutes, minutes == 1 ? "" : "s",
++                   (unsigned long long) remainder,
++                   remainder == 1 ? "" : "s");
++
++  return format (s, "%llu second%s", (unsigned long long) seconds,
++                 seconds == 1 ? "" : "s");
++}
++
++static bool
++wg_show_peer_before (const wg_peer_t *a, const wg_peer_t *b)
++{
++  u64 ah = wg_show_peer_latest_handshake (a);
++  u64 bh = wg_show_peer_latest_handshake (b);
++
++  if (ah != bh)
++    {
++      if (!ah)
++	return false;
++      if (!bh)
++	return true;
++      return ah > bh;
++    }
++
++  return wg_show_peer_ip_cmp (a, b) < 0;
++}
++
++static void
++wg_show_linux_peer (vlib_main_t *vm, wg_peer_t *peer)
++{
++  u8 public_key[NOISE_KEY_LEN_BASE64];
++  u64 latest_handshake;
++  u64 now;
++  u64 ago;
++  fib_prefix_t *allowed_ip;
++
++  key_to_base64 (peer->remote.r_public, NOISE_PUBLIC_KEY_LEN, public_key);
++  vlib_cli_output (vm, "\tpeer: %s", public_key);
++  if (ip46_address_is_ip4 (&peer->dst.addr))
++    vlib_cli_output (vm, "\t\tendpoint: %U:%u", format_ip46_address,
++                     &peer->dst.addr, IP46_TYPE_ANY, peer->dst.port);
++  else
++    vlib_cli_output (vm, "\t\tendpoint: [%U]:%u", format_ip46_address,
++                     &peer->dst.addr, IP46_TYPE_ANY, peer->dst.port);
++  vlib_cli_output (vm, "\t\tallowed ips:");
++  vec_foreach (allowed_ip, peer->allowed_ips)
++    vlib_cli_output (vm, "\t\t\t%U", format_fib_prefix, allowed_ip);
++
++  latest_handshake = wg_show_peer_latest_handshake (peer);
++  now = (u64) time (NULL);
++  ago = latest_handshake && now >= latest_handshake ?
++    now - latest_handshake : 0;
++  if (latest_handshake && now >= latest_handshake)
++    vlib_cli_output (vm, "\t\tlatest handshake: %U ago",
++                     format_wg_show_handshake, ago);
++  else
++    vlib_cli_output (vm, "\t\tlatest handshake: never");
++  vlib_cli_output (vm, "\t\ttransfer: %U received, %U sent",
++			 format_wg_show_bytes,
++			 (u64) __atomic_load_n (&peer->rx_bytes, __ATOMIC_RELAXED),
++			 format_wg_show_bytes,
++			 (u64) __atomic_load_n (&peer->tx_bytes, __ATOMIC_RELAXED));
++  vlib_cli_output (vm, "\t\tpersistent keepalive: every %u seconds",
++                   peer->persistent_keepalive_interval);
++}
++
++static walk_rc_t
++wg_show_linux_one (index_t wgii, void *arg)
++{
++  wg_show_linux_ctx_t *ctx = arg;
++  wg_if_t *wgi = wg_if_get (wgii);
++  noise_local_t *local;
++  u8 public_key[NOISE_KEY_LEN_BASE64];
++  wg_peer_t **peers = 0;
++  index_t peeri;
++
++  if (ctx->sw_if_index != ~0 && wgi->sw_if_index != ctx->sw_if_index)
++    return WALK_CONTINUE;
++
++  if (!ctx->first_interface)
++    vlib_cli_output (ctx->vm, " ");
++  ctx->first_interface = 0;
++
++  local = noise_local_get (wgi->local_idx);
++  key_to_base64 (local->l_public, NOISE_PUBLIC_KEY_LEN, public_key);
++  vlib_cli_output (ctx->vm, "interface: %U",
++                   format_vnet_sw_if_index_name, vnet_get_main (),
++                   wgi->sw_if_index);
++  vlib_cli_output (ctx->vm, "\tpublic key: %s", public_key);
++  vlib_cli_output (ctx->vm, "\tlistening port: %u", wgi->port);
++
++  pool_foreach_index (peeri, wg_peer_pool)
++    {
++      wg_peer_t *peer = wg_peer_get (peeri);
++      if (peer->wg_sw_if_index == wgi->sw_if_index)
++	vec_add1 (peers, peer);
++    }
++
++  for (uword i = 1; i < vec_len (peers); i++)
++    {
++      wg_peer_t *peer = peers[i];
++      uword j = i;
++      while (j > 0 && wg_show_peer_before (peer, peers[j - 1]))
++	{
++	  peers[j] = peers[j - 1];
++	  j--;
++	}
++      peers[j] = peer;
++    }
++
++  for (uword i = 0; i < vec_len (peers); i++)
++    {
++      if (i)
++	vlib_cli_output (ctx->vm, " ");
++      wg_show_linux_peer (ctx->vm, peers[i]);
++    }
++
++  vec_free (peers);
++
++  return WALK_CONTINUE;
++}
++
++static clib_error_t *
++wg_show_linux_command_fn (vlib_main_t *vm, unformat_input_t *input,
++                          vlib_cli_command_t *cmd)
++{
++  vnet_main_t *vnm = vnet_get_main ();
++  wg_show_linux_ctx_t ctx = { .vm = vm, .sw_if_index = ~0,
++			      .first_interface = 1 };
++
++  if (unformat (input, "%U", unformat_vnet_sw_interface, vnm,
++                &ctx.sw_if_index))
++    {
++      if (unformat_check_input (input) != UNFORMAT_END_OF_INPUT)
++        return clib_error_return (0, "unexpected input: %U",
++                                  format_unformat_error, input);
++      if (wg_if_find_by_sw_if_index (ctx.sw_if_index) == INDEX_INVALID)
++        return clib_error_return (0, "%U is not a WireGuard interface",
++                                  format_vnet_sw_if_index_name, vnm,
++                                  ctx.sw_if_index);
++    }
++  else if (unformat_check_input (input) != UNFORMAT_END_OF_INPUT)
++    return clib_error_return (0, "expected a WireGuard interface name");
++
++  wg_if_walk (wg_show_linux_one, &ctx);
++  return 0;
++}
++
++VLIB_CLI_COMMAND (wg_show_linux_command, static) =
++{
++  .path = "wg show",
++  .short_help = "wg show [<wireguard-interface>]",
++  .function = wg_show_linux_command_fn,
++};
++
+ static walk_rc_t
+ wg_if_show_one (index_t itfi, void *arg)
+ {
+--- a/src/plugins/wireguard/wireguard_input.c
++++ b/src/plugins/wireguard/wireguard_input.c
+@@ -936,6 +936,10 @@
+ 	  last_peer_time_idx = peer_idx;
+ 	}
+ 
++      __atomic_fetch_add (&peer->rx_bytes,
++                          vlib_buffer_length_in_chain (vm, b[0]),
++                          __ATOMIC_RELAXED);
++
+       vlib_increment_combined_counter (im->combined_sw_if_counters +
+ 					 VNET_INTERFACE_COUNTER_RX,
+ 				       vm->thread_index, peer->wg_sw_if_index,
+@@ -1065,6 +1069,10 @@
+ 	  last_peer_time_idx = peer_idx;
+ 	}
+ 
++      __atomic_fetch_add (&peer->rx_bytes,
++                          vlib_buffer_length_in_chain (vm, b[0]),
++                          __ATOMIC_RELAXED);
++
+       vlib_increment_combined_counter (im->combined_sw_if_counters +
+ 					 VNET_INTERFACE_COUNTER_RX,
+ 				       vm->thread_index, peer->wg_sw_if_index,
+--- a/src/plugins/wireguard/wireguard_output_tun.c
++++ b/src/plugins/wireguard/wireguard_output_tun.c
+@@ -644,7 +644,22 @@
+       while (n_left_from_sync_bufs > 0)
+ 	{
+ 	  n_left_from_sync_bufs--;
+-	  wg_calc_checksum (vm, sync_bufs[n_left_from_sync_bufs]);
++	  vlib_buffer_t *sb = sync_bufs[n_left_from_sync_bufs];
++	  if (nexts[n_left_from_sync_bufs] == WG_OUTPUT_NEXT_INTERFACE_OUTPUT)
++	    {
++	      index_t pi = wg_peer_get_by_adj_index (
++	        vnet_buffer (sb)->ip.adj_index[VLIB_TX]);
++	      if (pi != INDEX_INVALID)
++	        {
++	          u32 outer_len = vlib_buffer_length_in_chain (vm, sb);
++	          u32 header_len = is_ip4 ? sizeof (ip4_udp_header_t) :
++                                     sizeof (ip6_udp_header_t);
++	          __atomic_fetch_add (&wg_peer_get (pi)->tx_bytes,
++                              outer_len - header_len - sizeof (message_data_t) -
++                                NOISE_AUTHTAG_LEN, __ATOMIC_RELAXED);
++	        }
++	    }
++	  wg_calc_checksum (vm, sb);
+ 	}
+ 
+       vlib_buffer_enqueue_to_next (vm, node, sync_bi, nexts, n_sync);
+@@ -667,9 +682,25 @@
+   return frame->n_vectors;
+ }
+ 
++static_always_inline void
++wg_show_count_async_tx (vlib_main_t *vm, vlib_buffer_t *b, bool is_ip4)
++{
++  index_t pi = wg_peer_get_by_adj_index (
++    vnet_buffer (b)->ip.adj_index[VLIB_TX]);
++  if (pi != INDEX_INVALID)
++    {
++      u32 outer_len = vlib_buffer_length_in_chain (vm, b);
++      u32 header_len = is_ip4 ? sizeof (ip4_udp_header_t) :
++                                 sizeof (ip6_udp_header_t);
++      __atomic_fetch_add (&wg_peer_get (pi)->tx_bytes,
++                          outer_len - header_len - sizeof (message_data_t) -
++                            NOISE_AUTHTAG_LEN, __ATOMIC_RELAXED);
++    }
++}
++
+ always_inline uword
+ wg_output_tun_post (vlib_main_t *vm, vlib_node_runtime_t *node,
+-		    vlib_frame_t *frame)
++		    vlib_frame_t *frame, bool is_ip4)
+ {
+   vlib_buffer_t *bufs[VLIB_FRAME_SIZE], **b = bufs;
+   u16 nexts[VLIB_FRAME_SIZE], *next = nexts;
+@@ -700,9 +731,13 @@
+       next[2] = (wg_post_data (b[2]))->next_index;
+       next[3] = (wg_post_data (b[3]))->next_index;
+ 
++      wg_show_count_async_tx (vm, b[0], is_ip4);
+       wg_calc_checksum (vm, b[0]);
++      wg_show_count_async_tx (vm, b[1], is_ip4);
+       wg_calc_checksum (vm, b[1]);
++      wg_show_count_async_tx (vm, b[2], is_ip4);
+       wg_calc_checksum (vm, b[2]);
++      wg_show_count_async_tx (vm, b[3], is_ip4);
+       wg_calc_checksum (vm, b[3]);
+ 
+       if (PREDICT_FALSE (node->flags & VLIB_NODE_FLAG_TRACE))
+@@ -749,6 +784,7 @@
+ 
+   while (n_left > 0)
+     {
++      wg_show_count_async_tx (vm, b[0], is_ip4);
+       wg_calc_checksum (vm, b[0]);
+ 
+       next[0] = (wg_post_data (b[0]))->next_index;
+@@ -794,13 +830,13 @@
+ VLIB_NODE_FN (wg4_output_tun_post_node)
+ (vlib_main_t *vm, vlib_node_runtime_t *node, vlib_frame_t *from_frame)
+ {
+-  return wg_output_tun_post (vm, node, from_frame);
++  return wg_output_tun_post (vm, node, from_frame, /* is_ip4 */ 1);
+ }
+ 
+ VLIB_NODE_FN (wg6_output_tun_post_node)
+ (vlib_main_t *vm, vlib_node_runtime_t *node, vlib_frame_t *from_frame)
+ {
+-  return wg_output_tun_post (vm, node, from_frame);
++  return wg_output_tun_post (vm, node, from_frame, /* is_ip4 */ 0);
+ }
+ 
+ VLIB_NODE_FN (wg4_output_tun_node)
+--- a/src/plugins/wireguard/wireguard_peer.c
++++ b/src/plugins/wireguard/wireguard_peer.c
+@@ -74,6 +74,9 @@
+   peer->last_sent_packet = 0;
+   peer->last_received_packet = 0;
+   peer->session_derived = 0;
++  peer->rx_bytes = 0;
++  peer->tx_bytes = 0;
++  peer->latest_handshake = 0;
+   peer->rehandshake_started = 0;
+   peer->new_handshake_interval_tick = 0;
+   peer->rehandshake_interval_tick = 0;
+@@ -209,6 +212,9 @@
+   peer->last_sent_packet = 0;
+   peer->last_received_packet = 0;
+   peer->session_derived = 0;
++  peer->rx_bytes = 0;
++  peer->tx_bytes = 0;
++  peer->latest_handshake = 0;
+   peer->rehandshake_started = 0;
+ 
+   peer->new_handshake_interval_tick = 0;
+--- a/src/plugins/wireguard/wireguard_timer.c
++++ b/src/plugins/wireguard/wireguard_timer.c
+@@ -6,6 +6,7 @@
+ #include <wireguard/wireguard.h>
+ #include <wireguard/wireguard_send.h>
+ #include <wireguard/wireguard_timer.h>
++#include <time.h>
+ 
+ static u32
+ get_random_u32_max (u32 max)
+@@ -289,6 +290,8 @@
+ {
+   peer->rehandshake_started = ~0;
+   peer->timer_handshake_attempts = 0;
++  __atomic_store_n (&peer->latest_handshake, (u64) time (NULL),
++                    __ATOMIC_RELAXED);
+ }
+ 
+ void
+--- a/src/plugins/wireguard/wireguard_peer.h
++++ b/src/plugins/wireguard/wireguard_peer.h
+@@ -97,6 +97,11 @@
+   f64 last_sent_packet;
+   f64 last_received_packet;
+   f64 session_derived;
++
++  /* wg show: plaintext data-message bytes. */
++  u64 rx_bytes;
++  u64 tx_bytes;
++  u64 latest_handshake; /* Unix seconds; zero means no completed handshake. */
+   f64 rehandshake_started;
+ 
+   /* Variable intervals */

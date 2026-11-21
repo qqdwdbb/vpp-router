@@ -1,0 +1,52 @@
+nat44-ei: record the receiving thread in every handoff
+
+0020 recorded the receiving thread only in the output (in2out) handoff.
+Record it in the out2in and inside-input handoffs too, so the
+nat-ei-context plugin can also return translated out2in packets to the
+thread that received them for ip4-lookup, L2 and TX. The field
+(vnet_buffer2 (b)->unused[4]) is otherwise unused; translation, worker
+selection and queue behaviour are unchanged.
+
+--- a/src/plugins/nat/nat44-ei/nat44_ei_handoff.c
++++ b/src/plugins/nat/nat44-ei/nat44_ei_handoff.c
+@@ -54,9 +54,9 @@
+   return s;
+ }
+ 
+-/* Output handoff records the receiving thread (+1, 0 = unknown) for the
++/* Every handoff records the receiving thread (+1, 0 = unknown) for the
+  * nat-ei-context plugin, which can return translated packets to that thread
+- * for the rest of the output arc. The slot is otherwise unused. */
++ * for the rest of their path. The slot is otherwise unused. */
+ #define NAT44_EI_RX_THREAD(b) (vnet_buffer2 (b)->unused[4])
+ 
+ static inline uword
+@@ -112,11 +112,11 @@
+ 	  iph_offset1 = vnet_buffer (b[1])->ip.save_rewrite_length;
+ 	  iph_offset2 = vnet_buffer (b[2])->ip.save_rewrite_length;
+ 	  iph_offset3 = vnet_buffer (b[3])->ip.save_rewrite_length;
+-	  NAT44_EI_RX_THREAD (b[0]) = thread_index + 1;
+-	  NAT44_EI_RX_THREAD (b[1]) = thread_index + 1;
+-	  NAT44_EI_RX_THREAD (b[2]) = thread_index + 1;
+-	  NAT44_EI_RX_THREAD (b[3]) = thread_index + 1;
+ 	}
++      NAT44_EI_RX_THREAD (b[0]) = thread_index + 1;
++      NAT44_EI_RX_THREAD (b[1]) = thread_index + 1;
++      NAT44_EI_RX_THREAD (b[2]) = thread_index + 1;
++      NAT44_EI_RX_THREAD (b[3]) = thread_index + 1;
+ 
+       ip0 =
+ 	(ip4_header_t *) ((u8 *) vlib_buffer_get_current (b[0]) + iph_offset0);
+@@ -204,10 +204,8 @@
+       ip4_header_t *ip0;
+ 
+       if (is_output)
+-	{
+-	  iph_offset0 = vnet_buffer (b[0])->ip.save_rewrite_length;
+-	  NAT44_EI_RX_THREAD (b[0]) = thread_index + 1;
+-	}
++	iph_offset0 = vnet_buffer (b[0])->ip.save_rewrite_length;
++      NAT44_EI_RX_THREAD (b[0]) = thread_index + 1;
+ 
+       ip0 =
+ 	(ip4_header_t *) ((u8 *) vlib_buffer_get_current (b[0]) + iph_offset0);

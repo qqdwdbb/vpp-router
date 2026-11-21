@@ -1,0 +1,12 @@
+[Unit]
+Description=VPP interface changes from the management panel
+# Changes wait here for confirmation and are undone if it does not come, so this keeps
+# running on its own and does not stop with VPP.
+
+[Service]
+ExecStart=/usr/local/bin/vpp-interfaces --vpp-unit vpp-router.service
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

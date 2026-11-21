@@ -1,0 +1,49 @@
+--- a/src/vnet/ipsec/esp_encrypt.c	2026-10-24 19:32:52
++++ b/src/vnet/ipsec/esp_encrypt.c	2026-10-24 20:20:00
+@@ -190,6 +190,9 @@
+ }
+ 
+ static_always_inline void
++esp_encrypt_fix_ip6_udp_cksum (vlib_main_t *vm, vlib_buffer_t *b);
++
++static_always_inline void
+ esp_process_ops (vlib_main_t *vm, vlib_node_runtime_t *node, vnet_crypto_op_t *ops,
+ 		 vlib_buffer_t *b[], u16 *nexts, vnet_crypto_op_chunk_t *chunks, u16 drop_next)
+ {
+@@ -310,11 +313,31 @@
+ {
+   vnet_buffer (b)->l3_hdr_offset = l3_hdr_offset;
+   vnet_buffer (b)->l4_hdr_offset = l4_hdr_offset;
++  b->flags &= ~VNET_BUFFER_F_IS_IP4;
+   b->flags |= (VNET_BUFFER_F_IS_IP6 | VNET_BUFFER_F_L3_HDR_OFFSET_VALID |
+ 	       VNET_BUFFER_F_L4_HDR_OFFSET_VALID);
+   vnet_buffer_offload_flags_set (b, VNET_BUFFER_OFFLOAD_F_UDP_CKSUM);
+ }
+ 
++static_always_inline void
++esp_encrypt_fix_ip6_udp_cksum (vlib_main_t *vm, vlib_buffer_t *b)
++{
++  ip6_header_t *ip6;
++  udp_header_t *udp;
++  int bogus;
++  if ((b->flags & (VNET_BUFFER_F_IS_IP6 | VNET_BUFFER_F_L4_HDR_OFFSET_VALID)) !=
++      (VNET_BUFFER_F_IS_IP6 | VNET_BUFFER_F_L4_HDR_OFFSET_VALID) ||
++      !(vnet_buffer (b)->oflags & VNET_BUFFER_OFFLOAD_F_UDP_CKSUM))
++    return;
++
++  /* Header offsets are absolute from b->data, not relative to current. */
++  ip6 = (ip6_header_t *) (b->data + vnet_buffer (b)->l3_hdr_offset);
++  udp = (udp_header_t *) (b->data + vnet_buffer (b)->l4_hdr_offset);
++  udp->checksum = 0;
++  udp->checksum = ip6_tcp_udp_icmp_compute_checksum (vm, b, ip6, &bogus);
++  vnet_buffer_offload_flags_clear (b, VNET_BUFFER_OFFLOAD_F_UDP_CKSUM);
++}
++
+ /* Common helper functions to reduce code duplication */
+ static_always_inline esp_ctr_nonce_t *
+ ipsec_setup_ctr_nonce (vnet_crypto_op_t *op, ipsec_sa_outb_rt_t *ort, void *pkt_iv, u32 hdr_len)
+@@ -1101,1 +1101,4 @@
++      for (u16 i = 0; i < n_sync; i++)
++	esp_encrypt_fix_ip6_udp_cksum (vm, sync_bufs[i]);
++
+       vlib_buffer_enqueue_to_next (vm, node, sync_bi, sync_nexts, n_sync);

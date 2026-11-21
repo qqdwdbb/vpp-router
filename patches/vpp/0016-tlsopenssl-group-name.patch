@@ -1,0 +1,24 @@
+tlsopenssl: use SSL_get0_group_name with OpenSSL 3.2
+
+SSL_get_negotiated_group() returns a NID only for some groups; OpenSSL 3.2
+and later can name every negotiated group directly.
+
+Part of the VPP source used for the RK3588 board build (v26.06-1-geth1test). The
+tlsopenssl plugin is not built by the installer or deployed on the RK3588 board.
+
+--- a/src/plugins/tlsopenssl/tls_openssl.c
++++ b/src/plugins/tlsopenssl/tls_openssl.c
+@@ -1862,7 +1862,12 @@
+ 	attr->tls_profile_info.tls_version = (u16) version;
+ 
+ 	/* Get negotiated group (key agreement algorithm) */
+-#if OPENSSL_VERSION_NUMBER >= 0x30000000L
++#if OPENSSL_VERSION_NUMBER >= 0x30200000L
++	const char *group_name = SSL_get0_group_name (oc->ssl);
++	if (group_name)
++	  attr->tls_profile_info.key_agreement = format (0, "%s", group_name);
++	else
++#elif OPENSSL_VERSION_NUMBER >= 0x30000000L
+ 	const char *group_name;
+ 	int group_id = SSL_get_negotiated_group (oc->ssl);
+ 	if (group_id != NID_undef)

@@ -1,0 +1,2 @@
+abf attach ip4 policy 620 wg8
+abf attach ip6 policy 621 wg8

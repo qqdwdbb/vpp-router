@@ -1,0 +1,11 @@
+[Unit]
+Description=Create the nftables address collections referenced by dnsmasq
+Before=dnsmasq.service vpp-nft-route-sync.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/nft -f /etc/vpp/dns-nftsets.nft
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,23 @@
+[Unit]
+Description=Vector Packet Processor (VPP) Router Core for NanoPi VROUTER
+Documentation=https://fd.io
+DefaultDependencies=no
+After=systemd-modules-load.service local-fs.target
+Before=network.target vrouter-network-prep.service
+
+[Service]
+Type=simple
+Environment=PATH=/opt/vpp-nic1-test/vpp/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=LD_LIBRARY_PATH=/opt/vpp-vrouter-migration/ipsec-ip6-udp/lib:/opt/vpp-nic1-test/dpdk/lib/aarch64-linux-gnu:/opt/vpp-nic1-test/vpp/lib/aarch64-linux-gnu
+RuntimeDirectory=vpp
+RuntimeDirectoryMode=0755
+ExecStart=/opt/vpp-nic1-test/vpp/bin/vpp -c /etc/vpp/startup.conf
+ExecStartPost=/usr/bin/python3 /opt/vpp-vrouter-migration/source/scripts/vrouter/startup/vrouter-vpp-ready.py --socket /run/vpp/cli.sock --timeout 25
+Restart=on-failure
+RestartSec=2
+KillMode=control-group
+LimitNOFILE=65536
+LimitMEMLOCK=infinity
+
+[Install]
+WantedBy=multi-user.target

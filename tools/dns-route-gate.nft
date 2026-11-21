@@ -1,0 +1,5 @@
+add table inet dns_route_gate
+add chain inet dns_route_gate prerouting { type nat hook prerouting priority dstnat; policy accept; }
+flush chain inet dns_route_gate prerouting
+add rule inet dns_route_gate prerouting iifname "br-vpp-lan" ip daddr 10.61.30.2 meta l4proto { tcp, udp } th dport 53 counter redirect to :1053
+add rule inet dns_route_gate prerouting iifname "br-vpp-lan" ip6 daddr fe80::76:70ff:fe70:802 meta l4proto { tcp, udp } th dport 53 counter redirect to :1053

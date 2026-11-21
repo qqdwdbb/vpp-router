@@ -1,0 +1,1139 @@
+--- a/drivers/net/r8169/r8169_compat.h
++++ b/drivers/net/r8169/r8169_compat.h
+@@ -31,6 +31,34 @@
+ 	u64 rx_broadcast;
+ 	u32 rx_multicast;
+ 	u16 tx_aborted;
++	u16 tx_underrun;
++	/* RTL8125 extended DMA tally, offsets 64 through 191. */
++	u64 tx_octets;
++	u64 rx_octets;
++	u64 rx_multicast64;
++	u64 tx_unicast64;
++	u64 tx_broadcast64;
++	u64 tx_multicast64;
++	u32 tx_pause_on;
++	u32 tx_pause_off;
++	u32 tx_pause_all;
++	u32 tx_deferred;
++	u32 tx_late_collision;
++	u32 tx_all_collision;
++	u32 tx_aborted32;
++	u32 align_errors32;
++	u32 rx_frame_too_long;
++	u32 rx_runt;
++	u32 rx_pause_on;
++	u32 rx_pause_off;
++	u32 rx_pause_all;
++	u32 rx_unknown_opcode;
++	u32 rx_mac_error;
++	u32 tx_underrun32;
++	u32 rx_mac_missed;
++	u32 rx_tcam_dropped;
++	u32 tdu;
++	u32 rdu;
+ };
+ 
+ enum mcfg {
+--- a/drivers/net/r8169/r8169_ethdev.c
++++ b/drivers/net/r8169/r8169_ethdev.c
+@@ -40,11 +40,16 @@
+ 			     struct rte_eth_stats *rte_stats,
+ 			     struct eth_queue_stats *qstats __rte_unused);
+ static int rtl_dev_stats_reset(struct rte_eth_dev *dev);
++static int rtl_xstats_get_names(struct rte_eth_dev *dev,
++		struct rte_eth_xstat_name *names, unsigned int size);
++static int rtl_xstats_get(struct rte_eth_dev *dev,
++		struct rte_eth_xstat *stats, unsigned int size);
+ static int rtl_promiscuous_enable(struct rte_eth_dev *dev);
+ static int rtl_promiscuous_disable(struct rte_eth_dev *dev);
+ static int rtl_allmulticast_enable(struct rte_eth_dev *dev);
+ static int rtl_allmulticast_disable(struct rte_eth_dev *dev);
+ static int rtl_dev_mtu_set(struct rte_eth_dev *dev, uint16_t mtu);
++static int rtl_mac_addr_set(struct rte_eth_dev *dev, struct rte_ether_addr *mac_addr);
+ static int rtl_fw_version_get(struct rte_eth_dev *dev, char *fw_version,
+ 			      size_t fw_size);
+ static int rtl_reta_update(struct rte_eth_dev *dev,
+@@ -104,8 +109,11 @@
+ 
+ 	.stats_get            = rtl_dev_stats_get,
+ 	.stats_reset          = rtl_dev_stats_reset,
++	.xstats_get_names     = rtl_xstats_get_names,
++	.xstats_get           = rtl_xstats_get,
+ 
+ 	.mtu_set              = rtl_dev_mtu_set,
++	.mac_addr_set         = rtl_mac_addr_set,
+ 
+ 	.fw_version_get       = rtl_fw_version_get,
+ 
+@@ -439,7 +447,7 @@
+ 		break;
+ 	}
+ 
+-	if (hw->mcfg >= CFG_METHOD_70) {
++	if (rtl_hw_supports_rss(hw)) {
+ 		dev_info->max_rx_queues = 4;
+ 		dev_info->max_tx_queues = 2;
+ 	} else {
+@@ -487,9 +495,11 @@
+ 				     dev_info->rx_queue_offload_capa);
+ 	dev_info->tx_offload_capa = rtl_get_tx_port_offloads();
+ 
+-	dev_info->hash_key_size = RTL_RSS_KEY_SIZE;
+-	dev_info->reta_size = RTL_MAX_INDIRECTION_TABLE_ENTRIES;
+-	dev_info->flow_type_rss_offloads = RTL_RSS_CTRL_OFFLOAD_ALL;
++	if (hw->EnableRss) {
++		dev_info->hash_key_size = RTL_RSS_KEY_SIZE;
++		dev_info->reta_size = RTL_MAX_INDIRECTION_TABLE_ENTRIES;
++		dev_info->flow_type_rss_offloads = RTL_RSS_OFFLOAD_ALL;
++	}
+ 
+ 	return 0;
+ }
+@@ -581,13 +591,83 @@
+ {
+ 	struct rtl_adapter *adapter = RTL_DEV_PRIVATE(dev);
+ 	struct rtl_hw *hw = &adapter->hw;
++	int ret;
+ 
+-	rtl_get_tally_stats(hw, rte_stats);
++	ret = rtl_get_tally_stats(hw, rte_stats);
++	if (ret)
++		return ret;
+ 	rtl_sw_stats_get(dev, rte_stats);
+ 
+ 	return 0;
+ }
+ 
++/* RTL8125 diagnostics are distinct hardware counters, not additive losses. */
++static const struct {
++	const char *name;
++	size_t offset;
++	size_t size;
++} rtl_tally_xstats[] = {
++#define RTL_TALLY_FIELD(field) {#field, offsetof(struct rtl_counters, field), \
++				 sizeof(((struct rtl_counters *)0)->field)}
++	RTL_TALLY_FIELD(rx_octets),
++	RTL_TALLY_FIELD(tx_octets),
++	RTL_TALLY_FIELD(tx_pause_on),
++	RTL_TALLY_FIELD(tx_pause_off),
++	RTL_TALLY_FIELD(tx_pause_all),
++	RTL_TALLY_FIELD(rx_mac_missed),
++	RTL_TALLY_FIELD(rx_tcam_dropped),
++	RTL_TALLY_FIELD(rx_mac_error),
++	RTL_TALLY_FIELD(rx_frame_too_long),
++	RTL_TALLY_FIELD(rx_runt),
++	RTL_TALLY_FIELD(rx_pause_on),
++	RTL_TALLY_FIELD(rx_pause_off),
++	RTL_TALLY_FIELD(rx_pause_all),
++	RTL_TALLY_FIELD(tdu),
++	RTL_TALLY_FIELD(rdu),
++#undef RTL_TALLY_FIELD
++};
++
++static int
++rtl_xstats_get_names(struct rte_eth_dev *dev,
++		struct rte_eth_xstat_name *names, unsigned int size)
++{
++	struct rtl_adapter *adapter = RTL_DEV_PRIVATE(dev);
++	unsigned int count = rtl_is_8125(&adapter->hw) ? RTE_DIM(rtl_tally_xstats) : 0;
++	unsigned int i;
++
++	if (!names || size < count)
++		return count;
++	for (i = 0; i < count; i++)
++		snprintf(names[i].name, sizeof(names[i].name), "%s", rtl_tally_xstats[i].name);
++	return count;
++}
++
++static int
++rtl_xstats_get(struct rte_eth_dev *dev, struct rte_eth_xstat *stats, unsigned int size)
++{
++	struct rtl_adapter *adapter = RTL_DEV_PRIVATE(dev);
++	struct rtl_hw *hw = &adapter->hw;
++	struct rte_eth_stats basic = {0};
++	unsigned int count = rtl_is_8125(hw) ? RTE_DIM(rtl_tally_xstats) : 0;
++	unsigned int i;
++	int ret;
++
++	if (!stats || size < count || !count)
++		return count;
++	ret = rtl_get_tally_stats(hw, &basic);
++	if (ret)
++		return ret;
++	for (i = 0; i < count; i++) {
++		u64 value = 0;
++		memcpy(&value, (const char *)hw->tally_vaddr + rtl_tally_xstats[i].offset,
++		       rtl_tally_xstats[i].size);
++		stats[i].id = i;
++		stats[i].value = rtl_tally_xstats[i].size == sizeof(u64) ?
++			rte_le_to_cpu_64(value) : rte_le_to_cpu_32((u32)value);
++	}
++	return count;
++}
++
+ /* Return 0 means link status changed, -1 means not changed */
+ static int
+ rtl_dev_link_update(struct rte_eth_dev *dev, int wait __rte_unused)
+@@ -735,6 +815,23 @@
+ 	return 0;
+ }
+ 
++static int
++rtl_mac_addr_set(struct rte_eth_dev *dev, struct rte_ether_addr *mac_addr)
++{
++	struct rtl_adapter *adapter = RTL_DEV_PRIVATE(dev);
++	struct rtl_hw *hw = &adapter->hw;
++
++	if (mac_addr == NULL)
++		return -EINVAL;
++	if (!rte_is_valid_assigned_ether_addr(mac_addr))
++		return -EINVAL;
++
++	rte_ether_addr_copy(mac_addr, &dev->data->mac_addrs[0]);
++	rte_ether_addr_copy(mac_addr, (struct rte_ether_addr *)hw->mac_addr);
++	rtl_rar_set(hw, mac_addr->addr_bytes);
++	return 0;
++}
++
+ static int
+ rtl_fw_version_get(struct rte_eth_dev *dev, char *fw_version, size_t fw_size)
+ {
+--- a/drivers/net/r8169/r8169_hw.c
++++ b/drivers/net/r8169/r8169_hw.c
+@@ -892,21 +892,21 @@
+ static void
+ rtl8125_set_rx_desc_type(struct rtl_hw *hw)
+ {
+-	switch (hw->mcfg) {
+-	case CFG_METHOD_54:
+-	case CFG_METHOD_55:
+-	case CFG_METHOD_56:
+-	case CFG_METHOD_57:
+-	case CFG_METHOD_58:
+-	case CFG_METHOD_59:
+-	case CFG_METHOD_60:
+-	case CFG_METHOD_61:
+-		RTL_W8(hw, 0xD8, RTL_R8(hw, 0xD8) & ~EnableRxDescV4_0);
++	/* Type-4 chips select the 32-byte RSS descriptor via 0xD8. */
++	switch (hw->chipset_name) {
++	case RTL8125BP:
++	case RTL8125D:
++	case RTL8125CP:
++	case RTL9151A:
++	case RTL8125K:
++	case RTL8126A:
++	case RTL8127:
++		if (hw->HwSuppRxDescType == RX_DESC_RING_TYPE_4)
++			RTL_W8(hw, 0xD8, RTL_R8(hw, 0xD8) | EnableRxDescV4_0);
++		else
++			RTL_W8(hw, 0xD8, RTL_R8(hw, 0xD8) & ~EnableRxDescV4_0);
+ 		break;
+-	case CFG_METHOD_70:
+-	case CFG_METHOD_71:
+-	case CFG_METHOD_91:
+-		RTL_W8(hw, 0xD8, RTL_R8(hw, 0xD8) | EnableRxDescV4_0);
++	default:
+ 		break;
+ 	}
+ }
+@@ -1812,10 +1812,7 @@
+ 		hw->mcu_pme_setting = rtl_mac_ocp_read(hw, 0xE00A);
+ 	}
+ 
+-	if (hw->mcfg >= CFG_METHOD_70)
+-		hw->EnableRss = 1;
+-	else
+-		hw->EnableRss = 0;
++	hw->EnableRss = rtl_hw_supports_rss(hw);
+ 
+ 	if (hw->mcfg == CFG_METHOD_49 || hw->mcfg == CFG_METHOD_52) {
+ 		if ((rtl_mac_ocp_read(hw, 0xD442) & BIT_5) &&
+@@ -1851,12 +1848,36 @@
+ 		break;
+ 	}
+ 
+-	switch (hw->mcfg) {
+-	case CFG_METHOD_70:
+-	case CFG_METHOD_71:
+-	case CFG_METHOD_91:
+-		hw->HwSuppRxDescType = RX_DESC_RING_TYPE_4;
+-		hw->RxDescLength = RX_DESC_LEN_TYPE_4;
++	/*
++	 * RTL8125A/B report RSS in 32-byte type-3 RX descriptors.
++	 * Later 8125/8126/8127 use type-4. Linux r8125 only switches
++	 * away from type-1 when RSS is enabled.
++	 */
++	switch (hw->chipset_name) {
++	case RTL8125A:
++	case RTL8125B:
++		if (hw->EnableRss) {
++			hw->HwSuppRxDescType = RX_DESC_RING_TYPE_3;
++			hw->RxDescLength = RX_DESC_LEN_TYPE_3;
++		} else {
++			hw->HwSuppRxDescType = RX_DESC_RING_TYPE_1;
++			hw->RxDescLength = RX_DESC_LEN_TYPE_1;
++		}
++		break;
++	case RTL8125BP:
++	case RTL8125D:
++	case RTL8125CP:
++	case RTL9151A:
++	case RTL8125K:
++	case RTL8126A:
++	case RTL8127:
++		if (hw->EnableRss) {
++			hw->HwSuppRxDescType = RX_DESC_RING_TYPE_4;
++			hw->RxDescLength = RX_DESC_LEN_TYPE_4;
++		} else {
++			hw->HwSuppRxDescType = RX_DESC_RING_TYPE_1;
++			hw->RxDescLength = RX_DESC_LEN_TYPE_1;
++		}
+ 		break;
+ 	default:
+ 		hw->HwSuppRxDescType = RX_DESC_RING_TYPE_1;
+@@ -2452,7 +2473,7 @@
+ 	rtl_disable_cfg9346_write(hw);
+ }
+ 
+-void
++int
+ rtl_get_tally_stats(struct rtl_hw *hw, struct rte_eth_stats *rte_stats)
+ {
+ 	struct rtl_counters *counters;
+@@ -2463,7 +2484,10 @@
+ 	counters = hw->tally_vaddr;
+ 	paddr = hw->tally_paddr;
+ 	if (!counters)
+-		return;
++		return -ENODEV;
++
++	/* Discard CPU cache lines before the NIC writes the DMA snapshot. */
++	rtl_sync_tally_dma(hw);
+ 
+ 	RTL_W32(hw, CounterAddrHigh, (u64)paddr >> 32);
+ 	cmd = (u64)paddr & DMA_BIT_MASK(32);
+@@ -2476,18 +2500,22 @@
+ 
+ 		wait_cnt++;
+ 		if (wait_cnt > 20)
+-			break;
++			return -ETIMEDOUT;
+ 	}
+ 
++	/* CounterDump completion orders MMIO, not non-coherent DMA memory. */
++	rtl_sync_tally_dma(hw);
++
+ 	/* RX errors */
+-	rte_stats->imissed = rte_le_to_cpu_64(counters->rx_missed);
+-	rte_stats->ierrors = rte_le_to_cpu_64(counters->rx_errors);
++	rte_stats->imissed = rte_le_to_cpu_16(counters->rx_missed);
++	rte_stats->ierrors = rte_le_to_cpu_32(counters->rx_errors);
+ 
+ 	/* TX errors */
+ 	rte_stats->oerrors = rte_le_to_cpu_64(counters->tx_errors);
+ 
+ 	rte_stats->ipackets = rte_le_to_cpu_64(counters->rx_packets);
+ 	rte_stats->opackets = rte_le_to_cpu_64(counters->tx_packets);
++	return 0;
+ }
+ 
+ void
+@@ -2515,6 +2543,8 @@
+ 
+ 	hw->tally_vaddr = mz->addr;
+ 	hw->tally_paddr = mz->iova;
++	memset(hw->tally_vaddr, 0, sizeof(struct rtl_counters));
++	rtl_sync_tally_dma(hw);
+ 
+ 	/* Fill tally addrs */
+ 	RTL_W32(hw, CounterAddrHigh, (u64)hw->tally_paddr >> 32);
+--- a/drivers/net/r8169/r8169_hw.h
++++ b/drivers/net/r8169/r8169_hw.h
+@@ -57,7 +57,8 @@
+ void rtl_set_link_option(struct rtl_hw *hw, u8 autoneg, u32 speed, u8 duplex,
+ 			 enum rtl_fc_mode fc);
+ 
+-void rtl_get_tally_stats(struct rtl_hw *hw, struct rte_eth_stats *rte_stats);
++void rtl_sync_tally_dma(struct rtl_hw *hw);
++int rtl_get_tally_stats(struct rtl_hw *hw, struct rte_eth_stats *rte_stats);
+ void rtl_clear_tally_stats(struct rtl_hw *hw);
+ 
+ int rtl_tally_init(struct rte_eth_dev *dev);
+@@ -65,6 +66,25 @@
+ 
+ bool rtl_is_8125(struct rtl_hw *hw);
+ 
++static inline bool
++rtl_hw_supports_rss(struct rtl_hw *hw)
++{
++	switch (hw->chipset_name) {
++	case RTL8125A:
++	case RTL8125B:
++	case RTL8125BP:
++	case RTL8125D:
++	case RTL8125CP:
++	case RTL9151A:
++	case RTL8125K:
++	case RTL8126A:
++	case RTL8127:
++		return true;
++	default:
++		return false;
++	}
++}
++
+ u32 rtl_eri_read(struct rtl_hw *hw, int addr, int len, int type);
+ int rtl_eri_write(struct rtl_hw *hw, int addr, int len, u32 value, int type);
+ 
+--- a/drivers/net/r8169/r8169_rxtx.c
++++ b/drivers/net/r8169/r8169_rxtx.c
+@@ -5,8 +5,10 @@
+ #include <stdio.h>
+ #include <errno.h>
+ #include <stdint.h>
++#include <stdlib.h>
+ 
+ #include <rte_eal.h>
++#include <rte_cycles.h>
+ 
+ #include <rte_common.h>
+ #include <rte_interrupts.h>
+@@ -25,6 +27,77 @@
+ #include "r8169_hw.h"
+ #include "r8169_logs.h"
+ 
++/* Isolated RK3588 experiment; enable only after kernel coherence probing. */
++static int rtl_nc_dma;
++static unsigned int rtl_nc_line;
++#define RTL_NC_REARM_LINES 8
++
++static void
++rtl_nc_init(void)
++{
++#if defined(RTE_ARCH_ARM64)
++	const char *value = getenv("R8169_DMA_NONCOHERENT");
++	uint64_t ctr;
++	if (!value || strcmp(value, "1"))
++		return;
++	__asm__ volatile("mrs %0, ctr_el0" : "=r" (ctr));
++	rtl_nc_line = 4U << ((ctr >> 16) & 15);
++	rtl_nc_dma = 1;
++#endif
++}
++
++/* Issue cache maintenance without waiting; callers must complete it before
++ * reading DMA data or publishing ownership to the NIC. */
++static inline void
++rtl_nc_sync_range(const void *address, size_t length, int invalidate)
++{
++#if defined(RTE_ARCH_ARM64)
++	uintptr_t start, end;
++	if (!rtl_nc_dma || !length)
++		return;
++	start = (uintptr_t)address & ~(uintptr_t)(rtl_nc_line - 1);
++	end = (uintptr_t)address + length;
++	for (; start < end; start += rtl_nc_line) {
++		if (invalidate)
++			__asm__ volatile("dc civac, %0" :: "r" (start) : "memory");
++		else
++			__asm__ volatile("dc cvac, %0" :: "r" (start) : "memory");
++	}
++#else
++	RTE_SET_USED(address);
++	RTE_SET_USED(length);
++	RTE_SET_USED(invalidate);
++#endif
++}
++
++static inline void
++rtl_nc_sync_complete(void)
++{
++#if defined(RTE_ARCH_ARM64)
++	if (rtl_nc_dma)
++		__asm__ volatile("dsb sy" ::: "memory");
++#endif
++}
++
++static inline void
++rtl_nc_sync(const void *address, size_t length, int invalidate)
++{
++	if (!rtl_nc_dma || !length)
++		return;
++	rtl_nc_sync_range(address, length, invalidate);
++	rtl_nc_sync_complete();
++}
++
++/* The tally buffer is device-owned, just like RX descriptors. Keep the
++ * control-path synchronization on the same platform-specific DMA mechanism. */
++void
++rtl_sync_tally_dma(struct rtl_hw *hw)
++{
++	if (!rtl_nc_dma)
++		rtl_nc_init();
++	rtl_nc_sync(hw->tally_vaddr, sizeof(struct rtl_counters), 1);
++}
++
+ /* Bit mask to indicate what bits required for building TX context */
+ #define RTL_TX_OFFLOAD_MASK (RTE_MBUF_F_TX_IPV6 |		\
+ 			     RTE_MBUF_F_TX_IPV4 |		\
+@@ -501,13 +574,59 @@
+ 		rtl_map_to_asic(hw, rtl_get_rxdesc(hw, rxq->hw_ring, i),
+ 				dma_addr);
+ 		rxe[i].mbuf = mbuf;
++		rtl_nc_sync((char *)mbuf->buf_addr + RTE_PKTMBUF_HEADROOM, hw->rx_buf_sz, 1);
+ 	}
+ 
+ 	rtl_mark_as_last_descriptor(hw, rtl_get_rxdesc(hw, rxq->hw_ring, i));
++	rtl_nc_sync(rxq->hw_ring, hw->RxDescLength * (rxq->nb_rx_desc + 1), 0);
+ 
+ 	return 0;
+ }
+ 
++/* Publish only cache lines entirely consumed by software. A per-descriptor
++ * writeback could overwrite status in a neighbouring NIC-owned descriptor. */
++static void
++rtl_nc_rearm(struct rtl_rx_queue *rxq, uint16_t first, uint16_t count)
++{
++	struct rtl_hw *hw = rxq->hw;
++	unsigned int i;
++
++	for (i = first; i < (unsigned int)first + count; i++) {
++		struct rte_mbuf *mb = rxq->sw_ring[i].mbuf;
++		rtl_nc_sync_range((char *)mb->buf_addr + RTE_PKTMBUF_HEADROOM,
++				  hw->rx_buf_sz, 1);
++	}
++	/* Prepare every buffer before any OWN store: dirty descriptor lines
++	 * may reach memory through eviction before the explicit clean. */
++	rtl_nc_sync_complete();
++	for (i = first; i < (unsigned int)first + count; i++) {
++		struct rte_mbuf *mb = rxq->sw_ring[i].mbuf;
++		rtl_map_to_asic(hw, rtl_get_rxdesc(hw, rxq->hw_ring, i),
++			rte_cpu_to_le_64(rte_mbuf_data_iova_default(mb)));
++	}
++	rtl_nc_sync(rtl_get_rxdesc(hw, rxq->hw_ring, first),
++		    count * hw->RxDescLength, 0);
++}
++
++/* Collect at most RTL_NC_REARM_LINES complete lines; flush at the ring end so a batch
++ * never wraps or leaves consumed entries pending when polling them again. */
++static inline void
++rtl_nc_rearm_consumed(struct rtl_rx_queue *rxq, uint16_t consumed,
++		      unsigned int per_line, uint16_t *first, uint16_t *count)
++{
++	/* Non-coherent init requires power-of-two type-3 descriptor stride
++	 * dividing the CTR-derived power-of-two cache line. */
++	if ((consumed + 1) & (per_line - 1))
++		return;
++	if (!*count)
++		*first = consumed + 1 - per_line;
++	*count += per_line;
++	if (*count >= RTL_NC_REARM_LINES * per_line || consumed + 1 == rxq->nb_rx_desc) {
++		rtl_nc_rearm(rxq, *first, *count);
++		*count = 0;
++	}
++}
++
+ static void
+ rtl8125_hw_set_features(struct rtl_hw *hw, uint64_t offloads)
+ {
+@@ -520,6 +639,11 @@
+ 	else
+ 		rx_config &= ~(EnableInnerVlan | EnableOuterVlan);
+ 
++	if (hw->HwSuppRxDescType == RX_DESC_RING_TYPE_3)
++		rx_config |= EnableRxDescV3;
++	else if (hw->HwSuppRxDescType == RX_DESC_RING_TYPE_4)
++		rx_config &= ~EnableRxDescV3;
++
+ 	RTL_W32(hw, RxConfig, rx_config);
+ 
+ 	cp_cmd = RTL_R16(hw, CPlusCmd);
+@@ -565,11 +689,17 @@
+ rtl_hw_set_rx_packet_filter(struct rtl_hw *hw)
+ {
+ 	int rx_mode;
++	u32 rx_config;
+ 
+ 	hw->hw_ops.hw_init_rxcfg(hw);
+ 
+ 	rx_mode = AcceptBroadcast | AcceptMyPhys;
+-	RTL_W32(hw, RxConfig, rx_mode | (RTL_R32(hw, RxConfig)));
++	rx_config = rx_mode | RTL_R32(hw, RxConfig);
++	if (hw->HwSuppRxDescType == RX_DESC_RING_TYPE_3)
++		rx_config |= EnableRxDescV3;
++	else if (hw->HwSuppRxDescType == RX_DESC_RING_TYPE_4)
++		rx_config &= ~EnableRxDescV3;
++	RTL_W32(hw, RxConfig, rx_config);
+ }
+ 
+ static void
+@@ -594,7 +724,7 @@
+ 	int i;
+ 
+ 	for (i = 0; i < RTL_MAX_INDIRECTION_TABLE_ENTRIES; i++)
+-		hw->rss_indir_tbl[i] = i & (nb_rx_queues - 1);
++		hw->rss_indir_tbl[i] = (u8)(i % nb_rx_queues);
+ 
+ 	for (i = 0; i < RTL_RSS_KEY_SIZE; i += sizeof(u64)) {
+ 		rand = rte_rand();
+@@ -628,6 +758,14 @@
+ 	u16 nb_rx_queues = dev->data->nb_rx_queues;
+ 	u16 desc_start_addr_lo[QUEUE_NUM_LIMIT];
+ 
++	rtl_nc_init();
++	if (rtl_nc_dma && (hw->HwSuppRxDescType != RX_DESC_RING_TYPE_3 ||
++	    !hw->EnableTxNoClose || rtl_nc_line % hw->RxDescLength ||
++	    (dev->data->dev_conf.rxmode.offloads & RTE_ETH_RX_OFFLOAD_SCATTER))) {
++		PMD_INIT_LOG(ERR, "non-coherent experiment requires type-3 RX, TX no-close, no scatter");
++		return -ENOTSUP;
++	}
++
+ 	desc_start_addr_lo[0] = RxDescAddrLow;
+ 	for (i = 1; i < nb_rx_queues; i++)
+ 		desc_start_addr_lo[i] = (u16)(RDSAR_Q1_LOW_8125 + (i - 1) * 8);
+@@ -700,73 +838,67 @@
+ 	else
+ 		rtl_clear_rdu = rtl8168_clear_rdu;
+ 
+-	/* RSS_control_0 */
+-	if (hw->EnableRss) {
+-		rtl_init_rss(hw, nb_rx_queues);
+-		rtl8125_config_rss(hw, nb_rx_queues);
+-	} else {
+-		RTL_W32(hw, RSS_CTRL_8125, 0x00);
+-	}
++	if (rtl_is_8125(hw)) {
++		/* RSS_control_0 */
++		if (hw->EnableRss) {
++			rtl_init_rss(hw, nb_rx_queues);
++			rtl8125_config_rss(hw, nb_rx_queues);
++		} else {
++			RTL_W32(hw, RSS_CTRL_8125, 0x00);
++		}
+ 
+-	/* VMQ_control */
+-	rtl8125_set_rx_q_num(hw, nb_rx_queues);
++		/* VMQ_control: hardware RX queue count */
++		rtl8125_set_rx_q_num(hw, nb_rx_queues);
++	}
+ 
+ 	RTL_W8(hw, ChipCmd, RTL_R8(hw, ChipCmd) | CmdRxEnb);
+ 
+ 	return 0;
+ }
+ 
+-static inline bool
+-rtl_rx_ip_csum(struct rtl_hw *hw, uint32_t opts1, uint32_t opts2)
+-{
+-	switch (hw->HwSuppRxDescType) {
+-	case RX_DESC_RING_TYPE_3:
+-		return (((opts2 & RxV4F_v3) && !(opts2 & RxIPF_v3)) ||
+-			(opts2 & RxV6F_v3));
+-	case RX_DESC_RING_TYPE_4:
+-		return (((opts2 & RxV4F_v4) && !(opts1 & RxIPF_v4)) ||
+-			(opts2 & RxV6F_v4));
+-	default:
+-		return (((opts2 & RxV4F) && !(opts1 & RxIPF)) ||
+-			(opts2 & RxV6F));
+-	}
+-}
+-
+-static inline bool
+-rtl_rx_l4_csum(struct rtl_hw *hw, uint32_t opts1, uint32_t opts2)
+-{
+-	switch (hw->HwSuppRxDescType) {
+-	case RX_DESC_RING_TYPE_3:
+-		return (((opts2 & RxTCPT_v3) && !(opts2 & RxTCPF_v3)) ||
+-			((opts2 & RxUDPT_v3) && !(opts2 & RxUDPF_v3)));
+-	case RX_DESC_RING_TYPE_4:
+-		return (((opts1 & RxTCPT_v4) && !(opts1 & RxTCPF_v4)) ||
+-			((opts1 & RxUDPT_v4) && !(opts1 & RxUDPF_v4)));
+-	default:
+-		return (((opts1 & RxTCPT) && !(opts1 & RxTCPF)) ||
+-			((opts1 & RxUDPT) && !(opts1 & RxUDPF)));
+-	}
+-}
+-
++/* Decode the protocol ID as a field: TCP|UDP means IP-only, not both. */
+ static inline uint64_t
+ rtl_rx_desc_error_to_pkt_flags(struct rtl_rx_queue *rxq, uint32_t opts1,
+ 			       uint32_t opts2)
+ {
+-	uint64_t pkt_flags = 0;
+-	struct rtl_hw *hw = rxq->hw;
+-
+-	if (!(rxq->offloads & RTE_ETH_RX_OFFLOAD_CHECKSUM))
+-		goto exit;
++	uint64_t flags = 0;
++	uint32_t status, tcp, udp, ip_bad, tcp_bad, udp_bad;
++	bool ipv4 = (opts2 & RxV4F) != 0;
++	bool ipv6 = (opts2 & RxV6F) != 0;
+ 
+-	/* RX csum offload for RTL8169*/
+-	if (rtl_rx_ip_csum(hw, opts1, opts2)) {
+-		pkt_flags |= RTE_MBUF_F_RX_IP_CKSUM_GOOD;
+-		if (rtl_rx_l4_csum(hw, opts1, opts2))
+-			pkt_flags |= RTE_MBUF_F_RX_L4_CKSUM_GOOD;
++	switch (rxq->hw->HwSuppRxDescType) {
++	case RX_DESC_RING_TYPE_3:
++		status = opts2;
++		tcp = RxTCPT_v3; udp = RxUDPT_v3;
++		ip_bad = RxIPF_v3; tcp_bad = RxTCPF_v3; udp_bad = RxUDPF_v3;
++		break;
++	case RX_DESC_RING_TYPE_4:
++		status = opts1;
++		tcp = RxTCPT_v4; udp = RxUDPT_v4;
++		ip_bad = RxIPF_v4; tcp_bad = RxTCPF_v4; udp_bad = RxUDPF_v4;
++		break;
++	default:
++		status = opts1;
++		tcp = RxTCPT; udp = RxUDPT;
++		ip_bad = RxIPF; tcp_bad = RxTCPF; udp_bad = RxUDPF;
++		break;
+ 	}
+ 
+-exit:
+-	return pkt_flags;
++	if (ipv4 && (rxq->offloads & RTE_ETH_RX_OFFLOAD_IPV4_CKSUM))
++		flags |= (status & ip_bad) ? RTE_MBUF_F_RX_IP_CKSUM_BAD :
++			RTE_MBUF_F_RX_IP_CKSUM_GOOD;
++	/* IPv6 has no header checksum. Unrecognized/unsupported L4 stays UNKNOWN. */
++	if ((!ipv4 && !ipv6) || (ipv4 && (status & ip_bad)))
++		return flags;
++	if ((status & (tcp | udp)) == tcp &&
++	    (rxq->offloads & RTE_ETH_RX_OFFLOAD_TCP_CKSUM))
++		flags |= (status & tcp_bad) ? RTE_MBUF_F_RX_L4_CKSUM_BAD :
++			RTE_MBUF_F_RX_L4_CKSUM_GOOD;
++	else if ((status & (tcp | udp)) == udp &&
++		 (rxq->offloads & RTE_ETH_RX_OFFLOAD_UDP_CKSUM))
++		flags |= (status & udp_bad) ? RTE_MBUF_F_RX_L4_CKSUM_BAD :
++			RTE_MBUF_F_RX_L4_CKSUM_GOOD;
++	return flags;
+ }
+ 
+ static u32
+@@ -809,6 +941,20 @@
+ 	return rte_le_to_cpu_32(opts2);
+ }
+ 
++#define RXS_8125B_RSS_UDP	(1U << 9)
++#define RXS_8125_RSS_IPV4	(1U << 10)
++#define RXS_8125_RSS_IPV6	(1U << 12)
++#define RXS_8125_RSS_TCP	(1U << 13)
++#define RTL8125_RXS_RSS_L3_TYPE_MASK \
++	(RXS_8125_RSS_IPV4 | RXS_8125_RSS_IPV6)
++
++#define RXS_8125B_RSS_UDP_V4	(1U << 27)
++#define RXS_8125_RSS_IPV4_V4	(1U << 28)
++#define RXS_8125_RSS_IPV6_V4	(1U << 29)
++#define RXS_8125_RSS_TCP_V4	(1U << 30)
++#define RTL8125_RXS_RSS_L3_TYPE_MASK_V4 \
++	(RXS_8125_RSS_IPV4_V4 | RXS_8125_RSS_IPV6_V4)
++
+ static u32
+ rtl_get_rx_desc_hash(struct rtl_hw *hw, struct rtl_rx_desc *desc)
+ {
+@@ -826,6 +972,36 @@
+ 	return rte_le_to_cpu_32(rss);
+ }
+ 
++static void
++rtl_rx_set_rss_hash(struct rtl_hw *hw, struct rtl_rx_desc *desc,
++		    struct rte_mbuf *mb)
++{
++	u32 rss_info;
++
++	if (!hw->EnableRss)
++		return;
++
++	switch (hw->HwSuppRxDescType) {
++	case RX_DESC_RING_TYPE_3:
++		rss_info = rte_le_to_cpu_16(((struct rtl_rx_descv3 *)desc)
++					    ->RxDescNormalDDWord2.HeaderInfo);
++		if (!(rss_info & RTL8125_RXS_RSS_L3_TYPE_MASK))
++			return;
++		break;
++	case RX_DESC_RING_TYPE_4:
++		rss_info = rte_le_to_cpu_32(((struct rtl_rx_descv4 *)desc)
++					    ->RxDescNormalDDWord1.RSSInfo);
++		if (!(rss_info & RTL8125_RXS_RSS_L3_TYPE_MASK_V4))
++			return;
++		break;
++	default:
++		return;
++	}
++
++	mb->hash.rss = rtl_get_rx_desc_hash(hw, desc);
++	mb->ol_flags |= RTE_MBUF_F_RX_RSS_HASH;
++}
++
+ static inline int
+ rtl_check_rx_desc_error(struct rtl_hw *hw, uint32_t opts1)
+ {
+@@ -839,6 +1015,54 @@
+ 	}
+ }
+ 
++/* Bound lookahead to eight descriptors and this ring segment. Keep the
++ * synchronized snapshot for the receive loop; never publish OWN here. */
++static inline unsigned int
++rtl_rx_scan_ready(struct rtl_rx_queue *rxq, uint16_t tail, uint16_t limit,
++		  uintptr_t *synced_line, uint16_t *scanned)
++{
++	struct rtl_hw *hw = rxq->hw;
++	unsigned int count = 0;
++	uint16_t synced_until = tail;
++
++	*scanned = 0;
++	while (*scanned < 8 && tail < rxq->nb_rx_desc && count < limit) {
++		struct rtl_rx_desc *rxd = rtl_get_rxdesc(hw, rxq->hw_ring, tail);
++		uint32_t opts1;
++
++		if (rtl_nc_dma && tail >= synced_until) {
++			uintptr_t line = (uintptr_t)rxd &
++					 ~(uintptr_t)(rtl_nc_line - 1);
++			if (line != *synced_line) {
++				uint16_t end = tail + 8 - *scanned;
++
++				if (end > rxq->nb_rx_desc)
++					end = rxq->nb_rx_desc;
++				if ((unsigned int)(end - tail) > limit - count)
++					end = tail + limit - count;
++				/* No OWN stores occur in this bounded forward window.
++				 * Complete all line invalidations before reading status. */
++				rtl_nc_sync(rxd, (end - tail) * hw->RxDescLength, 1);
++				synced_until = end;
++				*synced_line = (uintptr_t)rtl_get_rxdesc(hw,
++					rxq->hw_ring, end - 1) &
++					~(uintptr_t)(rtl_nc_line - 1);
++			} else {
++				/* The caller already synchronized the first line. */
++				synced_until = tail + 1;
++			}
++		}
++		opts1 = rtl_rx_desc_opts1(hw, rxd);
++		if (opts1 & DescOwn)
++			break;
++		if (!rtl_check_rx_desc_error(hw, opts1))
++			count++;
++		(*scanned)++;
++		tail++;
++	}
++	return count;
++}
++
+ /* PMD receive function */
+ uint16_t
+ rtl_recv_pkts(void *rx_queue, struct rte_mbuf **rx_pkts, uint16_t nb_pkts)
+@@ -861,11 +1085,30 @@
+ 	uint32_t opts1;
+ 	uint32_t opts2;
+ 	uint64_t dma_addr;
++	uintptr_t synced_line = UINTPTR_MAX;
++	uint16_t rearm_first = 0, rearm_count = 0;
++	const unsigned int per_line = rtl_nc_dma ? rtl_nc_line / hw->RxDescLength : 0;
++	uint64_t rx_bytes = 0;
++	struct rte_mbuf *refill[8];
++	unsigned int refill_count = 0, refill_used = 0;
++	uint16_t scanned = 0;
++	int bulk_failed = 0;
+ 
+ 	RTE_ASSERT(RTL_R8(hw, ChipCmd) & CmdRxEnb);
+ 
+ 	while (nb_rx < nb_pkts) {
++		uint16_t consumed = tail;
+ 		rxd = rtl_get_rxdesc(hw, rxq->hw_ring, tail);
++		if (rtl_nc_dma && !scanned) {
++			uintptr_t line = (uintptr_t)rxd &
++					 ~(uintptr_t)(rtl_nc_line - 1);
++			/* Reuse this burst's snapshot of neighbouring descriptors.
++			 * A cached OWN still stops polling; the next call refreshes it. */
++			if (line != synced_line) {
++				rtl_nc_sync(rxd, hw->RxDescLength, 1);
++				synced_line = line;
++			}
++		}
+ 
+ 		opts1 = rtl_rx_desc_opts1(hw, rxd);
+ 		if (opts1 & DescOwn)
+@@ -880,15 +1123,38 @@
+ 
+ 		if (unlikely(rtl_check_rx_desc_error(hw, opts1))) {
+ 			stats->rx_errors++;
+-			rtl_mark_to_asic(hw, rxd);
++			if (rtl_nc_dma)
++				rtl_nc_rearm_consumed(rxq, tail, per_line,
++					      &rearm_first, &rearm_count);
++			else
++				rtl_mark_to_asic(hw, rxd);
+ 			nb_hold++;
+-			tail = (tail + 1) % nb_rx_desc;
++			if (scanned)
++				scanned--;
++			if (++tail == nb_rx_desc)
++				tail = 0;
+ 			continue;
+ 		}
+ 
+ 		opts2 = rtl_rx_desc_opts2(hw, rxd);
+ 
+-		new_mb = rte_mbuf_raw_alloc(rxq->mb_pool);
++		if (refill_used == refill_count && !bulk_failed) {
++			unsigned int count = rtl_rx_scan_ready(rxq, tail,
++				nb_pkts - nb_rx, &synced_line, &scanned);
++
++			refill_used = refill_count = 0;
++			if (count > 1) {
++				if (!rte_mbuf_raw_alloc_bulk(rxq->mb_pool, refill, count))
++					refill_count = count;
++				else
++					/* Preserve partial success under buffer pressure. */
++					bulk_failed = 1;
++			}
++		}
++		if (refill_used < refill_count)
++			new_mb = refill[refill_used++];
++		else
++			new_mb = rte_mbuf_raw_alloc(rxq->mb_pool);
+ 		if (!new_mb) {
+ 			PMD_RX_LOG(DEBUG, "RX mbuf alloc failed port_id=%u "
+ 				   "queue_id=%u",
+@@ -903,7 +1169,8 @@
+ 		rmb = rxe->mbuf;
+ 
+ 		/* Prefetch next mbufs */
+-		tail = (tail + 1) % nb_rx_desc;
++		if (++tail == nb_rx_desc)
++			tail = 0;
+ 		rte_prefetch0(sw_ring[tail].mbuf);
+ 
+ 		/*
+@@ -921,38 +1188,57 @@
+ 		dma_addr = rte_cpu_to_le_64(rte_mbuf_data_iova_default(new_mb));
+ 
+ 		/* Setup RX descriptor */
+-		rtl_map_to_asic(hw, rxd, dma_addr);
++		if (!rtl_nc_dma)
++			rtl_map_to_asic(hw, rxd, dma_addr);
+ 
+ 		pkt_len = opts1 & 0x00003fff;
+ 		pkt_len -= RTE_ETHER_CRC_LEN;
+ 
+ 		rmb->data_off = RTE_PKTMBUF_HEADROOM;
++		/* Only metadata is read below; packet data is consumed by the
++		 * caller after the burst's completion barrier. */
++		rtl_nc_sync_range(rte_pktmbuf_mtod(rmb, void *), pkt_len, 1);
+ 		rte_prefetch1((char *)rmb->buf_addr + rmb->data_off);
+-		rmb->nb_segs = 1;
+-		rmb->next = NULL;
++		/* raw alloc guarantees nb_segs=1 and next=NULL; the RX ring
++		 * preserves those fields until this single-segment receive. */
+ 		rmb->pkt_len = pkt_len;
+ 		rmb->data_len = pkt_len;
+ 		rmb->port = rxq->port_id;
+ 
+-		if (hw->EnableRss)
+-			rmb->hash.rss = rtl_get_rx_desc_hash(hw, rxd);
+-
+ 		if (opts2 & RxVlanTag)
+ 			rmb->vlan_tci = rte_bswap16(opts2 & 0xffff);
+ 
+ 		rmb->ol_flags = rtl_rx_desc_error_to_pkt_flags(rxq, opts1, opts2);
++		rtl_rx_set_rss_hash(hw, rxd, rmb);
++		if (rtl_nc_dma)
++			rtl_nc_rearm_consumed(rxq, consumed, per_line,
++				      &rearm_first, &rearm_count);
+ 
+ 		/*
+ 		 * Store the mbuf address into the next entry of the array
+ 		 * of returned packets.
+ 		 */
+ 		rx_pkts[nb_rx++] = rmb;
++		if (scanned)
++			scanned--;
+ 
+-		stats->rx_bytes += pkt_len;
+-		stats->rx_packets++;
++		rx_bytes += pkt_len;
+ 	}
+ 
++	if (refill_used < refill_count)
++		rte_mbuf_raw_free_bulk(rxq->mb_pool, refill + refill_used,
++				       refill_count - refill_used);
++	/* Flush even on an error-only burst or allocation failure. Partial
++	 * descriptor lines remain withheld until all neighbours are consumed. */
++	if (rtl_nc_dma && rearm_count)
++		rtl_nc_rearm(rxq, rearm_first, rearm_count);
++	if (nb_rx)
++		rtl_nc_sync_complete();
+ 	rxq->rx_tail = tail;
++	if (nb_rx) {
++		stats->rx_bytes += rx_bytes;
++		stats->rx_packets += nb_rx;
++	}
+ 
+ 	nb_hold = (uint16_t)(nb_hold + rxq->nb_rx_hold);
+ 	if (nb_hold > rxq->rx_free_thresh) {
+@@ -1125,13 +1411,12 @@
+ 		}
+ 
+ 		first_seg->port = rxq->port_id;
+-		if (hw->EnableRss)
+-			first_seg->hash.rss = rtl_get_rx_desc_hash(hw, rxd);
+ 
+ 		if (opts2 & RxVlanTag)
+ 			first_seg->vlan_tci = rte_bswap16(opts2 & 0xffff);
+ 
+ 		first_seg->ol_flags = rtl_rx_desc_error_to_pkt_flags(rxq, opts1, opts2);
++		rtl_rx_set_rss_hash(hw, rxd, first_seg);
+ 
+ 		rte_prefetch1((char *)first_seg->buf_addr + first_seg->data_off);
+ 
+@@ -1394,6 +1679,8 @@
+ 	u16 hw_clo_ptr0_reg, sw_tail_ptr0_reg, reg_len;
+ 	int i;
+ 
++	rtl_nc_init();
++
+ 	desc_start_addr_lo[0] = TxDescStartAddrLow;
+ 	for (i = 1; i < nb_tx_queues; i++)
+ 		desc_start_addr_lo[i] = (u16)(TNPDS_Q1_LOW_8125 + (i - 1) * 8);
+@@ -1419,6 +1706,7 @@
+ 
+ 	for (i = 0; i < nb_tx_queues; i++) {
+ 		txq = dev->data->tx_queues[i];
++		rtl_nc_sync(txq->hw_ring, sizeof(*txq->hw_ring) * txq->nb_tx_desc, 0);
+ 
+ 		RTL_W32(hw, desc_start_addr_lo[i],
+ 			(u64)txq->hw_ring_phys_addr & DMA_BIT_MASK(32));
+@@ -1445,7 +1733,8 @@
+ 
+ 	rtl_disable_cfg9346_write(hw);
+ 
+-	rtl8125_set_tx_q_num(hw, nb_tx_queues);
++	if (rtl_is_8125(hw))
++		rtl8125_set_tx_q_num(hw, nb_tx_queues);
+ 
+ 	RTL_W8(hw, ChipCmd, RTL_R8(hw, ChipCmd) | CmdTxEnb);
+ 
+@@ -1585,6 +1874,7 @@
+ 	struct rtl_tx_entry *txe = NULL;
+ 	uint16_t desc_count = 0;
+ 	const uint16_t nb_tx_desc = txq->nb_tx_desc;
++	const int nc_no_close = rtl_nc_dma && hw->EnableTxNoClose;
+ 	uint16_t tail;
+ 	u32 len;
+ 	u32 opts[2] = {0};
+@@ -1646,8 +1936,18 @@
+ 		txe->mbuf = m_seg;
+ 
+ 		txd->opts2 = rte_cpu_to_le_32(opts2);
+-		rte_wmb();
++		/* No-close publication is ordered at the burst's doorbell. */
++		if (!nc_no_close)
++			rte_wmb();
+ 		txd->opts1 = rte_cpu_to_le_32(opts1);
++		if (nc_no_close) {
++			/* No-close consumes only through the published SW tail.
++			 * Complete data and descriptor cleans before that MMIO. */
++			rtl_nc_sync_range(rte_pktmbuf_mtod(m_seg, void *), len, 0);
++		} else {
++			rtl_nc_sync(rte_pktmbuf_mtod(m_seg, void *), len, 0);
++			rtl_nc_sync(txd, sizeof(*txd), 0);
++		}
+ 
+ 		tail = (tail + 1) % nb_tx_desc;
+ 
+@@ -1931,7 +2231,7 @@
+ 		else
+ 			RTL_W16(hw, txq->sw_tail_ptr_reg, txq->tx_tail);
+ 	else
+-		RTL_W16(hw, TPPOLL_8125, BIT_0);
++		RTL_W16(hw, TPPOLL_8125, (u16)(1U << txq->queue_id));
+ }
+ 
+ static void
+@@ -1949,6 +2249,31 @@
+ 		rtl8168_doorbell(hw);
+ }
+ 
++static inline void
++rtl_nc_tx_sync(struct rtl_tx_queue *txq, uint32_t first)
++{
++	uint32_t count;
++	uint16_t index, contiguous;
++
++	if (!rtl_nc_dma || !txq->hw->EnableTxNoClose)
++		return;
++	count = txq->tx_tail - first;
++	if (!count)
++		return;
++	index = first % txq->nb_tx_desc;
++	contiguous = RTE_MIN(count, (uint32_t)(txq->nb_tx_desc - index));
++	/* No-close leaves descriptor memory CPU-owned. Clean each touched
++	 * cache line once, including partial lines and a possible ring wrap. */
++	rtl_nc_sync_range(&txq->hw_ring[index],
++			  contiguous * sizeof(*txq->hw_ring), 0);
++	if (count > contiguous)
++		rtl_nc_sync_range(txq->hw_ring,
++				  (count - contiguous) * sizeof(*txq->hw_ring), 0);
++	/* One completion point orders all packet data and descriptors before
++	 * the NIC sees the new tail, even if descriptor lines evict early. */
++	rtl_nc_sync_complete();
++}
++
+ /* PMD transmit function */
+ uint16_t
+ rtl_xmit_pkts(void *tx_queue, struct rte_mbuf **tx_pkts, uint16_t nb_pkts)
+@@ -1957,6 +2282,8 @@
+ 	struct rtl_hw *hw = txq->hw;
+ 	struct rte_mbuf *tx_pkt;
+ 	uint16_t nb_tx;
++	uint64_t deadline = 0;
++	const uint32_t first = txq->tx_tail;
+ 
+ 	RTE_ASSERT(RTL_R8(hw, ChipCmd) & CmdTxEnb);
+ 
+@@ -1968,21 +2295,36 @@
+ 	for (nb_tx = 0; nb_tx < nb_pkts; nb_tx++) {
+ 		tx_pkt = *tx_pkts++;
+ 
+-		if (txq->tx_free < tx_pkt->nb_segs)
+-			break;
+-
+-		/* Check mbuf is valid */
++		/* Check mbuf is valid before waiting for descriptor space. */
+ 		if (tx_pkt->nb_segs == 0 || tx_pkt->pkt_len == 0 ||
+ 		    (tx_pkt->nb_segs > 1 && tx_pkt->next == NULL))
+ 			break;
+ 
++		while (txq->tx_free < tx_pkt->nb_segs) {
++			/* VPP stops retrying on a zero return. Reclaim first,
++			 * then absorb transient backpressure within a shared
++			 * 2 ms budget for this burst, never an unbounded wait.
++			 */
++			rtl_tx_clean(hw, txq);
++			if (txq->tx_free >= tx_pkt->nb_segs)
++				break;
++			if (deadline == 0)
++				deadline = rte_get_timer_cycles() + rte_get_timer_hz() / 500;
++			if (rte_get_timer_cycles() >= deadline)
++				goto done;
++			rte_delay_us_block(5);
++		}
++
+ 		rtl_xmit_pkt(hw, txq, tx_pkt);
+ 	}
+ 
++done:
+ 	rte_wmb();
+ 
+-	if (nb_tx > 0)
++	if (nb_tx > 0) {
++		rtl_nc_tx_sync(txq, first);
+ 		rtl_doorbell(hw, txq);
++	}
+ 
+ 	PMD_TX_LOG(DEBUG, "%s %d transmitted", __func__, nb_tx);
+ 

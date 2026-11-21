@@ -1,0 +1,107 @@
+--- a/kernel_vpp_ipsec.c
++++ b/kernel_vpp_ipsec.c
+@@ -712,1 +712,43 @@
+-/**
++/**
++ * Find an SPD already bound to a VPP interface.
++ *
++ * VPP keeps the interface/SPD binding independently of charon's in-memory
++ * hash table.  This matters when charon is restarted while VPP is left
++ * running: the binding must be adopted instead of creating a second SPD.
++ */
++static uint32_t
++get_spd_for_sw_if_index (uint32_t sw_if_index)
++{
++  char *out = NULL;
++  int out_len;
++  vl_api_ipsec_spd_interface_dump_t *mp;
++  vl_api_ipsec_spd_interface_details_t *rmp;
++  uint32_t spd_id = ~0;
++
++  mp = vl_msg_api_alloc (sizeof (*mp));
++  clib_memset (mp, 0, sizeof (*mp));
++  u16 msg_id =
++    vl_msg_api_get_msg_index ((u8 *) "ipsec_spd_interface_dump_8971de19");
++  mp->_vl_msg_id = htons (msg_id);
++  mp->spd_index_valid = FALSE;
++
++  if (vac->send_dump (vac, (char *) mp, sizeof (*mp), &out, &out_len))
++    goto error;
++
++  rmp = (void *) out;
++  for (int i = 0; i < out_len / sizeof (*rmp); i++)
++    {
++      if (ntohl (rmp->sw_if_index) == sw_if_index)
++        {
++          spd_id = ntohl (rmp->spd_index);
++          break;
++        }
++      rmp++;
++    }
++
++error:
++  free (out);
++  vl_msg_api_free (mp);
++  return spd_id;
++}
++/**
+@@ -896,13 +896,24 @@
+-      spd_id = ref_get (&this->next_spd_id);
+-      if (spd_add_del (TRUE, spd_id))
+-	{
+-	  DBG1 (DBG_KNL, "spd_add_del %d failed!!!!!", spd_id);
+-	  goto error;
+-	}
+-      if (interface_add_del_spd (TRUE, spd_id, sw_if_index))
+-	{
+-	  DBG1 (DBG_KNL, "interface_add_del_spd  %d %d failed!!!!!", spd_id,
+-		sw_if_index);
+-	  goto error;
+-	}
++      spd_id = get_spd_for_sw_if_index (sw_if_index);
++      if (spd_id == ~0)
++	{
++	  spd_id = ref_get (&this->next_spd_id);
++	  if (spd_add_del (TRUE, spd_id))
++	    {
++	      DBG1 (DBG_KNL, "spd_add_del %d failed!!!!!", spd_id);
++	      goto error;
++	    }
++	  if (interface_add_del_spd (TRUE, spd_id, sw_if_index))
++	    {
++	      /* Do not leave an unbound SPD behind after a failed bind. */
++	      spd_add_del (FALSE, spd_id);
++	      DBG1 (DBG_KNL, "interface_add_del_spd  %d %d failed!!!!!", spd_id,
++		    sw_if_index);
++	      goto error;
++	    }
++	}
++      else
++	{
++	  DBG1 (DBG_KNL, "adopting existing SPD %d for %s (sw_if_index %d)",
++		spd_id, interface, sw_if_index);
++	}
+       INIT (spd, .spd_id = spd_id, .sw_if_index = sw_if_index, .policy_num = 0,
+@@ -966,2 +1020,6 @@
+-  bool is_ipv6 = false;
+-  if (id->src_ts->get_type (id->src_ts) == TS_IPV6_ADDR_RANGE)
++  bool is_ipv6;
++  if (id->dir == POLICY_IN)
++    is_ipv6 = addr->get_family (addr) == AF_INET6;
++  else
++    is_ipv6 = id->src_ts->get_type (id->src_ts) == TS_IPV6_ADDR_RANGE;
++  if (is_ipv6)
+@@ -1050,9 +1108,9 @@
+   else
+     {
+-      dst_from = id->src_ts->get_from_address (id->src_ts);
+-      dst_to = id->src_ts->get_to_address (id->src_ts);
++      dst_from = data->src->get_address (data->src);
++      dst_to = dst_from;
+       dst = host_create_from_chunk (is_ipv6 ? AF_INET6 : AF_INET, dst_from, 0);
+-      src_from = id->dst_ts->get_from_address (id->dst_ts);
+-      src_to = id->dst_ts->get_to_address (id->dst_ts);
++      src_from = data->dst->get_address (data->dst);
++      src_to = src_from;
+       src = host_create_from_chunk (is_ipv6 ? AF_INET6 : AF_INET, src_from, 0);
+     }

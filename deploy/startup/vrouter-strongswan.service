@@ -1,0 +1,30 @@
+[Unit]
+Description=strongSwan IKEv2 Daemon with VPP IPsec Dataplane
+Documentation=https://strongswan.org
+Requires=vrouter-vpp.service vrouter-network-prep.service vrouter-firewall.service
+After=vrouter-vpp.service vrouter-network-prep.service vrouter-firewall.service
+PartOf=vrouter-vpp.service
+Before=vrouter-pd-sync.service
+
+[Service]
+Type=simple
+NetworkNamespacePath=/run/netns/vrouter-ipsec
+PrivateMounts=yes
+RuntimeDirectory=vrouter-strongswan
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=restart
+BindPaths=/run/vrouter-strongswan:/run /etc/vpp/ipsec.d:/etc/ipsec.d /etc/vpp/ipsec-plugins:/usr/lib/ipsec/plugins
+BindReadOnlyPaths=/run/vpp
+Environment=LD_LIBRARY_PATH=/opt/vpp-vrouter-migration/ipsec-ip6-udp/lib:/opt/vpp-nic1-test/dpdk/lib/aarch64-linux-gnu:/opt/vpp-nic1-test/vpp/lib/aarch64-linux-gnu
+Environment=STRONGSWAN_CONF=/etc/strongswan-vpp.conf
+ExecStart=/usr/lib/ipsec/starter --daemon charon --nofork --conf /etc/vpp/ipsec.conf
+ExecStartPost=/usr/bin/python3 /opt/vpp-vrouter-migration/source/scripts/vrouter/startup/vrouter-strongswan-ready.py --socket /run/vpp/cli.sock --pid $MAINPID --conn eap-mschapv2 --timeout 25
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=2
+KillMode=control-group
+LimitNOFILE=65536
+TimeoutStartSec=35
+
+[Install]
+WantedBy=vrouter-vpp.service multi-user.target

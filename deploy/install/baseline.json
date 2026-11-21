@@ -1,0 +1,11 @@
+{
+  "name": "vrouter-rx-checksum-batch64-rearm8-acl-cache-v3-20261101-fib-path-copy-nat-fix-batch-context-next-guard-context-cursor",
+  "files": {
+    "usr/local/lib/vpp-vrouter/plugins/acl_plugin.so": "9c126c015d5e530b9b436afcdc74cb94cc925f1b1f4a34264ffffd12a87322e0",
+    "usr/local/lib/vpp-vrouter/plugins/dpdk_plugin.so": "e3a395a7114db9e2a75a10a0ea0e023137ce83c044c350a6f7632ffd79f208ce",
+    "usr/local/lib/aarch64-linux-gnu/dpdk/pmds-26.1/librte_net_r8169.so.26.1": "dcb194e56c0703c3c8ba6bc493ddb8873d94ebbc2c98816ca830940fb37f49f0",
+    "usr/local/lib/vpp-vrouter/lib/aarch64-linux-gnu/libvnet.so.26.06.0": "ec6882253cbe8f7f09f91057c1bb4fac23728b92a0c1ae3d5e6421b5b1f24891",
+    "usr/local/lib/vpp-vrouter/plugins/nat44_ei_plugin.so": "259a6fe920b2a53fd19b8a2a67f1b0e7b3c11a2c7ecfea0ad2f9f1ff63c4352a",
+    "usr/local/lib/vpp-vrouter/plugins/nat_ei_context_plugin.so": "7aaec95afbeba00ff08b3b451e9e6604e3172539402fca3a2599b3b824d857fa"
+  }
+}

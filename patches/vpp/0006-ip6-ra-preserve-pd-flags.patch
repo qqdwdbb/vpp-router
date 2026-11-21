@@ -1,0 +1,15 @@
+--- a/src/vnet/ip6-nd/ip6_ra.c
++++ b/src/vnet/ip6-nd/ip6_ra.c
+@@ -1386,9 +1386,9 @@
+                                     0 /* use_default */,
+                                     valid_time,
+                                     preferred_time,
+-                                    0 /* no_advertise */,
+-                                    0 /* off_link */,
+-                                    0 /* no_autoconfig */,
++                                    !this_prefix->enabled /* no_advertise */,
++                                    !this_prefix->adv_on_link_flag /* off_link */,
++                                    !this_prefix->adv_autonomous_flag /* no_autoconfig */,
+                                     0 /* no_onlink */,
+                                     0 /* is_no */);
+             if (rv != 0)

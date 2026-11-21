@@ -1,0 +1,17 @@
+[Unit]
+Description=VROUTER Linux Network & TAP Preparation for VPP
+Documentation=https://github.com
+Requires=vrouter-vpp.service
+After=vrouter-vpp.service
+PartOf=vrouter-vpp.service
+Before=vrouter-strongswan.service vrouter-dns-route-gate.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/python3 /opt/vpp-vrouter-migration/source/scripts/vrouter/startup/vrouter-network-prep.py --action start --config /etc/vpp/vrouter-network.json
+ExecStop=/usr/bin/python3 /opt/vpp-vrouter-migration/source/scripts/vrouter/startup/vrouter-network-prep.py --action stop --config /etc/vpp/vrouter-network.json
+TimeoutStartSec=30
+
+[Install]
+WantedBy=vrouter-vpp.service multi-user.target

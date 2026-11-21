@@ -1,0 +1,26 @@
+[Unit]
+Description=VROUTER VPP DNS Route Fast-Path Barrier
+Documentation=https://github.com
+Requires=vrouter-vpp.service vrouter-network-prep.service vrouter-firewall.service
+After=vrouter-vpp.service vrouter-network-prep.service vrouter-firewall.service dnsmasq.service
+PartOf=vrouter-vpp.service
+
+[Service]
+Type=simple
+Environment=PATH=/opt/vpp-nic1-test/vpp/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=PYTHONPATH=/opt/vpp-vrouter-migration/runtime/python
+Environment=VPP_API_DIR=/opt/vpp-nic1-test/vpp/share/vpp/api
+Environment=LD_LIBRARY_PATH=/opt/vpp-vrouter-migration/ipsec-ip6-udp/lib:/opt/vpp-nic1-test/dpdk/lib/aarch64-linux-gnu:/opt/vpp-nic1-test/vpp/lib/aarch64-linux-gnu
+ExecStartPre=/usr/sbin/nft -f /etc/vpp/dns-route-gate.nft
+ExecStart=/usr/bin/python3 /opt/vpp-vrouter-migration/source/scripts/dns-route-gate.py --config /etc/vpp/dns-route-gate.json
+Restart=on-failure
+RestartSec=2
+KillMode=control-group
+UMask=0077
+StateDirectory=vpp-nft-route-sync
+StateDirectoryMode=0700
+RuntimeDirectory=vpp-nft-route-sync
+RuntimeDirectoryMode=0700
+
+[Install]
+WantedBy=vrouter-vpp.service multi-user.target

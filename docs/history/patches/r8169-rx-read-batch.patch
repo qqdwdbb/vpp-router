@@ -1,0 +1,65 @@
+--- a/r8169_rxtx.c
++++ b/r8169_rxtx.c
+@@ -30,6 +30,7 @@
+ /* Isolated RK3588 experiment; enable only after kernel coherence probing. */
+ static int rtl_nc_dma;
+ static unsigned int rtl_nc_line;
++#define RTL_NC_REARM_LINES 4
+ 
+ static void
+ rtl_nc_init(void)
+@@ -607,7 +608,7 @@
+ 		    count * hw->RxDescLength, 0);
+ }
+ 
+-/* Collect at most four complete lines; flush at the ring end so a batch
++/* Collect at most RTL_NC_REARM_LINES complete lines; flush at the ring end so a batch
+  * never wraps or leaves consumed entries pending when polling them again. */
+ static inline void
+ rtl_nc_rearm_consumed(struct rtl_rx_queue *rxq, uint16_t consumed,
+@@ -620,7 +621,7 @@
+ 	if (!*count)
+ 		*first = consumed + 1 - per_line;
+ 	*count += per_line;
+-	if (*count >= 4 * per_line || consumed + 1 == rxq->nb_rx_desc) {
++	if (*count >= RTL_NC_REARM_LINES * per_line || consumed + 1 == rxq->nb_rx_desc) {
+ 		rtl_nc_rearm(rxq, *first, *count);
+ 		*count = 0;
+ 	}
+@@ -1030,18 +1031,33 @@
+ {
+ 	struct rtl_hw *hw = rxq->hw;
+ 	unsigned int count = 0;
++	uint16_t synced_until = tail;
+ 
+ 	*scanned = 0;
+ 	while (*scanned < 8 && tail < rxq->nb_rx_desc && count < limit) {
+ 		struct rtl_rx_desc *rxd = rtl_get_rxdesc(hw, rxq->hw_ring, tail);
+ 		uint32_t opts1;
+ 
+-		if (rtl_nc_dma) {
++		if (rtl_nc_dma && tail >= synced_until) {
+ 			uintptr_t line = (uintptr_t)rxd &
+ 					 ~(uintptr_t)(rtl_nc_line - 1);
+ 			if (line != *synced_line) {
+-				rtl_nc_sync(rxd, hw->RxDescLength, 1);
+-				*synced_line = line;
++				uint16_t end = tail + 8 - *scanned;
++
++				if (end > rxq->nb_rx_desc)
++					end = rxq->nb_rx_desc;
++				if ((unsigned int)(end - tail) > limit - count)
++					end = tail + limit - count;
++				/* No OWN stores occur in this bounded forward window.
++				 * Complete all line invalidations before reading status. */
++				rtl_nc_sync(rxd, (end - tail) * hw->RxDescLength, 1);
++				synced_until = end;
++				*synced_line = (uintptr_t)rtl_get_rxdesc(hw,
++					rxq->hw_ring, end - 1) &
++					~(uintptr_t)(rtl_nc_line - 1);
++			} else {
++				/* The caller already synchronized the first line. */
++				synced_until = tail + 1;
+ 			}
+ 		}
+ 		opts1 = rtl_rx_desc_opts1(hw, rxd);

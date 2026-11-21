@@ -1,0 +1,4 @@
+# Fixed Fake-IP pool
+198.18.0.0/15
+
+# Add the destination ranges to route through the proxy, one per line.

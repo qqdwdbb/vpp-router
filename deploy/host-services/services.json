@@ -1,0 +1,28 @@
+{
+  "gateway": "10.61.20.1",
+  "host": "10.61.20.2",
+  "wan_address": "10.61.10.2",
+  "wan_interface": "nic0-dpdk.100",
+  "wan_backend": "10.63.20.2",
+  "wan_host_interface": "vpp-hostsvc",
+  "trusted_ipv4": ["10.61.20.0/24", "10.62.0.0/16", "10.64.20.0/24"],
+  "services": [
+    {"name": "ssh", "protocol": "tcp", "ports": [22], "wan": false},
+    {"name": "dns-tcp", "protocol": "tcp", "ports": [53], "wan": false},
+    {"name": "dns-udp", "protocol": "udp", "ports": [53], "wan": false},
+    {"name": "http", "protocol": "tcp", "ports": [80], "wan": false},
+    {"name": "socks", "protocol": "tcp", "ports": [1080], "wan": false},
+    {"name": "kms", "protocol": "tcp", "ports": [1688], "wan": false},
+    {"name": "turn-tcp", "protocol": "tcp", "ports": [42004, 42005], "wan": true, "dedicated_ingress": true},
+    {"name": "turn-udp", "protocol": "udp", "ports": [42004, 42005], "wan": true, "owner_unit": "vrouter-coturn.service", "dedicated_ingress": true},
+    {"name": "turn-relay", "protocol": "udp", "ports": ["49152-50151"], "wan": true, "owner_unit": "vrouter-coturn.service", "dedicated_ingress": true},
+    {"name": "gost", "protocol": "tcp", "ports": [42002], "wan": true}
+  ],
+  "internal_services": [
+    {"name": "tproxy", "protocols": ["tcp", "udp"], "port": 2080, "listen_addresses": ["127.0.0.1", "::1"], "purpose": "TPROXY interception only; not a direct LAN/WAN service"}
+  ],
+  "dynamic_services": [
+    {"name": "nebula", "protocol": "udp", "process": "nebula", "wan": true}
+  ],
+  "upnp": "separate-vpp-nat-adapter-required"
+}

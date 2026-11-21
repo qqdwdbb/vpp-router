@@ -1,0 +1,111 @@
+--- a/drivers/net/r8169/r8169_rxtx.c
++++ b/drivers/net/r8169/r8169_rxtx.c
+@@ -1020,6 +1020,39 @@
+ 	default:
+ 		return (opts1 & RxRES);
+ 	}
++}
++
++/* Bound lookahead to eight descriptors and this ring segment. Keep the
++ * synchronized snapshot for the receive loop; never publish OWN here. */
++static inline unsigned int
++rtl_rx_scan_ready(struct rtl_rx_queue *rxq, uint16_t tail, uint16_t limit,
++		  uintptr_t *synced_line, uint16_t *scanned)
++{
++	struct rtl_hw *hw = rxq->hw;
++	unsigned int count = 0;
++
++	*scanned = 0;
++	while (*scanned < 8 && tail < rxq->nb_rx_desc && count < limit) {
++		struct rtl_rx_desc *rxd = rtl_get_rxdesc(hw, rxq->hw_ring, tail);
++		uint32_t opts1;
++
++		if (rtl_nc_dma) {
++			uintptr_t line = (uintptr_t)rxd &
++					 ~(uintptr_t)(rtl_nc_line - 1);
++			if (line != *synced_line) {
++				rtl_nc_sync(rxd, hw->RxDescLength, 1);
++				*synced_line = line;
++			}
++		}
++		opts1 = rtl_rx_desc_opts1(hw, rxd);
++		if (opts1 & DescOwn)
++			break;
++		if (!rtl_check_rx_desc_error(hw, opts1))
++			count++;
++		(*scanned)++;
++		tail++;
++	}
++	return count;
+ }
+ 
+ /* PMD receive function */
+@@ -1048,13 +1081,17 @@
+ 	uint16_t rearm_first = 0, rearm_count = 0;
+ 	const unsigned int per_line = rtl_nc_dma ? rtl_nc_line / hw->RxDescLength : 0;
+ 	uint64_t rx_bytes = 0;
++	struct rte_mbuf *refill[8];
++	unsigned int refill_count = 0, refill_used = 0;
++	uint16_t scanned = 0;
++	int bulk_failed = 0;
+ 
+ 	RTE_ASSERT(RTL_R8(hw, ChipCmd) & CmdRxEnb);
+ 
+ 	while (nb_rx < nb_pkts) {
+ 		uint16_t consumed = tail;
+ 		rxd = rtl_get_rxdesc(hw, rxq->hw_ring, tail);
+-		if (rtl_nc_dma) {
++		if (rtl_nc_dma && !scanned) {
+ 			uintptr_t line = (uintptr_t)rxd &
+ 					 ~(uintptr_t)(rtl_nc_line - 1);
+ 			/* Reuse this burst's snapshot of neighbouring descriptors.
+@@ -1084,6 +1121,8 @@
+ 			else
+ 				rtl_mark_to_asic(hw, rxd);
+ 			nb_hold++;
++			if (scanned)
++				scanned--;
+ 			if (++tail == nb_rx_desc)
+ 				tail = 0;
+ 			continue;
+@@ -1091,7 +1130,23 @@
+ 
+ 		opts2 = rtl_rx_desc_opts2(hw, rxd);
+ 
+-		new_mb = rte_mbuf_raw_alloc(rxq->mb_pool);
++		if (refill_used == refill_count && !bulk_failed) {
++			unsigned int count = rtl_rx_scan_ready(rxq, tail,
++				nb_pkts - nb_rx, &synced_line, &scanned);
++
++			refill_used = refill_count = 0;
++			if (count > 1) {
++				if (!rte_mbuf_raw_alloc_bulk(rxq->mb_pool, refill, count))
++					refill_count = count;
++				else
++					/* Preserve partial success under buffer pressure. */
++					bulk_failed = 1;
++			}
++		}
++		if (refill_used < refill_count)
++			new_mb = refill[refill_used++];
++		else
++			new_mb = rte_mbuf_raw_alloc(rxq->mb_pool);
+ 		if (!new_mb) {
+ 			PMD_RX_LOG(DEBUG, "RX mbuf alloc failed port_id=%u "
+ 				   "queue_id=%u",
+@@ -1156,10 +1211,15 @@
+ 		 * of returned packets.
+ 		 */
+ 		rx_pkts[nb_rx++] = rmb;
++		if (scanned)
++			scanned--;
+ 
+ 		rx_bytes += pkt_len;
+ 	}
+ 
++	if (refill_used < refill_count)
++		rte_mbuf_raw_free_bulk(rxq->mb_pool, refill + refill_used,
++				       refill_count - refill_used);
+ 	/* Flush even on an error-only burst or allocation failure. Partial
+ 	 * descriptor lines remain withheld until all neighbours are consumed. */
+ 	if (rtl_nc_dma && rearm_count)

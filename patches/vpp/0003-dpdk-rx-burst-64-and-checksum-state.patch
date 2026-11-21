@@ -1,0 +1,43 @@
+--- a/src/plugins/dpdk/device/node.c
++++ b/src/plugins/dpdk/device/node.c
+@@ -357,7 +357,7 @@
+   /* get up to DPDK_RX_BURST_SZ buffers from PMD */
+   while (n_rx_packets < DPDK_RX_BURST_SZ)
+     {
+-      u32 n_to_rx = clib_min (DPDK_RX_BURST_SZ - n_rx_packets, 32);
++      u32 n_to_rx = clib_min (DPDK_RX_BURST_SZ - n_rx_packets, 64);
+ 
+       n = rte_eth_rx_burst (xd->port_id, queue_id, ptd->mbufs + n_rx_packets,
+ 			    n_to_rx);
+@@ -397,20 +397,21 @@
+   if (PREDICT_FALSE ((or_flags & RTE_MBUF_F_RX_LRO)))
+     dpdk_process_lro_offload (xd, ptd, n_rx_packets);
+ 
+-  if (PREDICT_FALSE ((or_flags & RTE_MBUF_F_RX_L4_CKSUM_BAD) &&
+-		     (xd->buffer_flags & VNET_BUFFER_F_L4_CHECKSUM_CORRECT)))
++  /* Trust only an explicit per-packet GOOD result. UNKNOWN/NONE must reach
++     software validation; BAD is computed but incorrect. */
++  if (xd->buffer_flags & VNET_BUFFER_F_L4_CHECKSUM_COMPUTED)
+     {
+       for (n = 0; n < n_rx_packets; n++)
+ 	{
+-	  /* Check and reset VNET_BUFFER_F_L4_CHECKSUM_CORRECT flag
+-	     if RTE_MBUF_F_RX_L4_CKSUM_BAD is set.
+-	     The magic num 3 is the bit number of RTE_MBUF_F_RX_L4_CKSUM_BAD
+-	     which is defined in DPDK.
+-	     Have made a STATIC_ASSERT in this file to ensure this.
+-	   */
++	  u32 status = ptd->flags[n] & RTE_MBUF_F_RX_L4_CKSUM_MASK;
+ 	  b0 = vlib_buffer_from_rte_mbuf (ptd->mbufs[n]);
+-	  b0->flags ^= (ptd->flags[n] & RTE_MBUF_F_RX_L4_CKSUM_BAD)
+-		       << (VNET_BUFFER_F_LOG2_L4_CHECKSUM_CORRECT - 3);
++	  b0->flags &= ~(VNET_BUFFER_F_L4_CHECKSUM_COMPUTED |
++			 VNET_BUFFER_F_L4_CHECKSUM_CORRECT);
++	  if (status == RTE_MBUF_F_RX_L4_CKSUM_GOOD)
++	    b0->flags |= VNET_BUFFER_F_L4_CHECKSUM_COMPUTED |
++			 VNET_BUFFER_F_L4_CHECKSUM_CORRECT;
++	  else if (status == RTE_MBUF_F_RX_L4_CKSUM_BAD)
++	    b0->flags |= VNET_BUFFER_F_L4_CHECKSUM_COMPUTED;
+ 	}
+     }
+ 

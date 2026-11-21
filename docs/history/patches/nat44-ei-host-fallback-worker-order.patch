@@ -1,0 +1,116 @@
+--- a/src/plugins/nat/nat44-ei/nat44_ei.c
++++ b/src/plugins/nat/nat44-ei/nat44_ei.c
+@@ -1752,6 +1752,13 @@
+   u32 proto;
+   u32 next_worker_index = 0;
+ 
++  proto = ip_proto_to_nat_proto (ip0->protocol);
++  udp = ip4_next_header (ip0);
++  port = vnet_buffer (b)->ip.reass.l4_dst_port;
++
++  /* unknown protocol */
++  if (PREDICT_FALSE (proto == NAT_PROTOCOL_OTHER))
++    {
+   /* first try static mappings without port */
+   if (PREDICT_FALSE (pool_elts (nm->static_mappings)))
+     {
+@@ -1764,13 +1771,6 @@
+ 	}
+     }
+ 
+-  proto = ip_proto_to_nat_proto (ip0->protocol);
+-  udp = ip4_next_header (ip0);
+-  port = vnet_buffer (b)->ip.reass.l4_dst_port;
+-
+-  /* unknown protocol */
+-  if (PREDICT_FALSE (proto == NAT_PROTOCOL_OTHER))
+-    {
+       /* use current thread */
+       return vlib_get_thread_index ();
+     }
+@@ -1805,10 +1805,27 @@
+ 	}
+     }
+ 
++  /* Existing translations retain their worker before host fallback. */
++  init_nat_k (&kv, ip0->dst_address, port, rx_fib_index0, proto);
++  if (!clib_bihash_search_8_8 (&nm->out2in, &kv, &value))
++    return nat_value_get_thread_index (&value);
++
+   /* try static mappings with port */
+   if (PREDICT_FALSE (pool_elts (nm->static_mappings)))
+     {
+       init_nat_k (&kv, ip0->dst_address, port, rx_fib_index0, proto);
++      if (!clib_bihash_search_8_8 (&nm->static_mapping_by_external, &kv,
++				   &value))
++	{
++	  m = pool_elt_at_index (nm->static_mappings, value.value);
++	  return m->workers[0];
++	}
++    }
++
++  /* Address-only host fallback follows sessions and exact native ports */
++  if (PREDICT_FALSE (pool_elts (nm->static_mappings)))
++    {
++      init_nat_k (&kv, ip0->dst_address, 0, rx_fib_index0, 0);
+       if (!clib_bihash_search_8_8 (&nm->static_mapping_by_external, &kv,
+ 				   &value))
+ 	{
+@@ -3495,3 +3512,57 @@
+     [NAT44_EI_CLASSIFY_NEXT_DROP] = "error-drop",
+   },
+ };
++
++static clib_error_t *
++nat44_ei_host_fallback_capability (vlib_main_t *vm, unformat_input_t *input,
++                                 vlib_cli_command_t *cmd)
++{
++  vlib_cli_output (vm, "host-fallback-v1 pool-receive-v1");
++  return 0;
++}
++VLIB_CLI_COMMAND (nat44_ei_host_fallback_capability_command, static) = {
++  .path = "show nat44 ei host-fallback",
++  .short_help = "show nat44 ei host-fallback",
++  .function = nat44_ei_host_fallback_capability,
++};
++
++/* EI shares its pool receive route across outside ports in the same FIB.
++ * Pin the selected pool to its physical egress after configuring all egresses.
++ * This changes ARP/receive ownership, not the NAT allocator or sessions. */
++static clib_error_t *
++nat44_ei_pool_receive_command (vlib_main_t *vm, unformat_input_t *input,
++                             vlib_cli_command_t *cmd)
++{
++  nat44_ei_main_t *nm = &nat44_ei_main;
++  ip4_address_t address;
++  nat44_ei_address_t *pool_address;
++  nat44_ei_interface_t *interface;
++  u32 sw_if_index;
++  int found_address = 0, found_interface = 0;
++  if (!nm->enabled)
++    return clib_error_return (0, "NAT44 EI is disabled");
++  if (!unformat (input, "%U %U", unformat_ip4_address, &address,
++                 unformat_vnet_sw_interface, vnet_get_main (), &sw_if_index) ||
++      unformat_check_input (input) != UNFORMAT_END_OF_INPUT)
++    return clib_error_return (0, "Expected pool IPv4 address and outside interface");
++  vec_foreach (pool_address, nm->addresses)
++    if (pool_address->addr.as_u32 == address.as_u32)
++      found_address = 1;
++  pool_foreach (interface, nm->output_feature_interfaces)
++    if (interface->sw_if_index == sw_if_index &&
++        nat44_ei_interface_is_outside (interface))
++      found_interface = 1;
++  pool_foreach (interface, nm->interfaces)
++    if (interface->sw_if_index == sw_if_index &&
++        nat44_ei_interface_is_outside (interface))
++      found_interface = 1;
++  if (!found_address || !found_interface)
++    return clib_error_return (0, "Expected configured pool address and NAT outside interface");
++  nat44_ei_add_del_addr_to_fib (&address, 32, sw_if_index, 1);
++  return 0;
++}
++VLIB_CLI_COMMAND (nat44_ei_pool_receive_command_registration, static) = {
++  .path = "nat44 ei pool receive",
++  .short_help = "nat44 ei pool receive <pool-ip4> <outside-interface>",
++  .function = nat44_ei_pool_receive_command,
++};

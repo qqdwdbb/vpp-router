@@ -1,0 +1,6 @@
+[Unit]
+Description=Check VPP restart limit and request Linux takeover
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /usr/local/lib/vpp-vrouter/scripts/vrouter/startup/vrouter-linux-fallback.py on-failure

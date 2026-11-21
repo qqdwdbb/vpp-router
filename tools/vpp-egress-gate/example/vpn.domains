@@ -1,0 +1,2 @@
+# Dual-stack names on one exit; v4 and v6 use the same interface.
+vpn.example

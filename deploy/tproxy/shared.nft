@@ -1,0 +1,13 @@
+# proxylist/proxylist6 already belong to inet/mangle. Touch only these owned chains.
+add chain inet mangle vpp_tproxy_shared { type filter hook prerouting priority mangle; policy accept; }
+flush chain inet mangle vpp_tproxy_shared
+# Preserve Linux-local DNS/SSH and LAN DHCP/IPv6 multicast control traffic.
+add rule inet mangle vpp_tproxy_shared iifname "br-mgmt" fib daddr type local return
+add rule inet mangle vpp_tproxy_shared iifname "br-mgmt" ip daddr { 224.0.0.0/4, 255.255.255.255 } return
+add rule inet mangle vpp_tproxy_shared iifname "br-mgmt" ip6 daddr { ff00::/8, fe80::/10 } return
+add rule inet mangle vpp_tproxy_shared iifname "br-mgmt" ip daddr @proxylist meta l4proto { tcp, udp } counter tproxy ip to 127.0.0.1:2080 meta mark set 0x2080 accept
+add rule inet mangle vpp_tproxy_shared iifname "br-mgmt" ip6 daddr @proxylist6 meta l4proto { tcp, udp } counter tproxy ip6 to [::1]:2080 meta mark set 0x2080 accept
+add chain inet mangle vpp_tproxy_shared_guard { type filter hook forward priority filter; policy accept; }
+flush chain inet mangle vpp_tproxy_shared_guard
+add rule inet mangle vpp_tproxy_shared_guard iifname "br-mgmt" ip daddr @proxylist meta l4proto { tcp, udp } counter drop
+add rule inet mangle vpp_tproxy_shared_guard iifname "br-mgmt" ip6 daddr @proxylist6 meta l4proto { tcp, udp } counter drop

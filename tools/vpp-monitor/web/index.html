@@ -1,0 +1,856 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VPP 监控</title>
+<link rel="stylesheet" href="uPlot.min.css">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main>
+  <header>
+    <h1>VPP 监控</h1>
+    <div class="state" id="state" data-state="down" role="status"><i aria-hidden="true">✕</i><b>连接中</b> <span></span></div>
+    <nav class="segmented main-nav" aria-label="页面">
+      <a id="nav-overview" href="/">总览</a>
+      <a id="nav-interfaces" href="/interfaces">接口</a>
+      <a id="nav-lan" href="/lan">局域网</a>
+      <a id="nav-vpn" href="/vpn">VPN</a>
+      <a id="nav-routes" href="/routes">路由</a>
+      <a id="nav-proxy" href="/proxy">代理</a>
+      <a id="nav-firewall" href="/firewall">防火墙</a>
+      <a id="nav-system" href="/system">系统</a>
+    </nav>
+    <button id="logout" class="close logout">退出</button>
+  </header>
+
+  <div id="page-overview">
+  <div class="filters">
+    <div class="segmented" id="ranges" role="group" aria-label="时间范围"></div>
+    <label>接口 <select id="iface"></select></label>
+    <button id="open-flows" class="close" hidden>出口连接</button>
+  </div>
+
+  <h2 class="section">VPP</h2>
+  <section class="tiles" id="tiles" aria-label="VPP 当前值"></section>
+  <section class="charts" id="charts"></section>
+
+  <h2 class="section">主机</h2>
+  <p class="note section-note">VPP 的 worker 是忙轮询，所在核心的 CPU 使用率一直接近 100%，这不代表转发压力大，转发压力看上面的向量率。</p>
+  <section class="tiles" id="host-tiles" aria-label="主机当前值"></section>
+  <section class="charts" id="host-charts"></section>
+
+  <section class="tables">
+    <div class="card wide">
+      <h2>接口</h2>
+      <div class="scroll"><table id="ifaces"><thead><tr>
+        <th>名称</th><th>接收</th><th>发送</th><th>接收 pps</th><th>发送 pps</th><th>丢弃/s</th><th>rx-miss/s</th><th>rx-no-buf/s</th><th>错误/s</th>
+      </tr></thead><tbody></tbody></table></div>
+    </div>
+    <div class="card">
+      <h2>节点计数器</h2>
+      <p class="note counter-note">来自 VPP 的 <code>/err/*</code>，名字叫 error，但大多只是计数，不代表都是错误。</p>
+      <h3>需关注</h3>
+      <div class="scroll"><table id="errors"><thead><tr><th>节点</th><th class="text">原因</th><th>速率/s</th><th>累计</th></tr></thead><tbody></tbody></table></div>
+      <p class="note" id="errors-empty" hidden>没有需关注的计数器。</p>
+      <details id="normal-box" hidden>
+        <summary>正常计数（<span id="normal-count">0</span>）</summary>
+        <div class="scroll"><table id="normal"><thead><tr><th>节点</th><th class="text">原因</th><th>速率/s</th><th>累计</th></tr></thead><tbody></tbody></table></div>
+      </details>
+    </div>
+    <div class="card">
+      <h2>节点开销</h2>
+      <div class="scroll"><table id="nodes"><thead><tr><th>节点</th><th>向量/s</th><th>调用/s</th><th>向量/调用</th><th>时钟/向量</th></tr></thead><tbody></tbody></table></div>
+      <p class="note" id="nodes-off" hidden>VPP 没有更新节点计数器。需要在 startup.conf 加上 <code>statseg { per-node-counters on }</code>，会给主线程增加少量开销。</p>
+    </div>
+    <div class="card">
+      <h2>VPP 运行记录</h2>
+      <p class="note counter-note">每次启动一行，最多保留 20 次。监控没运行期间的多次重启只会记为一次。运行时长包含停机的时间。</p>
+      <div class="scroll"><table id="vpp-runs"><thead><tr><th>序号</th><th>启动时间</th><th>运行时长</th><th>类型</th></tr></thead><tbody></tbody></table></div>
+      <p class="note" id="vpp-runs-empty" hidden>还没有记录。</p>
+    </div>
+  </section>
+
+  <footer id="footer"></footer>
+  </div>
+
+  <div id="page-vpn" hidden>
+    <section class="card route-card" id="vpn-configs-card" hidden>
+      <div class="dialog-head">
+        <h2>WireGuard 配置</h2>
+        <div class="head-actions">
+          <button id="vpn-config-import" class="close">导入配置</button>
+          <button id="vpn-config-add" class="close">添加配置</button>
+        </div>
+      </div>
+      <p class="note section-help" id="vpn-configs-summary"></p>
+      <div class="scroll"><table id="vpn-configs"><thead><tr><th>状态</th><th class="text">名字</th><th class="text">接口</th><th class="text">地址</th><th class="text">源地址</th><th>监听端口</th><th class="text">公钥</th><th>节点</th><th class="text">DNS 转发目标</th><th>操作</th></tr></thead><tbody></tbody></table></div>
+      <p class="note">停止配置后可编辑源地址和 DNS 转发。源地址应填写 VPP 接口上用于收发隧道包的地址。</p>
+      <p class="note error" id="vpn-configs-message" role="alert"></p>
+    </section>
+    <section class="card route-card">
+      <div class="dialog-head">
+        <h2>WireGuard</h2>
+        <button id="vpn-wg-add" class="close" hidden>添加节点</button>
+      </div>
+      <p class="note section-help" id="vpn-wg-summary">读取中…</p>
+      <div class="scroll"><table id="vpn-wg"><thead><tr><th>状态</th><th class="text">客户端</th><th class="text">接口</th><th class="text">内网地址</th><th class="text">公网地址</th><th>最近握手</th><th>接收</th><th>发送</th><th id="vpn-wg-actions" hidden>操作</th></tr></thead><tbody></tbody></table></div>
+      <p class="note error" id="vpn-wg-message" role="alert"></p>
+    </section>
+    <section class="card route-card">
+      <h2>IPsec</h2>
+      <p class="note section-help" id="vpn-ipsec-summary">读取中…</p>
+      <div class="scroll"><table id="vpn-ipsec"><thead><tr><th class="text">用户</th><th class="text">连接</th><th class="text">内网地址</th><th class="text">公网地址</th><th>已连接</th><th>接收</th><th>发送</th></tr></thead><tbody></tbody></table></div>
+    </section>
+    <p class="note nat-foot">3 分钟内有过握手的 WireGuard 客户端算在线。流量是这次 VPP 启动以来的累计值，“接收”是从客户端收到的。</p>
+  </div>
+
+  <div id="page-interfaces" hidden>
+    <p class="note" id="ifaces-unavailable" hidden></p>
+    <div id="ifaces-content" hidden>
+      <div class="banner" id="ifaces-pending" role="alert" hidden>
+        <span id="ifaces-pending-text"></span>
+        <span class="row-actions">
+          <button id="ifaces-confirm" class="close strong">确认保留</button>
+          <button id="ifaces-rollback" class="close">立即恢复</button>
+        </span>
+      </div>
+      <p class="note" id="ifaces-message" role="status"></p>
+      <p class="note" id="ifaces-last"></p>
+      <section class="card route-card">
+        <h2>网桥</h2>
+        <p class="note section-help">网桥把成员接口连成一个二层网络，比如局域网。网关地址是网桥在这个网络里的三层地址，由 VPP 的 BVI 接口（loopback）承载，所以它不出现在下面的接口表里。修改写入 VPP 的启动配置文件 <code id="ifaces-summary"></code>，同时立即生效，60 秒内不确认就自动恢复。</p>
+        <div class="scroll"><table id="ifaces-bridges"><thead><tr><th>网桥</th><th class="text">网关地址</th><th class="text">成员</th><th class="text">状态</th><th>操作</th></tr></thead><tbody></tbody></table></div>
+        <p class="note" id="ifaces-bridges-empty" hidden>还没有网桥。</p>
+        <h3>新建网桥</h3>
+        <div class="form-row">
+          <label>编号 <input id="bd-id" type="number" min="1" max="16777215" autocomplete="off"></label>
+          <label>网关地址 <input id="bd-address" autocomplete="off" spellcheck="false" placeholder="10.64.30.1/24，可留空"></label>
+          <button id="bd-add" class="close strong">新建</button>
+        </div>
+        <p class="note section-help">填了网关地址时同时建一个 loopback 作为网关（BVI）；留空是纯二层网桥。建好后在“编辑”里加入成员。VLAN 子接口加入网桥时自动去掉 VLAN 标签（<code>tag-rewrite pop 1</code>）。</p>
+      </section>
+      <section class="card route-card">
+        <h2>接口</h2>
+        <p class="note section-help">物理口和 VLAN 子接口。在网桥里的接口是二层口，没有自己的地址。配置文件里没有的接口（WireGuard、Gate 的 TAP 等）由创建它们的程序管理，这里只显示。</p>
+        <p class="note error" id="ifaces-error" role="alert"></p>
+        <div class="scroll"><table id="ifaces-table"><thead><tr><th class="text">接口</th><th class="text">类型</th><th>VLAN</th><th class="text">状态</th><th>MTU</th><th class="text">地址</th><th class="text">网桥</th><th class="text">出口</th><th>操作</th></tr></thead><tbody></tbody></table></div>
+      </section>
+      <section class="card route-card">
+        <h2>新建 VLAN 子接口</h2>
+        <div class="form-row">
+          <label>物理口 <select id="subif-parent"></select></label>
+          <label>VLAN ID <input id="subif-vlan" type="number" min="1" max="4094" autocomplete="off"></label>
+          <label>子接口编号 <input id="subif-id" type="number" min="1" autocomplete="off" placeholder="默认同 VLAN ID"></label>
+          <button id="subif-add" class="close strong">新建</button>
+        </div>
+        <p class="note section-help">子接口名是“物理口.编号”，只匹配这一个 VLAN 标签（exact-match），建好后是 up 状态，没有地址，再编辑它设置地址或加入桥。</p>
+      </section>
+      <section class="card route-card">
+        <h2>新建其他接口</h2>
+        <div class="form-row">
+          <label>类型 <select id="dev-kind">
+            <option value="tap">TAP</option>
+            <option value="vxlan">VXLAN</option>
+            <option value="gre">GRE</option>
+            <option value="ipip">IPIP</option>
+            <option value="loopback">Loopback</option>
+            <option value="af_packet">AF_PACKET</option>
+          </select></label>
+          <label data-dev="tap af_packet"><span id="dev-host-label">Linux 接口名</span> <input id="dev-host" autocomplete="off" spellcheck="false"></label>
+          <label data-dev="tap">Linux 一侧地址 <input id="dev-host-addresses" autocomplete="off" spellcheck="false" placeholder="10.20.0.2/24，可留空"></label>
+          <label data-dev="vxlan gre ipip">本端地址 <input id="dev-local" autocomplete="off" spellcheck="false"></label>
+          <label data-dev="vxlan gre ipip">对端地址 <input id="dev-peer" autocomplete="off" spellcheck="false"></label>
+          <label data-dev="vxlan">VNI <input id="dev-vni" type="number" min="1" max="16777215" autocomplete="off"></label>
+          <label data-dev="gre"><input id="dev-l2" type="checkbox"> 二层（TEB）</label>
+          <button id="dev-add" class="close strong">新建</button>
+        </div>
+        <p class="note section-help" id="dev-help"></p>
+      </section>
+    </div>
+  </div>
+
+  <div id="page-lan" hidden>
+    <p class="note" id="lan-unavailable" hidden></p>
+    <div id="lan-content" hidden>
+      <p class="note" id="lan-message" role="status"></p>
+      <section class="card route-card">
+        <h2>DHCP</h2>
+        <p class="note section-help" id="lan-summary"></p>
+        <div class="form-row">
+          <label>起始地址 <input id="lan-range-start" autocomplete="off" spellcheck="false"></label>
+          <label>结束地址 <input id="lan-range-end" autocomplete="off" spellcheck="false"></label>
+          <label>租期 <input id="lan-range-lease" autocomplete="off" spellcheck="false" placeholder="12h"></label>
+          <button id="lan-range-apply" class="close strong">应用</button>
+        </div>
+        <p class="note">修改地址池要重启 dnsmasq，DHCP 和 DNS 中断约 1 秒；已经拿到地址的设备到续租时才换到新地址池。租期写成 12h、30m、7d 或 infinite。</p>
+      </section>
+      <section class="card route-card">
+        <h2>设备</h2>
+        <p class="note section-help">按设备列出：同一台手机换用的随机 MAC 地址，主机名唯一并且请求特征一致时自动归为一台，不确定时提示可能是哪台，在“详情”里合并。</p>
+        <div class="form-row">
+          <strong>按设备统计流量</strong>
+          <span id="lan-meter-state"></span>
+          <button id="lan-meter-toggle" class="close strong">开启</button>
+        </div>
+        <p class="note" id="lan-meter-help"></p>
+        <div class="scroll"><table id="lan-devices"><thead><tr><th class="text">设备</th><th class="text">状态</th><th class="text">地址</th><th id="lan-col-a">速率</th><th id="lan-col-b">连接</th><th class="text">最后出现</th><th>操作</th></tr></thead><tbody></tbody></table></div>
+        <p class="note" id="lan-devices-empty" hidden>还没有设备。</p>
+        <p class="note" id="lan-nat-note"></p>
+      </section>
+      <section class="card route-card">
+        <h2>静态分配</h2>
+        <p class="note section-help">让设备每次都拿到同一个地址。修改后 dnsmasq 重新读取，不中断服务；设备下次续租或重新连接时拿到新地址。地址可以在地址池外，但要在网段内。</p>
+        <div class="scroll"><table id="lan-hosts"><thead><tr><th class="text">MAC 地址</th><th class="text">地址</th><th class="text">名字</th><th class="text">设备</th><th>操作</th></tr></thead><tbody></tbody></table></div>
+        <p class="note" id="lan-hosts-empty" hidden>还没有静态分配。</p>
+        <p class="note" id="lan-other-hosts" hidden></p>
+        <div class="form-row">
+          <label>MAC 地址 <input id="lan-host-mac" autocomplete="off" spellcheck="false" placeholder="aa:bb:cc:dd:ee:ff"></label>
+          <label>地址 <input id="lan-host-ip" autocomplete="off" spellcheck="false"></label>
+          <label>名字 <input id="lan-host-name" autocomplete="off" spellcheck="false" placeholder="可留空，字母数字和-"></label>
+          <button id="lan-host-add" class="close strong">添加</button>
+        </div>
+      </section>
+    </div>
+  </div>
+
+  <div id="page-firewall" hidden>
+    <p class="note" id="fw-unavailable" hidden></p>
+    <div id="fw-content" hidden>
+      <p class="note" id="fw-message" role="status"></p>
+      <p class="note error" id="fw-error" role="alert" hidden></p>
+      <section class="card route-card">
+        <h2>WAN 入站</h2>
+        <p class="note section-help">只管从 WAN 进来的流量，局域网、隧道和面板本身不受影响。修改立即生效，VPP 重启后自动恢复，没有 60 秒确认。WAN 接口：<span id="fw-wan"></span></p>
+        <div class="scroll"><table id="fw-switches"><thead><tr><th class="text">项目</th><th class="text">状态</th><th>操作</th></tr></thead><tbody></tbody></table></div>
+      </section>
+      <section class="card route-card">
+        <h2>端口转发（IPv4）</h2>
+        <p class="note section-help">把 WAN 地址上的端口转给局域网里的主机，WAN 地址由 DHCP 变化时跟着变。端口段一一对应，最多 64 个端口。同一个内部地址和端口只能转发一次。局域网里的设备用 WAN 地址访问转发的端口（回环）不通，要用内部地址。路由页选了其他默认出口时，回包会从那个出口出去，转发不能用。Linux 主机上的服务，转发到它的管理地址。</p>
+        <div class="scroll"><table id="fw-forwards"><thead><tr><th class="text">名称</th><th class="text">协议</th><th class="text">接口</th><th>外部端口</th><th class="text">内部地址</th><th>操作</th></tr></thead><tbody></tbody></table></div>
+        <p class="note" id="fw-forwards-empty" hidden>还没有端口转发。</p>
+        <div class="form-row">
+          <label>名称 <input id="fwd-name" autocomplete="off" placeholder="可留空"></label>
+          <label>协议 <select id="fwd-proto"><option value="tcp">TCP</option><option value="udp">UDP</option><option value="both">TCP+UDP</option></select></label>
+          <label>接口 <select id="fwd-iface"></select></label>
+          <label>外部端口 <input id="fwd-port" autocomplete="off" placeholder="8080 或 8000-8010"></label>
+          <label>内部地址 <input id="fwd-ip" autocomplete="off" spellcheck="false"></label>
+          <label>内部端口 <input id="fwd-local-port" type="number" min="1" max="65535" autocomplete="off" placeholder="同外部"></label>
+          <button id="fwd-add" class="close strong">添加</button>
+        </div>
+      </section>
+      <section class="card route-card">
+        <h2>路由器本机端口</h2>
+        <p class="note section-help">开放 WAN 上给 VPP 自己的端口（NAT44-EI identity mapping），比如手动建的 WireGuard 监听端口。WireGuard 配置、IPsec 已经开放的端口标为“其他程序”，在各自的页面管理。开了 IPv6 防火墙时，这些端口也在 WAN 的 IPv6 地址上放行。</p>
+        <div class="scroll"><table id="fw-ports"><thead><tr><th class="text">名称</th><th class="text">协议</th><th class="text">接口</th><th>端口</th><th class="text">来源</th><th>操作</th></tr></thead><tbody></tbody></table></div>
+        <p class="note" id="fw-ports-empty" hidden>WAN 上没有开放给路由器本机的端口。</p>
+        <div class="form-row">
+          <label>名称 <input id="port-name" autocomplete="off" placeholder="可留空"></label>
+          <label>协议 <select id="port-proto"><option value="udp">UDP</option><option value="tcp">TCP</option><option value="both">TCP+UDP</option></select></label>
+          <label>接口 <select id="port-iface"></select></label>
+          <label>端口 <input id="port-port" autocomplete="off" placeholder="51820 或 5000-5010"></label>
+          <button id="port-add" class="close strong">添加</button>
+        </div>
+      </section>
+      <section class="card route-card">
+        <h2>IPv6 放行</h2>
+        <p class="note section-help" id="fw-ipv6-help"></p>
+        <div class="scroll"><table id="fw-ipv6"><thead><tr><th class="text">名称</th><th class="text">协议</th><th class="text">地址</th><th>端口</th><th>操作</th></tr></thead><tbody></tbody></table></div>
+        <p class="note" id="fw-ipv6-empty" hidden>还没有 IPv6 放行规则。</p>
+        <div class="form-row">
+          <label>名称 <input id="v6-name" autocomplete="off" placeholder="可留空"></label>
+          <label>协议 <select id="v6-proto"><option value="tcp">TCP</option><option value="udp">UDP</option><option value="both">TCP+UDP</option><option value="any">全部</option></select></label>
+          <label>地址 <input id="v6-address" autocomplete="off" spellcheck="false" placeholder="主机地址或前缀"></label>
+          <label>端口 <input id="v6-port" autocomplete="off" placeholder="443 或 8000-8100"></label>
+          <button id="v6-add" class="close strong">添加</button>
+        </div>
+      </section>
+    </div>
+  </div>
+
+  <div id="page-system" hidden>
+    <p class="note" id="sys-unavailable" hidden></p>
+    <div id="sys-content" hidden>
+      <div class="banner" id="sys-pending" role="alert" hidden>
+        <span id="sys-pending-text"></span>
+        <span class="row-actions">
+          <button id="sys-confirm" class="close strong">确认保留</button>
+          <button id="sys-rollback" class="close">立即恢复</button>
+        </span>
+      </div>
+      <p class="note" id="sys-message" role="status"></p>
+      <p class="note" id="sys-last"></p>
+      <p class="note error" id="sys-error" role="alert" hidden></p>
+      <section class="card route-card">
+        <h2>网卡收包</h2>
+        <p class="note section-help">轮询：线程不停查询网卡，延迟最低，所在 CPU 始终占满。中断：没有包时线程休眠，由网卡中断唤醒，省电但每批包多一点延迟。自适应：流量小时等中断，流量大时自动转为轮询，一般选它。不支持中断的网卡会拒绝，保持原来的方式。修改立即生效，VPP 重启后自动恢复；“缺省”是安装器的设置（router.env 的 RX_MODE），选它时现在的方式不变，下次 VPP 启动时生效。</p>
+        <div class="scroll"><table id="sys-rx"><thead><tr><th class="text">接口</th><th>队列</th><th class="text">当前方式</th><th class="text">设置</th><th>操作</th></tr></thead><tbody></tbody></table></div>
+        <p class="note" id="sys-rx-empty" hidden>VPP 里没有收包队列。</p>
+        <h3>收包线程</h3>
+        <p class="note section-help" id="sys-placement-help"></p>
+        <div class="scroll"><table id="sys-placement"><thead><tr><th class="text">接口</th><th>队列</th><th class="text">当前线程</th><th class="text">设置</th><th>操作</th></tr></thead><tbody></tbody></table></div>
+      </section>
+      <section class="card route-card">
+        <h2>VPP 线程</h2>
+        <p class="note section-help" id="sys-threads-help"></p>
+        <div class="scroll"><table id="sys-threads"><thead><tr><th>线程</th><th class="text">名称</th><th class="text">CPU</th></tr></thead><tbody></tbody></table></div>
+        <div class="form-row">
+          <label>主线程 CPU <select id="thr-main"></select></label>
+          <label>调度策略 <select id="thr-policy"></select></label>
+          <label>优先级 <input id="thr-priority" type="number" min="1" max="99" placeholder="1–99"></label>
+        </div>
+        <div class="form-row" id="thr-workers" role="group" aria-label="worker 所在的 CPU"></div>
+        <div class="scroll" id="thr-devices-wrap"><table id="thr-devices"><thead><tr><th class="text">DPDK 网卡</th><th class="text">PCI 地址</th><th>当前队列</th><th>最多</th><th>收包队列数</th></tr></thead><tbody></tbody></table></div>
+        <div class="form-row">
+          <button id="thr-apply" class="close strong">应用并重启 VPP</button>
+          <span class="note" id="thr-summary"></span>
+        </div>
+      </section>
+      <section class="card route-card">
+        <h2>DPDK 网卡</h2>
+        <p class="note section-help error" id="nic-help" hidden></p>
+        <div id="sys-nics-parts">
+        <h3>已接入</h3>
+        <p class="note section-help">经安装器的 router.env 接入 VPP 的网卡。退出时从启动文件的 dpdk 段和 router.env 去掉它，网卡交还原来的驱动（Linux 网卡重新出现）；同一块卡上的其他口留在 VPP。先在接口页删掉它的地址、子接口、桥和出口。要重启 VPP，60 秒内不确认就恢复。</p>
+        <div class="scroll" id="sys-nics-active-wrap"><table id="sys-nics-active"><thead><tr><th class="text">VPP 接口</th><th class="text">PCI 地址</th><th class="text">Linux 网卡</th><th class="text">方式</th><th class="text">状态</th><th>操作</th></tr></thead><tbody></tbody></table></div>
+        <p class="note" id="sys-nics-active-empty" hidden>router.env 里没有经 DPDK 接入的网卡。</p>
+        <h3>可以加入</h3>
+        <p class="note section-help" id="nic-add-help"></p>
+        <div class="scroll" id="sys-nics-wrap"><table id="sys-nics"><thead><tr><th class="text">PCI 地址</th><th class="text">Linux 网卡</th><th class="text">型号</th><th class="text">当前驱动</th><th class="text">状态</th><th class="text">VPP 接口名</th><th>操作</th></tr></thead><tbody></tbody></table></div>
+        <p class="note" id="sys-nics-empty" hidden>没有可以加入的网卡。</p>
+        <details id="sys-nics-blocked" hidden>
+          <summary id="sys-nics-blocked-summary"></summary>
+          <div class="scroll"><table id="sys-nics-blocked-table"><thead><tr><th class="text">PCI 地址</th><th class="text">Linux 网卡</th><th class="text">型号</th><th class="text">当前驱动</th><th class="text">原因</th></tr></thead><tbody></tbody></table></div>
+        </details>
+        </div>
+      </section>
+      <section class="card route-card">
+        <h2>CPU 频率</h2>
+        <p class="note section-help">Linux 的 cpufreq 调速器，每组共用频率的 CPU 一个。performance 固定最高频率，VPP 轮询时延迟最稳；ondemand、schedutil 按负载升降频，省电，但流量突然增大时升频要几毫秒，可能少量丢包。修改立即生效，开机时由 vpp-system 重新设置；“缺省”是系统自己的设置，选它时现在的调速器不变。</p>
+        <div class="scroll"><table id="sys-governors"><thead><tr><th class="text">CPU</th><th class="text">当前频率</th><th class="text">范围</th><th class="text">当前调速器</th><th class="text">设置</th><th>操作</th></tr></thead><tbody></tbody></table></div>
+        <p class="note" id="sys-governors-empty" hidden>这台机器没有 cpufreq（虚拟机或固定频率），不能设置调速器。</p>
+      </section>
+      <section class="card route-card">
+        <h2>NAT44-EI</h2>
+        <p class="note section-help" id="nat-help"></p>
+        <h3>会话超时（秒）</h3>
+        <p class="note section-help">连接多久没有包就回收它的会话。TCP 已建立的连接默认 7440 秒，太长时空闲连接长期占着会话表；太短时长时间不说话的连接（SSH、推送）会被断开。修改立即生效，写入 <code id="nat-cli-file"></code>。</p>
+        <div class="form-row">
+          <label>TCP 已建立 <input id="nat-tcp-est" type="number" min="10" max="604800"></label>
+          <label>TCP 握手和关闭 <input id="nat-tcp-trans" type="number" min="10" max="604800"></label>
+          <label>UDP <input id="nat-udp" type="number" min="10" max="604800"></label>
+          <label>ICMP <input id="nat-icmp" type="number" min="10" max="604800"></label>
+          <button id="nat-timeouts-apply" class="close strong">应用</button>
+          <button id="nat-timeouts-default" class="close">填入 VPP 默认值</button>
+        </div>
+        <h3>会话表</h3>
+        <p class="note section-help">会话数和用户数是每个线程的上限（主线程和每个 worker 各一份），每个用户的会话数是一个局域网地址最多同时占用的会话。表满时新连接被丢弃。表越大占用 VPP 主堆内存越多，内存不够时插件启用失败，VPP 会自动恢复旧值。要重启 VPP，60 秒内不确认就恢复。</p>
+        <div class="form-row">
+          <label>会话数 <input id="nat-size-sessions" type="number" min="1024" max="16777216"></label>
+          <label>用户数 <input id="nat-size-users" type="number" min="1" max="1048576"></label>
+          <label>每个用户的会话数 <input id="nat-user-sessions" type="number" min="1"></label>
+          <button id="nat-size-apply" class="close strong">应用并重启 VPP</button>
+        </div>
+      </section>
+    </div>
+  </div>
+
+  <div id="page-proxy" hidden>
+    <p class="note" id="proxy-unavailable" hidden></p>
+    <div id="proxy-content" hidden>
+      <p class="note" id="proxy-message" role="status"></p>
+      <section class="card route-card">
+        <div class="dialog-head">
+          <h2>代理入口 sing-box</h2>
+          <span class="row-actions">
+            <button id="proxy-start" class="close">启动</button>
+            <button id="proxy-restart" class="close">重启</button>
+            <button id="proxy-stop" class="close">停止</button>
+          </span>
+        </div>
+        <p class="note section-help" id="proxy-status"></p>
+        <div class="scroll"><table id="proxy-inbounds"><thead><tr><th class="text">入口</th><th class="text">地址</th><th class="text">用途</th></tr></thead><tbody></tbody></table></div>
+      </section>
+      <section class="card route-card">
+        <div class="dialog-head">
+          <h2>上游</h2>
+          <span class="row-actions">
+            <button id="proxy-test-current" class="close">测试</button>
+            <button id="proxy-clear" class="close">删除</button>
+            <button id="proxy-edit" class="close strong">设置上游</button>
+          </span>
+        </div>
+        <div class="current-upstream" id="proxy-upstream" role="status"></div>
+        <p class="note" id="proxy-test-result" role="status"></p>
+        <p class="note section-help">上游是代理入口把流量送去的服务器，可以是 SOCKS5、HTTP、Shadowsocks、VMess、VLESS、Trojan、Hysteria2、TUIC、AnyTLS 或 WireGuard。在“设置上游”里选协议、填地址和认证信息，面板生成 sing-box 配置。</p>
+      </section>
+      <section class="card route-card">
+        <h2>导入节点</h2>
+        <p class="note section-help">从 sing-box 配置、分享链接或订阅里读出节点，选一个填进“设置上游”，或直接测试。</p>
+        <div class="form-row">
+          <label>内容 <select id="proxy-import-kind"><option value="links">分享链接（每行一个）</option><option value="json">sing-box 配置（JSON）</option></select></label>
+          <label>或上传文件 <input id="proxy-import-file" type="file" accept=".json,.txt,text/plain,application/json"></label>
+          <button id="proxy-import-parse" class="close strong">解析</button>
+          <button id="proxy-import-clear" class="close">清空</button>
+        </div>
+        <textarea id="proxy-import-text" rows="4" spellcheck="false" placeholder="trojan://密码@服务器:443?sni=…#名称&#10;vless://…&#10;或者粘贴 sing-box 的 JSON 配置"></textarea>
+        <div class="scroll"><table id="proxy-import-nodes" hidden><thead><tr><th class="text">节点</th><th class="text">协议</th><th class="text">服务器</th><th class="text">注意</th><th>操作</th></tr></thead><tbody></tbody></table></div>
+        <h3>订阅</h3>
+        <div class="form-row">
+          <label>订阅地址 <input id="proxy-sub-url" class="wide-input" autocomplete="off" spellcheck="false" placeholder="https://…"></label>
+          <button id="proxy-sub-fetch" class="close strong">获取</button>
+          <button id="proxy-sub-update" class="close">更新并应用正在用的节点</button>
+          <button id="proxy-sub-delete" class="close">删除订阅</button>
+        </div>
+        <p class="note" id="proxy-sub-info"></p>
+        <div class="scroll"><table id="proxy-sub-nodes" hidden><thead><tr><th class="text">节点</th><th class="text">协议</th><th class="text">服务器</th><th class="text">注意</th><th>操作</th></tr></thead><tbody></tbody></table></div>
+      </section>
+    </div>
+  </div>
+
+  <div id="page-routes" hidden>
+    <p class="note" id="routes-unavailable" hidden></p>
+    <div id="routes-content" hidden>
+      <div class="banner" id="routes-pending" role="alert" hidden>
+        <span id="routes-pending-text"></span>
+        <span class="row-actions">
+          <button id="routes-confirm" class="close strong">确认保留</button>
+          <button id="routes-rollback" class="close">立即恢复</button>
+        </span>
+      </div>
+      <p class="note" id="routes-message" role="status"></p>
+      <p class="note" id="routes-last"></p>
+      <section class="card route-card">
+        <div class="dialog-head">
+          <h2>规则与优先级</h2>
+          <span class="row-actions">
+            <button id="routes-flush" class="close">清空路由</button>
+            <button id="routes-reset-order" class="close" hidden>放弃顺序修改</button>
+            <button id="routes-save-order" class="close strong" hidden>应用新顺序</button>
+          </span>
+        </div>
+        <p class="note section-help">越靠前优先级越高，同一个域名或地址被多条规则匹配时用最靠前的那条。匹配内容相同的 IPv4 和 IPv6 规则一起移动、一起切换。</p>
+        <p class="note" id="routes-stats" role="status"></p>
+        <div class="scroll"><table id="routes-groups"><thead><tr><th>优先级</th><th class="text">规则</th><th class="text">地址族</th><th class="text">出口</th><th class="text">DNS</th><th>域名 / 关键词 / 网段</th><th>调整</th></tr></thead><tbody></tbody></table></div>
+      </section>
+      <section class="card route-card">
+        <h2>出口</h2>
+        <p class="note section-help">规则和默认出口把流量送到这里的出口。VPP 接口的出口可以设置下一跳：可以是它的网关，也可以是经它能到达的其他地址。同一个接口要走不同的下一跳时，给出口起个名称，一个接口可以有多个出口，各用各的下一跳；名称留空就是接口本身的出口。用 DHCP 网关时下一跳跟着租约变，这样的出口只能做默认出口。有规则在用这个出口时，修改会同时改这些规则并重启 Gate，60 秒内要确认。Linux 出口和代理的下一跳由 Gate 的设备配置生成，这里只显示。</p>
+        <div class="scroll"><table id="routes-exits"><thead><tr><th class="text">出口</th><th class="text">IPv4 下一跳</th><th class="text">IPv6 下一跳</th><th class="text">用途</th><th>操作</th></tr></thead><tbody></tbody></table></div>
+        <div class="form-row">
+          <label>名称 <input id="exit-name" autocomplete="off" spellcheck="false" placeholder="留空用接口名"></label>
+          <label>接口 <select id="exit-interface"></select></label>
+          <label>IPv4 下一跳 <input id="exit-via4" autocomplete="off" spellcheck="false" placeholder="10.61.20.1"></label>
+          <label><input id="exit-dhcp" type="checkbox"> 用 DHCP 网关</label>
+          <label>IPv6 下一跳 <input id="exit-via6" autocomplete="off" spellcheck="false" placeholder="可留空"></label>
+          <button id="exit-save" class="close strong">保存出口</button>
+        </div>
+        <p class="note section-help">代理出口自动读取“代理”页面已有的配置，域名和网段规则都可以用。规则的 DNS 是出口的 Fake-IP DNS 时，域名解析成 Fake-IP 地址，由代理还原成域名；换成其他 DNS 或留空，就解析成真实 IP。两种都进同一个 TPROXY 端口，网段总是按真实 IP 进。上游节点和代理服务在“代理”页面管理。</p>
+      </section>
+      <section class="card route-card">
+        <h2>添加规则</h2>
+        <p class="note section-help">新规则排在最后，优先级最低，可以在上面调整。DNS 默认跟随出口，留空用默认 DNS；代理出口默认的是它的 Fake-IP DNS，换成其他 DNS 就按真实 IP 走代理。域名表、关键词、网段表至少填写一项，满足任意一项即可匹配。关键词匹配域名任意位置的子串，忽略大小写，例如 video 可匹配 myvideo.example；每行一个，不含空格。只选网段表时，地址族由网段表决定。</p>
+        <div class="form-row">
+          <label>名称 <input id="rule-name" autocomplete="off" spellcheck="false" placeholder="streaming"></label>
+          <label>出口 <select id="rule-exit"></select></label>
+          <label id="rule-via-part" hidden>IPv4 下一跳 <input id="rule-via" autocomplete="off" spellcheck="false" placeholder="经这个出口能到达的 IPv4 地址"></label>
+          <label id="rule-via6-part" hidden>IPv6 下一跳 <input id="rule-via6" autocomplete="off" spellcheck="false" placeholder="留空则不走 IPv6"></label>
+          <label>DNS <input id="rule-dns" autocomplete="off" spellcheck="false" placeholder="默认 DNS"></label>
+          <span class="family-picker" id="rule-families"></span>
+          <div class="list-picker" id="rule-file-picker">
+            <span class="list-picker-label">域名表</span>
+            <details>
+              <summary id="rule-file-summary">不使用</summary>
+              <div id="rule-file-options" class="list-picker-options" role="group" aria-label="域名表"></div>
+            </details>
+          </div>
+          <div class="list-picker" id="rule-ranges-picker">
+            <span class="list-picker-label">网段表</span>
+            <details>
+              <summary id="rule-ranges-summary">不使用</summary>
+              <div id="rule-ranges-options" class="list-picker-options" role="group" aria-label="网段表"></div>
+            </details>
+          </div>
+          <label class="keywords-field">关键词（每行一个） <textarea id="rule-keywords" rows="3" placeholder="video&#10;stream&#10;每行一个，回车换行" spellcheck="false"></textarea></label>
+          <button id="rule-add" class="close strong">添加规则</button>
+        </div>
+      </section>
+      <section class="card route-card">
+        <h2>域名表和网段表</h2>
+        <div class="form-row upload-row">
+          <label>类型 <select id="upload-kind"><option value="domains">域名表</option><option value="ranges">网段表</option></select></label>
+          <label>上传文件 <input id="upload-file" type="file" accept=".domains,.ranges,.ipv4,.ipv6,.txt,.list,text/plain"></label>
+          <label>文件名 <input id="upload-name" autocomplete="off" spellcheck="false" placeholder="留空则用上传的文件名"></label>
+          <button id="upload-submit" class="close strong">上传或新建</button>
+        </div>
+        <p class="note section-help">域名表每行一个域名，匹配该域名及其子域名。网段表按目的地址匹配，每行一个地址、CIDR 或 <code>起始IP-结束IP</code>，不能写默认路由。<code>#</code> 开头是注释。不选文件只填文件名时，新建一个空文件。没有规则使用的文件保存时不会重启 Gate。</p>
+        <div class="scroll"><table id="routes-files"><thead><tr><th>文件</th><th class="text">类型</th><th>条目数</th><th class="text">使用的规则</th><th></th></tr></thead><tbody></tbody></table></div>
+        <p class="note" id="routes-files-empty" hidden>还没有域名表或网段表。</p>
+      </section>
+    </div>
+  </div>
+</main>
+
+<dialog id="bridge-dialog" aria-labelledby="bridge-title">
+  <div class="dialog-head">
+    <h2 id="bridge-title">网桥</h2>
+    <form method="dialog"><button class="close">关闭</button></form>
+  </div>
+  <div class="wg-form iface-form">
+    <p class="note">每一项单独应用，各自走 60 秒确认。</p>
+    <p class="note error" id="bridge-error" role="alert"></p>
+    <fieldset>
+      <legend>网关</legend>
+      <p class="note" id="bridge-gateway-reason" hidden></p>
+      <div id="bridge-gateway">
+        <label>网关地址，每行一个，写成 地址/掩码长度 <textarea id="bridge-addresses" rows="2" autocomplete="off" spellcheck="false" placeholder="10.61.30.1/24"></textarea></label>
+        <div class="form-row">
+          <button id="bridge-address-apply" class="close strong">应用地址</button>
+          <label>MTU <input id="bridge-mtu" type="number" min="576" max="9216"></label>
+          <button id="bridge-mtu-apply" class="close strong">应用 MTU</button>
+        </div>
+        <p class="note" id="bridge-bvi-note"></p>
+      </div>
+    </fieldset>
+    <fieldset>
+      <legend>成员</legend>
+      <div class="scroll"><table id="bridge-members"><tbody></tbody></table></div>
+      <p class="note" id="bridge-members-empty" hidden>还没有成员。</p>
+      <div class="form-row">
+        <label>加入 <select id="bridge-join"></select></label>
+        <button id="bridge-join-apply" class="close strong">加入网桥</button>
+      </div>
+      <p class="note">只列出可以加入的接口：配置文件管理的、不在其他网桥里、没有地址的物理口和子接口。</p>
+    </fieldset>
+  </div>
+</dialog>
+
+<dialog id="proxy-dialog" aria-labelledby="proxy-dialog-title">
+  <div class="dialog-head">
+    <h2 id="proxy-dialog-title">设置上游</h2>
+    <form method="dialog"><button class="close">关闭</button></form>
+  </div>
+  <div class="wg-form iface-form proxy-form">
+    <p class="note" id="pf-ignored" hidden></p>
+    <p class="note error" id="pf-error" role="alert"></p>
+    <fieldset>
+      <legend>服务器</legend>
+      <label>协议 <select id="pf-type"></select></label>
+      <label>名称（可选） <input id="pf-name" autocomplete="off"></label>
+      <div class="form-row">
+        <label id="pf-server-label">服务器 <input id="pf-server" autocomplete="off" spellcheck="false" placeholder="地址或域名"></label>
+        <label>端口 <input id="pf-port" type="number" min="1" max="65535"></label>
+      </div>
+      <label data-field="username">用户名 <input id="pf-username" autocomplete="off" spellcheck="false"></label>
+      <label data-field="method">加密方式 <select id="pf-method"></select></label>
+      <label data-field="uuid">UUID <input id="pf-uuid" autocomplete="off" spellcheck="false"></label>
+      <label data-field="password">密码 <input id="pf-password" type="password" autocomplete="new-password" spellcheck="false"></label>
+      <label data-field="security">加密（security） <select id="pf-security"><option>auto</option><option>none</option><option>zero</option><option>aes-128-gcm</option><option>chacha20-poly1305</option></select></label>
+      <label data-field="alter_id">alterId <input id="pf-alter_id" type="number" min="0" value="0"></label>
+      <label data-field="flow">flow <select id="pf-flow"><option value="">无</option><option>xtls-rprx-vision</option></select></label>
+      <label data-field="congestion">拥塞控制 <select id="pf-congestion"><option>bbr</option><option>cubic</option><option>new_reno</option></select></label>
+      <label data-field="obfs">obfs 密码（salamander，可选） <input id="pf-obfs" type="password" autocomplete="new-password" spellcheck="false"></label>
+      <label data-field="up_mbps">上行 Mbps（可选） <input id="pf-up_mbps" type="number" min="0"></label>
+      <label data-field="down_mbps">下行 Mbps（可选） <input id="pf-down_mbps" type="number" min="0"></label>
+      <label data-field="address">本机地址（隧道内，逗号分开） <input id="pf-address" autocomplete="off" spellcheck="false" placeholder="10.0.0.2/32, fd00::2/128"></label>
+      <label data-field="private_key">本机私钥 <input id="pf-private_key" type="password" autocomplete="new-password" spellcheck="false"></label>
+      <label data-field="peer_public_key">对端公钥 <input id="pf-peer_public_key" autocomplete="off" spellcheck="false"></label>
+      <label data-field="pre_shared_key">预共享密钥（可选） <input id="pf-pre_shared_key" type="password" autocomplete="new-password" spellcheck="false"></label>
+      <label data-field="allowed_ips">AllowedIPs（逗号分开，留空为全部） <input id="pf-allowed_ips" autocomplete="off" spellcheck="false" placeholder="0.0.0.0/0, ::/0"></label>
+      <label data-field="mtu">MTU（可选） <input id="pf-mtu" type="number" min="1280" max="9000"></label>
+      <p class="note" id="pf-secret-note" hidden>密码类字段留空表示保持原来的值。</p>
+    </fieldset>
+    <fieldset id="pf-tls-part">
+      <legend>TLS</legend>
+      <label id="pf-tls-toggle"><input id="pf-tls" type="checkbox"> 启用 TLS</label>
+      <div id="pf-tls-fields">
+        <label>服务器名（SNI，留空用服务器地址） <input id="pf-sni" autocomplete="off" spellcheck="false"></label>
+        <label><input id="pf-insecure" type="checkbox"> 跳过证书校验（不安全）</label>
+        <label>ALPN（逗号分开，可选） <input id="pf-alpn" autocomplete="off" spellcheck="false" placeholder="h2, http/1.1"></label>
+        <label>uTLS 指纹（可选） <select id="pf-fingerprint"></select></label>
+        <div id="pf-reality-part">
+          <label><input id="pf-reality" type="checkbox"> Reality</label>
+          <label data-reality>公钥 <input id="pf-public_key" autocomplete="off" spellcheck="false"></label>
+          <label data-reality>short id <input id="pf-short_id" autocomplete="off" spellcheck="false"></label>
+        </div>
+      </div>
+    </fieldset>
+    <fieldset id="pf-transport-part">
+      <legend>传输</legend>
+      <label>方式 <select id="pf-transport"><option value="">TCP（默认）</option><option value="ws">WebSocket</option><option value="grpc">gRPC</option><option value="http">HTTP/2</option><option value="httpupgrade">HTTPUpgrade</option></select></label>
+      <label data-transport="ws http httpupgrade">路径 <input id="pf-path" autocomplete="off" spellcheck="false" placeholder="/"></label>
+      <label data-transport="ws http httpupgrade">Host <input id="pf-host" autocomplete="off" spellcheck="false"></label>
+      <label data-transport="grpc">service name <input id="pf-service_name" autocomplete="off" spellcheck="false"></label>
+    </fieldset>
+    <p class="note" id="pf-test-result" role="status"></p>
+    <div class="form-row">
+      <button id="pf-test" class="close">测试</button>
+      <button id="pf-apply" class="close strong">应用</button>
+    </div>
+  </div>
+</dialog>
+
+<dialog id="iface-dialog" aria-labelledby="iface-title">
+  <div class="dialog-head">
+    <h2 id="iface-title">编辑接口</h2>
+    <form method="dialog"><button class="close">关闭</button></form>
+  </div>
+  <div class="wg-form iface-form">
+    <p class="note">每一项单独应用，各自走 60 秒确认。</p>
+    <p class="note error" id="iface-error" role="alert"></p>
+    <fieldset>
+      <legend>IPv4</legend>
+      <p class="note" id="ip4-reason" hidden></p>
+      <div class="form-row">
+        <label>方式 <select id="ip4-mode"><option value="none">不配置</option><option value="static">静态</option><option value="dhcp">DHCP</option></select></label>
+        <button id="ip4-apply" class="close strong">应用 IPv4</button>
+      </div>
+      <div id="ip4-static-part">
+        <label>地址，每行一个，写成 地址/掩码长度 <textarea id="ip4-addresses" rows="2" autocomplete="off" spellcheck="false" placeholder="10.61.70.2/24"></textarea></label>
+        <label>网关（可选，经这个接口的默认路由） <input id="ip4-gateway" autocomplete="off" spellcheck="false" placeholder="10.61.70.1"></label>
+      </div>
+      <div class="form-row" id="ip4-dhcp-part">
+        <label>主机名（可选） <input id="ip4-hostname" autocomplete="off" spellcheck="false" placeholder="发给 DHCP 服务器"></label>
+      </div>
+      <p class="note" id="ip4-help"></p>
+      <p class="note" id="ip4-current"></p>
+    </fieldset>
+    <fieldset>
+      <legend>IPv6</legend>
+      <p class="note" id="ip6-reason" hidden></p>
+      <div class="form-row">
+        <label>方式 <select id="ip6-mode"><option value="none">不配置</option><option value="static">静态</option><option value="slaac">SLAAC</option><option value="dhcpv6">DHCPv6</option></select></label>
+        <button id="ip6-apply" class="close strong">应用 IPv6</button>
+      </div>
+      <div id="ip6-static-part">
+        <label>地址，每行一个，写成 地址/掩码长度 <textarea id="ip6-addresses" rows="2" autocomplete="off" spellcheck="false" placeholder="2001:db8::2/64"></textarea></label>
+        <label>网关（可选，经这个接口的默认路由） <input id="ip6-gateway" autocomplete="off" spellcheck="false" placeholder="fe80::1 或 2001:db8::1"></label>
+      </div>
+      <p class="note" id="ip6-help"></p>
+      <p class="note" id="ip6-current"></p>
+    </fieldset>
+    <fieldset>
+      <legend>网桥</legend>
+      <p class="note" id="iface-bridge-reason" hidden></p>
+      <div class="form-row">
+        <label>网桥 <select id="iface-bridge"></select></label>
+        <button id="iface-bridge-apply" class="close strong">应用</button>
+      </div>
+      <p class="note">在网桥里的接口是二层口，不能有地址，加入前要先删除地址。网络的网关地址在网桥上设置。</p>
+    </fieldset>
+    <fieldset>
+      <legend>状态和 MTU</legend>
+      <div class="form-row">
+        <label>状态 <select id="iface-state"><option value="up">up</option><option value="down">down</option></select></label>
+        <button id="iface-state-apply" class="close strong">应用状态</button>
+        <label>MTU <input id="iface-mtu" type="number" min="576" max="9216"></label>
+        <button id="iface-mtu-apply" class="close strong">应用 MTU</button>
+      </div>
+    </fieldset>
+    <fieldset id="iface-vlan-part">
+      <legend>VLAN</legend>
+      <p class="note" id="iface-vlan-reason" hidden></p>
+      <div class="form-row">
+        <label>VLAN ID <input id="iface-vlan" type="number" min="1" max="4094"></label>
+        <button id="iface-vlan-apply" class="close strong">应用 VLAN ID</button>
+      </div>
+      <p class="note">VPP 不能直接修改子接口的 VLAN ID，所以要重启 VPP，接口名不变。</p>
+    </fieldset>
+    <fieldset id="iface-delete-part">
+      <legend>删除</legend>
+      <p class="note" id="iface-delete-reason" hidden></p>
+      <button id="iface-delete" class="close">删除接口</button>
+    </fieldset>
+  </div>
+</dialog>
+
+<dialog id="vpn-source-dialog" aria-labelledby="vpn-source-title">
+  <div class="dialog-head">
+    <h2 id="vpn-source-title">编辑 WireGuard 配置</h2>
+    <form method="dialog"><button class="close">关闭</button></form>
+  </div>
+  <form id="vpn-source-form" class="wg-form">
+    <label>接口 <input id="vpn-source-interface" readonly></label>
+    <label>源地址 <input id="vpn-source-address" required autocomplete="off" spellcheck="false"></label>
+    <label><input id="vpn-source-dns-enabled" type="checkbox"> 启用接口地址的 UDP 53 DNS 转发</label>
+    <p class="note" id="vpn-source-gate"></p>
+    <p class="note">源地址和 DNS 转发一起保存，保存后再启动配置。DNS 目标、Gate 入接口和 VPP 对端 TAP 由服务自动发现。</p>
+    <p class="note error" id="vpn-source-error" role="alert"></p>
+    <button id="vpn-source-submit" class="close strong">保存</button>
+  </form>
+</dialog>
+
+<dialog id="vpn-config-dialog" aria-labelledby="vpn-config-title">
+  <div class="dialog-head">
+    <h2 id="vpn-config-title">添加 WireGuard 配置</h2>
+    <form method="dialog"><button class="close">关闭</button></form>
+  </div>
+  <form id="vpn-config-form" class="wg-form">
+    <label>名字 <input id="vpn-config-name" required maxlength="64" autocomplete="off"></label>
+    <label>源地址 <input id="vpn-config-source" required autocomplete="off" spellcheck="false" placeholder="VPP 接口上用于收发隧道包的地址"></label>
+    <div class="wg-import">
+      <button type="button" id="vpn-config-pick" class="close">从文件导入…</button>
+      <span class="note">标准 WireGuard 配置文件（.conf），也可以拖到下面的文本框里</span>
+      <input type="file" id="vpn-config-file" accept=".conf,.txt,text/plain" hidden>
+    </div>
+    <label>配置内容 <textarea id="vpn-config-text" required rows="12" autocomplete="off" spellcheck="false" placeholder="[Interface]&#10;PrivateKey = ...&#10;Address = 10.9.0.1/24&#10;ListenPort = 51900&#10;&#10;[Peer]&#10;PublicKey = ...&#10;AllowedIPs = 10.9.0.2/32"></textarea></label>
+    <label><input id="vpn-config-dns-enabled" type="checkbox"> 启用接口地址的 UDP 53 DNS 转发</label>
+    <p class="note" id="vpn-config-gate"></p>
+    <label>作为规则出口的下一跳（可选）<input id="vpn-config-exit-via" autocomplete="off" spellcheck="false" placeholder="隧道对端的地址，每个地址族一个，比如 10.9.0.1 fd09::1"></label>
+    <label>接口 up 后执行的 VPP 命令（可选，每行一条）<textarea id="vpn-config-after-up" rows="3" autocomplete="off" spellcheck="false"></textarea></label>
+    <label>停止前执行的 VPP 命令（可选，用来撤销上面的命令）<textarea id="vpn-config-before-down" rows="3" autocomplete="off" spellcheck="false"></textarea></label>
+    <p class="note">保存后不会自动启动。私钥只保存在路由器上，不会再显示。DNS、PostUp 等字段会被忽略。AllowedIPs 可以写 0.0.0.0/0，只决定隧道接受哪些地址，不会改动路由器的默认路由。默认只给隧道网段内的地址装路由，写 Table = off 则完全不装，流量由下面的附加命令或规则引入隧道。填了下一跳，配置启动后可以在路由页选作出口，局域网流量出去通常还要在附加命令里配 NAT。</p>
+    <p class="note error" id="vpn-config-error" role="alert"></p>
+    <button id="vpn-config-submit" class="close strong">保存</button>
+  </form>
+</dialog>
+
+<dialog id="vpn-wg-dialog" aria-labelledby="vpn-wg-title">
+  <div class="dialog-head">
+    <h2 id="vpn-wg-title">添加 WireGuard 节点</h2>
+    <form method="dialog"><button class="close">关闭</button></form>
+  </div>
+  <form id="vpn-wg-form" class="wg-form">
+    <label>接口 <select id="vpn-wg-interface" required></select></label>
+    <label>名字（可选）<input id="vpn-wg-name" maxlength="64" autocomplete="off"></label>
+    <label>客户端公钥 <input id="vpn-wg-key" required maxlength="44" autocomplete="off" spellcheck="false" placeholder="客户端生成的公钥，不是私钥"></label>
+    <label>内网地址 <input id="vpn-wg-addresses" required autocomplete="off" spellcheck="false" placeholder="10.0.0.2，多个用空格或逗号分开"></label>
+    <p class="note">每个地址都要是接口网段内没被占用的单个地址。添加后立即生效，VPP 重启后仍然保留，不重启 Gate。</p>
+    <p class="note error" id="vpn-wg-error" role="alert"></p>
+    <button id="vpn-wg-submit" class="close strong">添加</button>
+  </form>
+</dialog>
+
+<dialog id="routes-edit-dialog" class="rule-edit-dialog" aria-labelledby="routes-edit-title">
+  <div class="dialog-head">
+    <h2 id="routes-edit-title">编辑规则</h2>
+    <form method="dialog"><button class="close">关闭</button></form>
+  </div>
+  <div class="wg-form rule-edit-form">
+    <label>出口 <select id="routes-edit-exit"></select></label>
+    <p class="note" id="routes-edit-exit-note" hidden></p>
+    <label>DNS <input id="routes-edit-dns" autocomplete="off" spellcheck="false" placeholder="默认 DNS"></label>
+    <div id="routes-edit-matches" class="rule-edit-matches">
+      <p class="note">域名表、关键词和网段表满足任意一项即可匹配，至少保留一项。</p>
+      <fieldset>
+        <legend>域名表</legend>
+        <div id="routes-edit-files" class="rule-edit-lists" role="group" aria-label="域名表"></div>
+      </fieldset>
+      <fieldset>
+        <legend>网段表</legend>
+        <div id="routes-edit-ranges" class="rule-edit-lists" role="group" aria-label="网段表"></div>
+      </fieldset>
+      <label>关键词（每行一个，不含空格，匹配域名任意位置的子串） <textarea id="routes-edit-keywords" rows="5" spellcheck="false"></textarea></label>
+    </div>
+    <p id="routes-edit-message" class="note" role="status"></p>
+    <button id="routes-edit-save" class="close strong">应用</button>
+  </div>
+</dialog>
+
+<dialog id="routes-file-dialog" aria-labelledby="routes-file-title">
+  <div class="dialog-head">
+    <h2 id="routes-file-title">域名表</h2>
+    <form method="dialog"><button class="close">关闭</button></form>
+  </div>
+  <div class="file-editor">
+    <div>
+      <h3 id="routes-file-existing">现有域名</h3>
+      <label>搜索 <input id="routes-file-search" type="search" autocomplete="off"></label>
+      <p class="note" id="routes-file-count"></p>
+      <div class="scroll file-list"><table id="routes-file-list"><tbody></tbody></table></div>
+    </div>
+    <div>
+      <h3 id="routes-file-add-title">添加域名</h3>
+      <textarea id="routes-file-add" rows="10" placeholder="每行一个，会匹配该域名及其子域名" spellcheck="false" aria-label="要添加的内容"></textarea>
+      <p class="note" id="routes-file-changes"></p>
+      <button id="routes-file-apply" class="close strong">应用修改</button>
+    </div>
+  </div>
+</dialog>
+
+<dialog id="lan-device-dialog" aria-labelledby="lan-device-title">
+  <div class="dialog-head">
+    <h2 id="lan-device-title">设备</h2>
+    <form method="dialog"><button class="close">关闭</button></form>
+  </div>
+  <div class="wg-form iface-form lan-form">
+    <p class="note error" id="lan-device-error" role="alert"></p>
+    <fieldset>
+      <legend>名字</legend>
+      <div class="form-row">
+        <label>名字 <input id="lan-device-name" autocomplete="off" maxlength="32" placeholder="留空用主机名"></label>
+        <button id="lan-device-name-apply" class="close strong">保存</button>
+      </div>
+    </fieldset>
+    <fieldset>
+      <legend>MAC 地址</legend>
+      <div class="scroll"><table id="lan-device-macs"><thead><tr><th class="text">MAC 地址</th><th class="text">类型</th><th class="text">主机名</th><th class="text">地址</th><th class="text">厂商类别</th><th class="text">最后出现</th><th>操作</th></tr></thead><tbody></tbody></table></div>
+      <p class="note">随机地址是手机等设备连 Wi-Fi 时用的私有地址。“自动归入”的地址可以拆出成单独的设备。</p>
+    </fieldset>
+    <fieldset id="lan-device-traffic-box" hidden>
+      <legend>流量</legend>
+      <div class="segmented" id="lan-device-ranges" role="group" aria-label="时间范围"></div>
+      <div class="plot" id="lan-device-plot"></div>
+      <p class="note" id="lan-device-traffic-note"></p>
+    </fieldset>
+    <fieldset id="lan-device-suggest-box">
+      <legend>可能是同一台</legend>
+      <p class="note" id="lan-device-suggest-note"></p>
+      <div class="form-row" id="lan-device-suggest"></div>
+    </fieldset>
+    <fieldset>
+      <legend>静态分配</legend>
+      <p class="note" id="lan-device-static-note"></p>
+      <div class="form-row">
+        <label>MAC 地址 <select id="lan-device-static-mac"></select></label>
+        <label>地址 <input id="lan-device-static-ip" autocomplete="off" spellcheck="false"></label>
+        <label>名字 <input id="lan-device-static-name" autocomplete="off" spellcheck="false" placeholder="可留空"></label>
+        <button id="lan-device-static-apply" class="close strong">设为静态分配</button>
+      </div>
+    </fieldset>
+    <fieldset>
+      <legend>合并和删除</legend>
+      <div class="form-row">
+        <label>把 <select id="lan-device-merge-from"></select> 并入这台</label>
+        <button id="lan-device-merge-apply" class="close strong">合并</button>
+      </div>
+      <div class="form-row">
+        <button id="lan-device-forget" class="close">删除这台设备</button>
+        <span class="note">只能删除没有静态分配、租约也已经过期的设备；它再次出现时会重新列出。</span>
+      </div>
+    </fieldset>
+  </div>
+</dialog>
+
+<dialog id="nat-dialog" aria-labelledby="nat-title">
+  <div class="dialog-head">
+    <h2 id="nat-title">出口连接</h2>
+    <form method="dialog"><button class="close">关闭</button></form>
+  </div>
+  <p class="note" id="nat-summary" role="status"></p>
+  <div id="nat-content" hidden>
+    <h3>出口</h3>
+    <div class="scroll"><table id="nat-exits"><thead><tr><th>出口</th><th>速率</th><th>pps</th><th>连接数</th></tr></thead><tbody></tbody></table></div>
+    <h3>客户端</h3>
+    <div class="scroll"><table id="nat-users"><thead><tr><th>地址</th><th class="text">出口</th><th>动态会话</th><th>静态会话</th><th>速率</th><th>pps</th></tr></thead><tbody></tbody></table></div>
+    <details id="nat-others-box" hidden>
+      <summary>本机与回程残留（<span id="nat-others-count">0</span>）</summary>
+      <div class="scroll"><table id="nat-others"><thead><tr><th>地址</th><th class="text">类型</th><th class="text">出口</th><th>动态会话</th><th>静态会话</th><th>速率</th><th>pps</th></tr></thead><tbody></tbody></table></div>
+      <p class="note nat-foot">“本机”是路由器自己的地址。“回程残留”是外部服务器发给已断开 VPN 客户端或本地网段、却又从出口发出去的包，这些服务器被 NAT 误记成内网用户，并不是你的设备。</p>
+    </details>
+    <div class="dialog-filter">
+      <h3>连接</h3>
+      <label>筛选 <input id="nat-filter" type="search" placeholder="出口、地址、端口或协议" autocomplete="off"></label>
+    </div>
+    <div class="scroll"><table id="nat-sessions"><thead><tr><th>出口</th><th>协议</th><th class="text">客户端</th><th class="text">外部地址</th><th class="text">转换后</th><th>速率</th><th>pps</th><th>累计流量</th><th>累计包</th><th>空闲</th></tr></thead><tbody></tbody></table></div>
+    <p class="note" id="nat-empty" hidden>没有匹配的连接。</p>
+    <p class="note nat-foot">每 5 秒刷新，按速率排序，最多显示 300 条。数据来自 IPv4 NAT 表，速率是收发双向合计，外部地址是这个连接的第一个目的地；同一个内网端口连多个目的地时只显示第一个。IPv6 是 1:1 转换，不统计。</p>
+    <p class="note nat-foot" id="nat-no-external" hidden>这个 VPP 没有返回外部地址（需要仓库里的 0012 补丁），所以不显示这一列。</p>
+  </div>
+</dialog>
+
+<script src="uPlot.iife.min.js"></script>
+<script type="module" src="app.js"></script>
+</body>
+</html>

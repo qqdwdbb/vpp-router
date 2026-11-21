@@ -1,0 +1,116 @@
+dpdk: mlx4 RX queue interrupts, consumed through the PMD
+
+net_mlx4 shared a driver entry with qede and bnxt that left
+enable_rxq_int unset, so VPP never probed for interrupts and gave the
+queues no event file; setting rx-mode adaptive or interrupt on a
+ConnectX-3 port failed with VNET_API_ERROR_UNIMPLEMENTED (-9). The mlx4
+PMD supports RX interrupts, so give it its own entry with enable_rxq_int.
+
+That alone is not enough. mlx4's queue fd is an ibverbs completion
+channel, not an eventfd: an event must be taken with ibv_get_cq_event and
+acked, which the PMD does in rx_intr_disable. VPP read 8 bytes from the
+fd, which fails on a completion channel (an event is 16 bytes), so the
+event was never consumed, the CQ arm sequence never advanced and the
+queue raised no further interrupts: in adaptive mode on a ConnectX-3
+every packet was lost once the workers slept. Switching back to polling
+also failed, because rx_intr_disable returns -EAGAIN when no event is
+pending.
+
+A new driver flag, int_ack_by_disable (set for net_mlx4), makes
+dpdk_rx_read_ready consume pending events with rte_eth_dev_rx_intr_disable
+instead of read(), and the switch to polling treats -EAGAIN from it as
+success. dpdk_port_conf_t keeps its size (a spare bit of the u16 field).
+
+Tested on a ConnectX-3 (i5-9300H, 2 workers, 2 RX queues, NAT44-EI, 64 B):
+idle workers at 0.9% CPU instead of 100%, no loss from 1 kpps to 1 Mpps
+while workers wake from interrupts, 7.3-8.1 Mpps above the NIC ceiling as
+when polling, and polling/adaptive switches work both ways.
+
+--- a/src/plugins/dpdk/device/common.c
++++ b/src/plugins/dpdk/device/common.c
+@@ -362,8 +362,20 @@
+   vnet_hw_if_rx_queue_t *rxq = vnet_hw_if_get_rx_queue (vnm, qidx);
+   dpdk_device_t *xd = vec_elt_at_index (dm->devices, rxq->dev_instance);
+ 
+-  u64 b;
+-  CLIB_UNUSED (ssize_t size) = read (uf->file_descriptor, &b, sizeof (b));
++  if (xd->conf.int_ack_by_disable)
++    {
++      /* Take every pending completion event off the channel and ack it;
++	 the PMD returns -EAGAIN once none is left. Without this the CQ is
++	 never re-armed and the queue raises no further interrupts. */
++      for (int i = 0; i < 8; i++)
++	if (rte_eth_dev_rx_intr_disable (xd->port_id, rxq->queue_id))
++	  break;
++    }
++  else
++    {
++      u64 b;
++      CLIB_UNUSED (ssize_t size) = read (uf->file_descriptor, &b, sizeof (b));
++    }
+   if (qidx < vec_len (dpdk_rxq_int_armed))
+     dpdk_rxq_int_armed[qidx] = 0;
+   if (rxq->mode != VNET_HW_IF_RX_MODE_POLLING)
+--- a/src/plugins/dpdk/device/device.c
++++ b/src/plugins/dpdk/device/device.c
+@@ -740,7 +740,12 @@
+     return clib_error_return (0, "unsupported op (is the interface up?)", rv);
+   if (mode == VNET_HW_IF_RX_MODE_POLLING &&
+       !(xd->flags & DPDK_DEVICE_FLAG_INT_UNMASKABLE))
+-    rv = rte_eth_dev_rx_intr_disable (xd->port_id, qid);
++    {
++      rv = rte_eth_dev_rx_intr_disable (xd->port_id, qid);
++      /* -EAGAIN: no completion event was pending, nothing to consume */
++      if (rv == -EAGAIN && xd->conf.int_ack_by_disable)
++	rv = 0;
++    }
+   else if (mode == VNET_HW_IF_RX_MODE_POLLING)
+     {
+       rxq = vec_elt_at_index (xd->rx_queues, qid);
+--- a/src/plugins/dpdk/device/dpdk.h
++++ b/src/plugins/dpdk/device/dpdk.h
+@@ -126,6 +126,9 @@
+   u32 use_intel_phdr_cksum : 1;
+   u32 int_unmaskable : 1;
+   u32 need_tx_prepare : 1;
++  /* RX interrupts come on an ibverbs completion channel: rx_intr_disable
++     consumes and acks the event, a read() of the fd does not */
++  u32 int_ack_by_disable : 1;
+ } dpdk_driver_t;
+ 
+ dpdk_driver_t *dpdk_driver_find (const char *name, const char **desc);
+@@ -145,6 +148,7 @@
+     u16 disable_tx_checksum_offload : 1;
+     u16 disable_rss : 1;
+     u16 disable_rx_scatter : 1;
++    u16 int_ack_by_disable : 1;
+     u16 n_rx_queues;
+     u16 n_tx_queues;
+     u16 n_rx_desc;
+--- a/src/plugins/dpdk/device/driver.c
++++ b/src/plugins/dpdk/device/driver.c
+@@ -83,8 +83,12 @@
+     .interface_number_from_port_id = 1,
+   },
+   {
+-    .drivers = DPDK_DRIVERS ({ "net_mlx4", "Mellanox ConnectX-3 Family" },
+-			     { "net_qede", "Cavium QLogic FastLinQ QL4xxxx" },
++    .drivers = DPDK_DRIVERS ({ "net_mlx4", "Mellanox ConnectX-3 Family" }),
++    .enable_rxq_int = 1,
++    .int_ack_by_disable = 1,
++  },
++  {
++    .drivers = DPDK_DRIVERS ({ "net_qede", "Cavium QLogic FastLinQ QL4xxxx" },
+ 			     { "net_bnxt", "Broadcom NetXtreme E/S-Series" }),
+   },
+   {
+--- a/src/plugins/dpdk/device/init.c
++++ b/src/plugins/dpdk/device/init.c
+@@ -374,6 +374,7 @@
+ 	  xd->conf.disable_rss = dr->mq_mode_none;
+ 	  xd->conf.disable_rx_scatter = dr->disable_rx_scatter;
+ 	  xd->conf.enable_rxq_int = dr->enable_rxq_int;
++	  xd->conf.int_ack_by_disable = dr->int_ack_by_disable;
+ 	  if (dr->use_intel_phdr_cksum)
+ 	    dpdk_device_flag_set (xd, DPDK_DEVICE_FLAG_INTEL_PHDR_CKSUM, 1);
+ 	  if (dr->int_unmaskable)

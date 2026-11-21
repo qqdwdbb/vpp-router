@@ -1,0 +1,8 @@
+[Unit]
+Description=Synchronize NAPT66 with the current VPP WAN IPv6
+After=vpp-router.service vpp-wireguard.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/napt66-sync --config /etc/vpp/napt66-sync.json
+TimeoutStartSec=60

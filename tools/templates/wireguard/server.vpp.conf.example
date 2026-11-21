@@ -1,0 +1,14 @@
+comment { VPP 26.06: replace every placeholder before execution. }
+comment { Requires wireguard_plugin.so and an available ChaCha20-Poly1305 crypto engine. }
+comment { Execute only after host-vpp-wan has acquired VPP_WAN_IPV4. }
+
+wireguard create instance 0 listen-port 51820 private-key <SERVER_PRIVATE_KEY_BASE64> src <VPP_WAN_IPV4>
+set interface state wg0 up
+set interface mtu packet 1420 wg0
+set interface ip address wg0 10.66.66.1/24
+
+comment { Reuse the existing NAT44 ED instance and WAN address pool. }
+# NAT is applied by the configured WAN output feature.
+nat44 ei add identity mapping external host-vpp-wan udp 51820
+
+comment { Add peer definitions and their /32 routes using peer.vpp.conf.example. }

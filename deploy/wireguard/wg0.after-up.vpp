@@ -1,0 +1,2 @@
+set interface nat66 in wg0
+ip punt redirect rx wg0 via 10.61.20.2 loop200

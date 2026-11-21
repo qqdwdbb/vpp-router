@@ -1,0 +1,20 @@
+--- a/src/plugins/nat/nat44-ei/nat44_ei.c
++++ b/src/plugins/nat/nat44-ei/nat44_ei.c
+@@ -97,6 +97,6 @@
+ VNET_FEATURE_INIT (ip4_nat44_ei_in2out_output, static) = {
+   .arc_name = "ip4-output",
+   .node_name = "nat44-ei-in2out-output",
+-  .runs_after = VNET_FEATURES ("acl-plugin-out-ip4-fa",
+-			       "ip4-sv-reassembly-output-feature"),
++  .runs_after = VNET_FEATURES ("ip4-sv-reassembly-output-feature"),
++  .runs_before = VNET_FEATURES ("acl-plugin-out-ip4-fa"),
+ };
+@@ -119,6 +119,6 @@
+ VNET_FEATURE_INIT (ip4_nat44_ei_in2out_output_worker_handoff, static) = {
+   .arc_name = "ip4-output",
+   .node_name = "nat44-ei-in2out-output-worker-handoff",
+-  .runs_after = VNET_FEATURES ("acl-plugin-out-ip4-fa",
+-			       "ip4-sv-reassembly-output-feature"),
++  .runs_after = VNET_FEATURES ("ip4-sv-reassembly-output-feature"),
++  .runs_before = VNET_FEATURES ("acl-plugin-out-ip4-fa"),
+ };

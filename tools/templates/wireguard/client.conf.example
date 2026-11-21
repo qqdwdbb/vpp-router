@@ -1,0 +1,13 @@
+[Interface]
+PrivateKey = <CLIENT_PRIVATE_KEY_BASE64>
+Address = 10.66.66.2/32
+DNS = 10.61.30.2
+MTU = 1420
+
+[Peer]
+PublicKey = <SERVER_PUBLIC_KEY_BASE64>
+Endpoint = <SERVER_PUBLIC_IP_OR_DOMAIN>:51820
+# IPv4 exits through VPP NAT44. IPv6 is also captured to prevent bypass;
+# enable the optional routed IPv6 configuration before expecting IPv6 connectivity.
+AllowedIPs = 0.0.0.0/0, ::/0
+PersistentKeepalive = 25

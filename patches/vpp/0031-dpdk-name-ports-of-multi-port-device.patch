@@ -1,0 +1,68 @@
+dpdk: name each port of a multi-port device, "name a,b"
+
+The dpdk section's dev blocks are keyed by PCI address, and every port the
+PMD makes for that address takes the block's settings, its name with
+them. mlx4 drives both ports of a ConnectX-3 through one PCI function, so
+"dev 0000:01:00.0 { name port0 }" names both ports port0: the second
+collides, and dpdk_lib_init returns the collision error, which also leaves
+every port after it uninitialised. Without a name the PCI-derived default
+collides the same way, so the second port could not be used at all.
+
+The name may now be a comma-separated list, one name per port in the
+order the PMD made them (for mlx4, the ConnectX port number):
+"dev 0000:01:00.0 { name port0,lan0 }". The port's place is the number of
+lower port ids on the same rte_device. A port with no name in the list,
+including the second port under a single name as before, is skipped with
+a notice rather than failing the whole init. A single name on a
+single-port device is used as before. The other settings of the block
+(queues, descriptors) apply to every port.
+
+--- a/src/plugins/dpdk/device/init.c
++++ b/src/plugins/dpdk/device/init.c
+@@ -387,7 +387,45 @@
+ 
+       if (devconf->name)
+ 	{
+-	  xd->name = devconf->name;
++	  /* A device with several ports (mlx4 drives both ports of a
++	     ConnectX-3 through one PCI function) gives each port the
++	     devconf's name, and the second collides. "name a,b" names the
++	     ports in the order the PMD made them; a port with no name in the
++	     list is left out. */
++	  u32 port_index = 0, n = 0;
++	  u16 other;
++	  u8 *name = 0;
++
++	  RTE_ETH_FOREACH_DEV (other)
++	  {
++	    struct rte_eth_dev_info odi;
++	    if (other < port_id && rte_eth_dev_info_get (other, &odi) == 0 &&
++		odi.device == di.device)
++	      port_index++;
++	  }
++	  for (u32 i = 0, start = 0; i <= vec_len (devconf->name); i++)
++	    if (i == vec_len (devconf->name) || devconf->name[i] == ',')
++	      {
++		if (n++ == port_index && i > start)
++		  vec_add (name, devconf->name + start, i - start);
++		start = i + 1;
++	      }
++	  if (n == 1 && port_index == 0)
++	    {
++	      vec_free (name);
++	      xd->name = devconf->name;
++	    }
++	  else if (name)
++	    xd->name = name;
++	  else
++	    {
++	      dpdk_log_notice ("[%u] port %u of device %s has no name in '%v'. "
++			       "Skipping...",
++			       port_id, port_index, rte_dev_name (di.device),
++			       devconf->name);
++	      vec_set_len (dm->devices, vec_len (dm->devices) - 1);
++	      continue;
++	    }
+ 	}
+       else
+ 	{

@@ -1,0 +1,27 @@
+# Copy to pktgen-net.conf next to the script and edit. Keep real values out of the repository.
+
+# "interface address/len[,address/len...]"
+INTERFACES=(
+  "wan0 192.0.2.7/24"
+  "lan0 198.51.100.198/24"
+  "bench0 203.0.113.3/24"
+)
+
+# Optional. Leave empty to keep the current default route.
+DEFAULT_VIA=""
+DEFAULT_DEV=""
+
+# Ports whose link-level flow control is turned off for the test.
+PAUSE_OFF=(wan0 lan0)
+
+# Optional CPU frequency governor during the test, for example performance.
+GOVERNOR=""
+
+# 1 removes stale DPDK hugepage files when no DPDK process is running.
+CLEAR_HUGEPAGES=1
+
+# Automatic restore after this many minutes; 0 disables it.
+TTL_MINUTES=120
+
+# Port used to find interfaces carrying SSH sessions.
+SSH_PORT=22

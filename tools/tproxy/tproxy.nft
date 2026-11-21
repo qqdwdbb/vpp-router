@@ -1,0 +1,22 @@
+# Only packets selected by VPP and delivered on this TAP enter the proxy.
+add table ip vpp_tproxy
+flush table ip vpp_tproxy
+add chain ip vpp_tproxy prerouting { type filter hook prerouting priority mangle; policy accept; }
+add rule ip vpp_tproxy prerouting iifname "vpp-tproxy" ip saddr 10.61.30.0/24 meta l4proto { tcp, udp } counter tproxy ip to 127.0.0.1:2080 meta mark set 0x2080 accept
+# Transparent socket replies return through VPP, leaving dnsmasq replies alone.
+add chain ip vpp_tproxy output { type route hook output priority mangle; policy accept; }
+add rule ip vpp_tproxy output ip daddr 10.61.30.0/24 socket transparent 1 counter meta mark set 0x2081
+# Do not allow unhandled TAP packets to bypass the proxy via Linux forwarding.
+add chain ip vpp_tproxy forward { type filter hook forward priority filter; policy accept; }
+add rule ip vpp_tproxy forward iifname "vpp-tproxy" counter drop
+
+# IPv6 client prefixes are learned dynamically on br-vpp-lan. FIB matching
+# avoids hardcoding the ISP's delegated prefix or introducing a prefix watcher.
+add table ip6 vpp_tproxy6
+flush table ip6 vpp_tproxy6
+add chain ip6 vpp_tproxy6 prerouting { type filter hook prerouting priority mangle; policy accept; }
+add rule ip6 vpp_tproxy6 prerouting iifname "vpp-tproxy" fib saddr oifname "br-vpp-lan" meta l4proto { tcp, udp } counter tproxy ip6 to [::1]:2080 ct mark set 0x2080 meta mark set 0x2080 accept
+add chain ip6 vpp_tproxy6 output { type route hook output priority mangle; policy accept; }
+add rule ip6 vpp_tproxy6 output ct mark 0x2080 socket transparent 1 counter meta mark set 0x2081
+add chain ip6 vpp_tproxy6 forward { type filter hook forward priority filter; policy accept; }
+add rule ip6 vpp_tproxy6 forward iifname "vpp-tproxy" counter drop

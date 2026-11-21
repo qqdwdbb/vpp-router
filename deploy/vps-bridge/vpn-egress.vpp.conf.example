@@ -1,0 +1,14 @@
+# VROUTER migration fragment; load once after EI enable and loop10.
+# vpn/vpn6 stay in table 0. loop102 is the NAT classification context only.
+# Two EI pools cannot share an inside FIB: WAN is VRF 0, wg1 is VRF 101.
+# vrouter-vps already L2-bridges BD 10 into Linux br0; do not add another TAP.
+ip table add 102
+create loopback interface instance 102
+set interface ip table loop102 102
+set interface state loop102 up
+ip route add 0.0.0.0/0 table 102 via ip4-lookup-in-table 0
+set interface nat44 ei out loop10 output-feature
+nat44 ei context loop10 loop102
+nat44 ei add address 10.61.50.3 tenant-vrf 102
+# Cellular IPv6 ESP-in-UDP often has no PTB; 960/940 keeps inner TCP inside 1280.
+set interface tcp-mss-clamp loop10 ip4 enable ip4-mss 960 ip6 enable ip6-mss 940

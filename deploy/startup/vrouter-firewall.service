@@ -1,0 +1,16 @@
+[Unit]
+Description=VROUTER Unified Firewall Policy (VPP ACLs + Linux nftables)
+Documentation=file:///opt/vpp-vrouter-migration/source/scripts/vrouter/firewall/README.md
+After=vrouter-network-prep.service
+Requires=vrouter-network-prep.service
+PartOf=vrouter-vpp.service
+Before=vrouter-dns-route-gate.service vrouter-strongswan.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/python3 /opt/vpp-vrouter-migration/source/scripts/vrouter/firewall/vrouter-firewall.py --apply --config /etc/vpp/firewall.json
+ExecStop=/usr/bin/python3 /opt/vpp-vrouter-migration/source/scripts/vrouter/firewall/vrouter-firewall.py --flush --config /etc/vpp/firewall.json
+
+[Install]
+WantedBy=multi-user.target

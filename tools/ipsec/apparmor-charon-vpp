@@ -1,0 +1,6 @@
+# VPP IPsec control-plane integration; retain the standard charon profile.
+/etc/strongswan-vpp.conf r,
+/var/log/strongswan-vpp.log rw,
+/dev/shm/vpe-api rwk,
+/dev/shm/global_vm rwk,
+/run/vpp/stats.sock rw,

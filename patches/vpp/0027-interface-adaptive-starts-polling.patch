@@ -1,0 +1,30 @@
+interface: start adaptive RX nodes in polling state
+
+When every queue of an input node on a thread is adaptive, the runtime
+update set the node straight to interrupt state. vlib's adaptive switch
+instead dispatches the node once more in polling state so the driver can
+arm its interrupts (dpdk does this since 0024). Skipping it leaves a queue
+disarmed if its one-shot interrupt fired while the node was polling: with
+wan0 adaptive and lan0 polling on the RK3588 board, wan0's r8169 interrupt fired
+and disarmed, and setting lan0 adaptive switched the node to interrupt
+state with wan0 never armed again, so wan0 stopped receiving. Start
+adaptive nodes polling and let vlib switch them.
+
+--- a/src/vnet/interface/runtime.c
++++ b/src/vnet/interface/runtime.c
+@@ -105,6 +105,15 @@
+ 	per_thread_node_adaptive[ti] = 1;
+     }
+ 
++  /* An adaptive node starts polling and reaches interrupt state through
++     vlib's own switch, which dispatches it once more in polling state first
++     so the driver can arm its interrupts. Setting interrupt state here skips
++     that dispatch: a queue whose one-shot interrupt (r8169) fired while the
++     node was polling then stays disarmed, and the queue never receives. */
++  for (int i = 0; i < n_threads; i++)
++    if (per_thread_node_adaptive[i])
++      per_thread_node_state[i] = VLIB_NODE_STATE_POLLING;
++
+   /* construct per-thread polling vectors */
+   pool_foreach (rxq, im->hw_if_rx_queues)
+     {

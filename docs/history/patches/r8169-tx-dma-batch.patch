@@ -1,0 +1,84 @@
+--- a/drivers/net/r8169/r8169_rxtx.c
++++ b/drivers/net/r8169/r8169_rxtx.c
+@@ -1774,6 +1774,7 @@
+ 	struct rtl_tx_entry *txe = NULL;
+ 	uint16_t desc_count = 0;
+ 	const uint16_t nb_tx_desc = txq->nb_tx_desc;
++	const int nc_no_close = rtl_nc_dma && hw->EnableTxNoClose;
+ 	uint16_t tail;
+ 	u32 len;
+ 	u32 opts[2] = {0};
+@@ -1835,10 +1836,18 @@
+ 		txe->mbuf = m_seg;
+ 
+ 		txd->opts2 = rte_cpu_to_le_32(opts2);
+-		rte_wmb();
++		/* No-close publication is ordered at the burst's doorbell. */
++		if (!nc_no_close)
++			rte_wmb();
+ 		txd->opts1 = rte_cpu_to_le_32(opts1);
+-		rtl_nc_sync(rte_pktmbuf_mtod(m_seg, void *), len, 0);
+-		rtl_nc_sync(txd, sizeof(*txd), 0);
++		if (nc_no_close) {
++			/* No-close consumes only through the published SW tail.
++			 * Complete data and descriptor cleans before that MMIO. */
++			rtl_nc_sync_range(rte_pktmbuf_mtod(m_seg, void *), len, 0);
++		} else {
++			rtl_nc_sync(rte_pktmbuf_mtod(m_seg, void *), len, 0);
++			rtl_nc_sync(txd, sizeof(*txd), 0);
++		}
+ 
+ 		tail = (tail + 1) % nb_tx_desc;
+ 
+@@ -2140,6 +2149,31 @@
+ 		rtl8168_doorbell(hw);
+ }
+ 
++static inline void
++rtl_nc_tx_sync(struct rtl_tx_queue *txq, uint32_t first)
++{
++	uint32_t count;
++	uint16_t index, contiguous;
++
++	if (!rtl_nc_dma || !txq->hw->EnableTxNoClose)
++		return;
++	count = txq->tx_tail - first;
++	if (!count)
++		return;
++	index = first % txq->nb_tx_desc;
++	contiguous = RTE_MIN(count, (uint32_t)(txq->nb_tx_desc - index));
++	/* No-close leaves descriptor memory CPU-owned. Clean each touched
++	 * cache line once, including partial lines and a possible ring wrap. */
++	rtl_nc_sync_range(&txq->hw_ring[index],
++			  contiguous * sizeof(*txq->hw_ring), 0);
++	if (count > contiguous)
++		rtl_nc_sync_range(txq->hw_ring,
++				  (count - contiguous) * sizeof(*txq->hw_ring), 0);
++	/* One completion point orders all packet data and descriptors before
++	 * the NIC sees the new tail, even if descriptor lines evict early. */
++	rtl_nc_sync_complete();
++}
++
+ /* PMD transmit function */
+ uint16_t
+ rtl_xmit_pkts(void *tx_queue, struct rte_mbuf **tx_pkts, uint16_t nb_pkts)
+@@ -2149,6 +2183,7 @@
+ 	struct rte_mbuf *tx_pkt;
+ 	uint16_t nb_tx;
+ 	uint64_t deadline = 0;
++	const uint32_t first = txq->tx_tail;
+ 
+ 	RTE_ASSERT(RTL_R8(hw, ChipCmd) & CmdTxEnb);
+ 
+@@ -2186,8 +2221,10 @@
+ done:
+ 	rte_wmb();
+ 
+-	if (nb_tx > 0)
++	if (nb_tx > 0) {
++		rtl_nc_tx_sync(txq, first);
+ 		rtl_doorbell(hw, txq);
++	}
+ 
+ 	PMD_TX_LOG(DEBUG, "%s %d transmitted", __func__, nb_tx);
+ 

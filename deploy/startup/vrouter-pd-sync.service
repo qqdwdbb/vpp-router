@@ -1,0 +1,22 @@
+[Unit]
+Description=VROUTER VPP IPv6 PD Synchronizer & VPN Pool Manager
+Documentation=https://github.com
+Requires=vrouter-vpp.service vrouter-strongswan.service
+After=vrouter-vpp.service vrouter-strongswan.service
+PartOf=vrouter-vpp.service
+
+[Service]
+Type=simple
+RuntimeDirectory=vrouter-pd-sync
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=restart
+UMask=0077
+Environment=PATH=/opt/vpp-nic1-test/vpp/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=LD_LIBRARY_PATH=/opt/vpp-vrouter-migration/ipsec-ip6-udp/lib:/opt/vpp-nic1-test/dpdk/lib/aarch64-linux-gnu:/opt/vpp-nic1-test/vpp/lib/aarch64-linux-gnu
+ExecStart=/usr/bin/python3 /opt/vpp-vrouter-migration/source/scripts/vrouter/ipv6/pd-sync.py --config /etc/vpp/vrouter-pd-sync.json
+Restart=on-failure
+RestartSec=2
+KillMode=control-group
+
+[Install]
+WantedBy=vrouter-vpp.service multi-user.target

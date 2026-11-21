@@ -1,0 +1,96 @@
+diff --git a/plugins/nat-ei-context/nat_ei_context.c b/plugins/nat-ei-context/nat_ei_context.c
+index adfd7ea..98ef49e 100644
+--- a/plugins/nat-ei-context/nat_ei_context.c
++++ b/plugins/nat-ei-context/nat_ei_context.c
+@@ -27,6 +27,47 @@ wire_output_chain (vlib_main_t *vm)
+   return 0;
+ }
+ 
++typedef enum
++{
++  CONTEXT_ERROR_INVALID_NEXT,
++  CONTEXT_N_ERROR,
++} context_error_t;
++
++static char *context_error_strings[] = {
++  "invalid-next-index",
++};
++
++typedef struct
++{
++  f64 next_warning;
++} context_runtime_t;
++
++static context_runtime_t context_runtime;
++
++/* Reserve a real drop edge: never pass an invalid slot to the enqueue helpers.
++ * Validate the u32 feature result before narrowing it to the batch's u16. */
++static_always_inline u32
++context_checked_next (vlib_main_t *vm, vlib_node_runtime_t *node,
++                      vlib_buffer_t *b, u32 next, u32 config_index)
++{
++  if (PREDICT_TRUE (next < node->n_next_nodes)) return next;
++
++  b->error = node->errors[CONTEXT_ERROR_INVALID_NEXT];
++  context_runtime_t *rt = (void *) node->runtime_data;
++  f64 now = vlib_time_now (vm);
++  if (now >= rt->next_warning)
++    {
++      rt->next_warning = now + 5.0;
++      clib_warning ("%v thread %u: invalid-next-index %u (n_next_nodes %u), "
++                    "rx %u tx %u config %u; dropping",
++                    vlib_get_node (vm, node->node_index)->name, vm->thread_index,
++                    next, node->n_next_nodes,
++                    vnet_buffer (b)->sw_if_index[VLIB_RX],
++                    vnet_buffer (b)->sw_if_index[VLIB_TX], config_index);
++    }
++  return 0; /* Both context nodes register slot 0 as error-drop. */
++}
++
+ static uword
+ context_enter (vlib_main_t *vm, vlib_node_runtime_t *node, vlib_frame_t *frame)
+ {
+@@ -37,7 +78,9 @@ context_enter (vlib_main_t *vm, vlib_node_runtime_t *node, vlib_frame_t *frame)
+       u32 tx = vnet_buffer (b)->sw_if_index[VLIB_TX], next;
+       vnet_buffer2 (b)->unused[0] = vnet_buffer (b)->sw_if_index[VLIB_RX];
+       vnet_buffer (b)->sw_if_index[VLIB_RX] = contexts[tx];
++      u32 config_index = b->current_config_index;
+       vnet_feature_next (&next, b);
++      next = context_checked_next (vm, node, b, next, config_index);
+       vlib_set_next_frame_buffer (vm, node, next, from[i]);
+     }
+   return frame->n_vectors;
+@@ -56,12 +99,14 @@ context_exit (vlib_main_t *vm, vlib_node_runtime_t *node, vlib_frame_t *frame)
+   for (u32 i = 0; i < frame->n_vectors; i++)
+     {
+       vlib_buffer_t *b = bufs[i];
+-      u32 discarded, tx = vnet_buffer (b)->sw_if_index[VLIB_TX];
++      u32 next, discarded, tx = vnet_buffer (b)->sw_if_index[VLIB_TX];
+       if (tx < vec_len (contexts) && contexts[tx] != ~0)
+         vnet_buffer (b)->sw_if_index[VLIB_RX] = vnet_buffer2 (b)->unused[0];
+       /* Without handoff, EI jumps here without advancing the cursor. */
+       if (!handoff) vnet_feature_next (&discarded, b);
+-      vnet_feature_next_u16 (&nexts[i], b);
++      u32 config_index = b->current_config_index;
++      vnet_feature_next (&next, b);
++      nexts[i] = context_checked_next (vm, node, b, next, config_index);
+     }
+   vlib_buffer_enqueue_to_next (vm, node, from, nexts, frame->n_vectors);
+   return frame->n_vectors;
+@@ -70,10 +115,16 @@ context_exit (vlib_main_t *vm, vlib_node_runtime_t *node, vlib_frame_t *frame)
+ VLIB_REGISTER_NODE (ei_context_enter_node) = {
+   .function = context_enter, .name = "nat-ei-context-enter",
+   .vector_size = sizeof (u32), .type = VLIB_NODE_TYPE_INTERNAL,
++  .n_errors = CONTEXT_N_ERROR, .error_strings = context_error_strings,
++  .n_next_nodes = 1, .next_nodes = { [0] = "error-drop" },
++  .runtime_data_bytes = sizeof (context_runtime_t), .runtime_data = &context_runtime,
+ };
+ VLIB_REGISTER_NODE (ei_context_exit_node) = {
+   .function = context_exit, .name = "nat-ei-context-exit",
+   .vector_size = sizeof (u32), .type = VLIB_NODE_TYPE_INTERNAL,
++  .n_errors = CONTEXT_N_ERROR, .error_strings = context_error_strings,
++  .n_next_nodes = 1, .next_nodes = { [0] = "error-drop" },
++  .runtime_data_bytes = sizeof (context_runtime_t), .runtime_data = &context_runtime,
+ };
+ VNET_FEATURE_INIT (ei_context_enter_feature, static) = {
+   .arc_name = "ip4-output", .node_name = "nat-ei-context-enter",

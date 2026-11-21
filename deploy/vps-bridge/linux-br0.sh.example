@@ -1,0 +1,61 @@
+#!/bin/sh
+# Cutover helper for Linux br0 after VPP owns nic0 VLAN 10.
+# Replaces Linux vps@nic0 with VPP TAP vrouter-vps. tap0 (gretap/nebula) stays.
+# Does not unbind PCI, start VPP, or touch wan/lan.
+#
+#   linux-br0.sh.example --check
+#   linux-br0.sh.example --apply     # only during the nic0 window
+set -eu
+
+TAP=vrouter-vps
+LINUX_VPS=vps
+BRIDGE=br0
+GRETAP=tap0
+MTU=1342
+
+mode=${1:-}
+
+if [ ! -e "/sys/class/net/$BRIDGE" ]; then
+	echo "missing $BRIDGE" >&2
+	exit 1
+fi
+if [ ! -e "/sys/class/net/$GRETAP" ]; then
+	echo "missing $GRETAP; nebula gretap must stay up" >&2
+	exit 1
+fi
+
+members() {
+	ls -1 "/sys/class/net/$BRIDGE/brif" 2>/dev/null || true
+}
+
+echo "br0 members: $(members | tr '\n' ' ')"
+echo "tap0=$(cat /sys/class/net/$GRETAP/operstate 2>/dev/null) linux-vps=$(cat /sys/class/net/$LINUX_VPS/operstate 2>/dev/null) vrouter-vps=$(cat /sys/class/net/$TAP/operstate 2>/dev/null)"
+
+if [ "$mode" = --check ]; then
+	exit 0
+fi
+if [ "$mode" != --apply ]; then
+	echo "usage: $0 --check|--apply" >&2
+	exit 2
+fi
+if [ ! -e "/sys/class/net/$TAP" ]; then
+	echo "missing $TAP; start VPP VLAN10 TAP first" >&2
+	exit 1
+fi
+if [ -e "/sys/class/net/nic0/device/driver" ] && [ "$(basename "$(readlink /sys/class/net/nic0/device/driver)")" = r8125 ]; then
+	echo "nic0 is still r8125; refusing to steal vps from production Linux" >&2
+	exit 1
+fi
+
+ip link set "$TAP" mtu "$MTU"
+ip link set "$TAP" master "$BRIDGE"
+ip link set "$TAP" up
+if [ -e "/sys/class/net/$LINUX_VPS" ]; then
+	ip link set "$LINUX_VPS" nomaster 2>/dev/null || true
+	ip link set "$LINUX_VPS" down
+	ip link delete "$LINUX_VPS" type vlan 2>/dev/null || true
+fi
+ip link set "$BRIDGE" up
+ip link set "$GRETAP" master "$BRIDGE" 2>/dev/null || true
+ip link set "$GRETAP" up
+echo "br0 members: $(members | tr '\n' ' ')"

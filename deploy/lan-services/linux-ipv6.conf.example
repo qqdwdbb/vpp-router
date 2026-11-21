@@ -1,0 +1,10 @@
+# Merge into the final /etc/network/interfaces br-mgmt definition during cutover.
+# Keep the separate IPv4 definition at 10.61.20.2/24.
+iface br-mgmt inet6 static
+    address fd42:1111:2222:10::2
+    netmask 64
+    autoconf 0
+    accept_ra 0
+    gateway fd42:1111:2222:10::1
+# VPP owns ::1 and the public delegated prefix. Do not run dhcpcd on br-mgmt.
+# Firewall must allow LAN ICMPv6 ND/RA and DHCPv6 UDP 546/547.

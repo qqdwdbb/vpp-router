@@ -1,0 +1,22 @@
+{
+  "sync_program": "/opt/vpp-vrouter-migration/source/scripts/nftset-route-sync.py",
+  "route_config": "/etc/vpp/nftset-route-sync.json",
+  "domain_routes_file": "/etc/vpp/dns-route-domains.json",
+  "static_nftables_file": "/etc/nftables.conf",
+  "legacy_rules_directory": "/etc/dnsmasq.d",
+  "lease_file": "/var/lib/vpp-nft-route-sync/dns-leases.json",
+  "upstream": [
+    "10.61.20.2",
+    53
+  ],
+  "listen": [
+    [
+      "10.61.20.2",
+      1053
+    ],
+    [
+      "fd42:1111:2222:10::2",
+      1053
+    ]
+  ]
+}

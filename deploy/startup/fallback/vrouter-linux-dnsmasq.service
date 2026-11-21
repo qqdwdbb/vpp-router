@@ -1,0 +1,10 @@
+[Unit]
+Description=VROUTER DNS and DHCP for Linux fallback
+ConditionPathExists=/var/lib/vpp-vrouter/linux-fallback/active
+Conflicts=vrouter-dnsmasq.service dnsmasq.service
+
+[Service]
+Type=simple
+ExecStart=/usr/sbin/dnsmasq --keep-in-foreground --conf-file=/etc/vpp/linux-fallback-dnsmasq.conf --pid-file=/run/vrouter-linux-dnsmasq.pid
+Restart=on-failure
+RestartSec=2

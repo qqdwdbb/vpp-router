@@ -1,0 +1,13 @@
+[Unit]
+Description=VROUTER Linux IPv4 takeover after VPP failure
+After=local-fs.target systemd-modules-load.service networking.service
+ConditionPathExists=/var/lib/vpp-vrouter/linux-fallback/active
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /usr/local/lib/vpp-vrouter/scripts/vrouter/startup/vrouter-linux-fallback.py fallback
+RemainAfterExit=yes
+TimeoutStartSec=180
+
+[Install]
+WantedBy=multi-user.target

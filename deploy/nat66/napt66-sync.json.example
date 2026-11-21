@@ -1,0 +1,7 @@
+{
+  "insides": [
+    {"interface": "loop0", "prefix": "fd8b:d364:9a4c::/64"},
+    {"interface": "wg100", "prefix": "fd42:1111:2222:90::/64"}
+  ],
+  "outside": "port0.100"
+}

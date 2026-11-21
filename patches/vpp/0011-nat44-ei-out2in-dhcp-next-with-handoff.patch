@@ -1,0 +1,49 @@
+--- a/src/plugins/nat/nat44-ei/nat44_ei_out2in.c
++++ b/src/plugins/nat/nat44-ei/nat44_ei_out2in.c
+@@ -677,6 +677,19 @@
+   return 0;
+ }
+ 
++/* With a worker configured, packets arrive from the handoff feature, which has
++ * already consumed this node's feature entry. Reading the arc again runs past the
++ * end of the chain and yields an index that is not a next of this node. */
++static_always_inline u32
++nat44_ei_out2in_dhcp_next (vlib_buffer_t *b)
++{
++  u32 next;
++  if (vlib_num_workers ())
++    return NAT44_EI_OUT2IN_NEXT_LOOKUP;
++  vnet_feature_next (&next, b);
++  return next;
++}
++
+ VLIB_NODE_FN (nat44_ei_out2in_node)
+ (vlib_main_t *vm, vlib_node_runtime_t *node, vlib_frame_t *frame)
+ {
+@@ -809,7 +822,7 @@
+ 		   && (vnet_buffer (b0)->ip.reass.l4_dst_port ==
+ 		       clib_host_to_net_u16 (UDP_DST_PORT_dhcp_to_client))))
+ 		{
+-		  vnet_feature_next (&next0, b0);
++		  next0 = nat44_ei_out2in_dhcp_next (b0);
+ 		  goto trace0;
+ 		}
+ 
+@@ -985,7 +998,7 @@
+ 		   && (vnet_buffer (b1)->ip.reass.l4_dst_port ==
+ 		       clib_host_to_net_u16 (UDP_DST_PORT_dhcp_to_client))))
+ 		{
+-		  vnet_feature_next (&next1, b1);
++		  next1 = nat44_ei_out2in_dhcp_next (b1);
+ 		  goto trace1;
+ 		}
+ 
+@@ -1197,7 +1210,7 @@
+ 		   && (vnet_buffer (b0)->ip.reass.l4_dst_port ==
+ 		       clib_host_to_net_u16 (UDP_DST_PORT_dhcp_to_client))))
+ 		{
+-		  vnet_feature_next (&next0, b0);
++		  next0 = nat44_ei_out2in_dhcp_next (b0);
+ 		  goto trace00;
+ 		}
+ 

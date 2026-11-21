@@ -1,0 +1,14 @@
+{
+  "vpp_socket": "/run/vpp/cli.sock",
+  "lan_interface": "loop200",
+  "wan_interface": "WAN_INTERFACE",
+  "prefix_group": "wan-pd",
+  "interval_seconds": 2,
+  "ra_max_interval_seconds": 10,
+  "withdraw_seconds": 12,
+  "state_file": "/run/vrouter-pd-sync/state.json",
+  "ipsec_config": "/etc/vpp/ipsec.conf",
+  "dhcp_lease_file": "/var/lib/misc/dnsmasq.leases",
+  "nat66_policy_file": "/opt/vpp-vrouter-migration/private-wireguard/wg0-nat66.json",
+  "ipsec_pool_routes": true
+}

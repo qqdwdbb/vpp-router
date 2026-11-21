@@ -1,0 +1,77 @@
+--- a/src/plugins/wireguard/wireguard_peer.c
++++ b/src/plugins/wireguard/wireguard_peer.c
+@@ -452,7 +452,8 @@
+ 
+   pool_foreach (peer, wg_peer_pool)
+    {
+-    if (!memcmp (peer->remote.r_public, public_key, NOISE_PUBLIC_KEY_LEN))
++    if (peer->wg_sw_if_index == tun_sw_if_index &&
++        !memcmp (peer->remote.r_public, public_key, NOISE_PUBLIC_KEY_LEN))
+     {
+       return (VNET_API_ERROR_ENTRY_ALREADY_EXISTS);
+     }
+--- a/src/plugins/wireguard/wireguard_noise.h
++++ b/src/plugins/wireguard/wireguard_noise.h
+@@ -109,7 +109,8 @@
+   struct noise_upcall
+   {
+     void *u_arg;
+-    noise_remote_t *(*u_remote_get) (const uint8_t[NOISE_PUBLIC_KEY_LEN]);
++    noise_remote_t *(*u_remote_get) (noise_local_t *,
++                                     const uint8_t[NOISE_PUBLIC_KEY_LEN]);
+     uint32_t (*u_index_set) (vlib_main_t *, noise_remote_t *);
+     void (*u_index_drop) (vlib_main_t *, uint32_t);
+   } l_upcall;
+--- a/src/plugins/wireguard/wireguard_noise.c
++++ b/src/plugins/wireguard/wireguard_noise.c
+@@ -192,7 +192,7 @@
+     goto error;
+ 
+   /* Lookup the remote we received from */
+-  if ((r = l->l_upcall.u_remote_get (r_public)) == NULL)
++  if ((r = l->l_upcall.u_remote_get (l, r_public)) == NULL)
+     goto error;
+ 
+   /* ss */
+--- a/src/plugins/wireguard/wireguard_if.c
++++ b/src/plugins/wireguard/wireguard_if.c
+@@ -80,23 +80,35 @@
+   return (ti);
+ }
+ 
++typedef struct
++{
++  u32 local_idx;
++  const u8 *public_key;
++} wg_peer_public_key_lookup_t;
++
+ static walk_rc_t
+ wg_if_find_peer_by_public_key (index_t peeri, void *data)
+ {
+-  uint8_t *public = data;
++  const wg_peer_public_key_lookup_t *lookup = data;
+   wg_peer_t *peer = wg_peer_get (peeri);
+ 
+-  if (!memcmp (peer->remote.r_public, public, NOISE_PUBLIC_KEY_LEN))
++  if (peer->remote.r_local_idx == lookup->local_idx &&
++      !memcmp (peer->remote.r_public, lookup->public_key, NOISE_PUBLIC_KEY_LEN))
+     return (WALK_STOP);
+   return (WALK_CONTINUE);
+ }
+ 
+ static noise_remote_t *
+-wg_remote_get (const uint8_t public[NOISE_PUBLIC_KEY_LEN])
++wg_remote_get (noise_local_t *local,
++               const uint8_t public[NOISE_PUBLIC_KEY_LEN])
+ {
+   index_t peeri;
+ 
+-  peeri = wg_peer_walk (wg_if_find_peer_by_public_key, (void *) public);
++  wg_peer_public_key_lookup_t lookup = {
++    .local_idx = local - noise_local_pool,
++    .public_key = public,
++  };
++  peeri = wg_peer_walk (wg_if_find_peer_by_public_key, &lookup);
+ 
+   if (INDEX_INVALID != peeri)
+     return &wg_peer_get (peeri)->remote;

@@ -1,0 +1,11 @@
+[Unit]
+Description=Hold VROUTER DDR at 2112 MHz (dmc_ondemand stays at 528 MHz under VPP load)
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/sh -c 'f=/sys/class/devfreq/dmc/min_freq; for i in $$(seq 1 30); do [ -w $$f ] && break; sleep 1; done; echo 2112000000 > $$f; test "$$(cat $$f)" = 2112000000'
+ExecStop=/bin/sh -c 'echo 528000000 > /sys/class/devfreq/dmc/min_freq'
+
+[Install]
+WantedBy=multi-user.target

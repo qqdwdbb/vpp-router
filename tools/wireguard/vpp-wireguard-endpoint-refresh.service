@@ -1,0 +1,11 @@
+[Unit]
+Description=Refresh WireGuard hostname endpoints in VPP
+Wants=network-online.target
+After=network-online.target vpp.service vrouter-vpp.service
+PartOf=vpp.service vrouter-vpp.service
+ConditionPathExists=/etc/wireguard/wg1.conf
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/vpp-wg-syncconf wg1
+UMask=0077

@@ -1,0 +1,13 @@
+--- /usr/local/sbin/vpp-net-prepare.before-gro-fix
++++ /usr/local/sbin/vpp-net-prepare
+@@ -20,5 +20,10 @@
+ ip link set vpp-wan up
+ 
++# AF_PACKET with cksum-gso-disable needs ordinary receive frames, not GRO aggregates.
++for iface in eno1 enp4s0 vpp-wan vpp-lan vpp-lan-br; do
++  ethtool -K "$iface" gro off lro off
++done
++
+ for iface in vpp-lan vpp-lan-br vpp-wan; do
+   sysctl -q -w "net.ipv6.conf.${iface}.disable_ipv6=1"
+ done

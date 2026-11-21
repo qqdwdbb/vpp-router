@@ -1,0 +1,16 @@
+--- a/src/vnet/fib/fib_path.c
++++ b/src/vnet/fib/fib_path.c
+@@ -1484,7 +1484,12 @@ fib_path_copy (fib_node_index_t path_index,
+      * reset the dynamic section
+      */
+     fib_node_init(&path->fp_node, FIB_NODE_TYPE_PATH);
+-    path->fp_oper_flags     = FIB_PATH_OPER_FLAG_NONE;
++    /*
++     * Interface deletion permanently poisons this path. A path-list copy
++     * must not revive it, even if its sw_if_index has since been reused.
++     * All other operational state is recalculated during resolution.
++     */
++    path->fp_oper_flags &= FIB_PATH_OPER_FLAG_DROP;
+     path->fp_pl_index  = path_list_index;
+     path->fp_via_fib   = FIB_NODE_INDEX_INVALID;
+     clib_memset(&path->fp_dpo, 0, sizeof(path->fp_dpo));

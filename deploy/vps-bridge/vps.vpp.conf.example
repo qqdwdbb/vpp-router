@@ -1,0 +1,25 @@
+# VLAN 10 VPS L2 plus BVI L3. Cutover fragment only.
+# Do not exec against a live Linux vps@nic0.
+# nic0-dpdk is the DPDK parent; actual name is fixed in the combined startup.
+# BD 10 / TAP 2010 / loop10: keep away from LAN BD 200 / TAP 2000 / loop200.
+# .1 is the remote br0 gateway; Linux br0 keeps .2. VPP BVI uses .3 / ::3.
+create bridge-domain 10
+create loopback interface instance 10
+set interface ip address loop10 10.61.50.3/24
+set interface ip address loop10 fd42:1111:2222:20::3/64
+set interface state loop10 up
+set interface mtu packet 1342 loop10
+set interface l2 bridge loop10 10 bvi
+ip6 nd loop10 ra-suppress
+create sub-interface nic0-dpdk 10 dot1q 10 exact-match
+set interface state nic0-dpdk.10 up
+set interface l2 bridge nic0-dpdk.10 10
+set interface l2 tag-rewrite nic0-dpdk.10 pop 1
+create tap id 2010 host-if-name vrouter-vps host-mtu-size 1342 gso
+set interface state tap2010 up
+set interface mtu packet 1342 tap2010
+set interface rx-mode tap2010 interrupt
+set interface l2 bridge tap2010 10
+# Linux br0 keeps 10.61.50.2/24, table 102, Nebula, and gretap tap0.
+# Do not create GRE in VPP. nftset vpn/vpn6 next-hop via loop10 to .1 / ::1.
+# IPv4 SNAT is vpn-egress.vpp.conf.example (EI tenant VRF 102, pool .3 on loop10).

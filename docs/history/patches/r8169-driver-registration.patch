@@ -1,0 +1,12 @@
+--- a/src/plugins/dpdk/device/driver.c
++++ b/src/plugins/dpdk/device/driver.c
+@@ -24,6 +24,9 @@
+   }
+ 
+ static dpdk_driver_t dpdk_drivers[] = {
++  {
++    .drivers = DPDK_DRIVERS ({ "net_r8169", "Realtek RTL8125 Family" }),
++  },
+   {
+     .drivers = DPDK_DRIVERS (
+       { "net_ice", "Intel E810 Family" }, { "net_igc", "Intel I225 2.5G Family" },

@@ -1,0 +1,14 @@
+[Unit]
+Description=Linux policy routes and TPROXY rules for the VPP TAP
+Requires=vpp.service
+After=vpp.service
+PartOf=vpp.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/vpp-tproxy-setup
+RemainAfterExit=yes
+TimeoutStartSec=40
+
+[Install]
+WantedBy=vpp.service

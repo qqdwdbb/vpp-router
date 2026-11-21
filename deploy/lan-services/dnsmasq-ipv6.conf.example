@@ -1,0 +1,8 @@
+# Replace the old constructor:lan / enable-ra declarations; do not append duplicate ranges.
+# Linux br-mgmt must have ONLY the fixed LAN ULA (autoconf=0, accept_ra=0).
+listen-address=fd42:1111:2222:10::2
+enable-ra
+dhcp-range=::,constructor:br-mgmt,ra-stateless,ra-names,6h
+# Supply ULA PIO/RDNSS and O flag, but never advertise Linux as the default router.
+ra-param=br-mgmt,10,0
+dhcp-option=option6:dns-server,[fd42:1111:2222:10::2]

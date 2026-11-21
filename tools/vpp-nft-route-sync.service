@@ -1,0 +1,19 @@
+[Unit]
+Description=Synchronize dnsmasq nftables address sets into VPP routes
+Wants=vpp.service vpp-dns-nftsets.service
+After=vpp.service vpp-dns-nftsets.service
+PartOf=vpp.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/vpp-nft-route-sync --config /etc/vpp/nftset-route-sync.json
+Restart=on-failure
+RestartSec=3
+UMask=0077
+StateDirectory=vpp-nft-route-sync
+StateDirectoryMode=0700
+RuntimeDirectory=vpp-nft-route-sync
+RuntimeDirectoryMode=0700
+
+[Install]
+WantedBy=multi-user.target vpp.service

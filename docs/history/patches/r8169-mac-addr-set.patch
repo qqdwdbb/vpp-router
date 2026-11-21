@@ -1,0 +1,41 @@
+--- a/drivers/net/r8169/r8169_ethdev.c
++++ b/drivers/net/r8169/r8169_ethdev.c
+@@ -46,6 +46,7 @@ static int rtl_allmulticast_enable(struct rte_eth_dev *dev);
+ static int rtl_allmulticast_disable(struct rte_eth_dev *dev);
+ static int rtl_dev_mtu_set(struct rte_eth_dev *dev, uint16_t mtu);
++static int rtl_mac_addr_set(struct rte_eth_dev *dev, struct rte_ether_addr *mac_addr);
+ static int rtl_fw_version_get(struct rte_eth_dev *dev, char *fw_version,
+ 			      size_t fw_size);
+ static int rtl_reta_update(struct rte_eth_dev *dev,
+@@ -109,6 +110,7 @@ static const struct eth_dev_ops rtl_eth_dev_ops = {
+ 	.stats_reset          = rtl_dev_stats_reset,
+ 
+ 	.mtu_set              = rtl_dev_mtu_set,
++	.mac_addr_set         = rtl_mac_addr_set,
+ 
+ 	.fw_version_get       = rtl_fw_version_get,
+ 
+@@ -726,6 +727,24 @@ rtl_dev_mtu_set(struct rte_eth_dev *dev, uint16_t mtu)
+ 	return 0;
+ }
+ 
++static int
++rtl_mac_addr_set(struct rte_eth_dev *dev, struct rte_ether_addr *mac_addr)
++{
++	struct rtl_adapter *adapter = RTL_DEV_PRIVATE(dev);
++	struct rtl_hw *hw = &adapter->hw;
++
++	if (mac_addr == NULL)
++		return -EINVAL;
++	if (!rte_is_valid_assigned_ether_addr(mac_addr))
++		return -EINVAL;
++
++	rte_ether_addr_copy(mac_addr, &dev->data->mac_addrs[0]);
++	rte_ether_addr_copy(mac_addr, (struct rte_ether_addr *)hw->mac_addr);
++	rtl_rar_set(hw, mac_addr->addr_bytes);
++	return 0;
++}
++
+ static int
+ rtl_fw_version_get(struct rte_eth_dev *dev, char *fw_version, size_t fw_size)
+ {

@@ -1,0 +1,12 @@
+[Unit]
+Description=VPP WAN firewall: port forwards, router ports, ping and IPv6 inbound
+# VPP keeps none of the rules across a restart. This puts them back, and watches for that
+# on its own, so it needs no ordering on VPP.
+
+[Service]
+ExecStart=/usr/local/bin/vpp-firewall --vpp-unit vpp-router.service
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,633 @@
+--- a/src/plugins/nat/nat44-ei/nat44_ei.c
++++ b/src/plugins/nat/nat44-ei/nat44_ei.c
+@@ -97,8 +97,8 @@
+ VNET_FEATURE_INIT (ip4_nat44_ei_in2out_output, static) = {
+   .arc_name = "ip4-output",
+   .node_name = "nat44-ei-in2out-output",
+-  .runs_after = VNET_FEATURES ("acl-plugin-out-ip4-fa",
+-			       "ip4-sv-reassembly-output-feature"),
++  .runs_after = VNET_FEATURES ("ip4-sv-reassembly-output-feature"),
++  .runs_before = VNET_FEATURES ("acl-plugin-out-ip4-fa"),
+ };
+ VNET_FEATURE_INIT (ip4_nat44_ei_hairpinning, static) = {
+   .arc_name = "ip4-local",
+@@ -108,19 +108,21 @@
+ VNET_FEATURE_INIT (ip4_nat44_ei_in2out_worker_handoff, static) = {
+   .arc_name = "ip4-unicast",
+   .node_name = "nat44-ei-in2out-worker-handoff",
+-  .runs_after = VNET_FEATURES ("acl-plugin-in-ip4-fa"),
++  .runs_after = VNET_FEATURES ("acl-plugin-in-ip4-fa",
++			       "ip4-sv-reassembly-feature"),
+ };
+ VNET_FEATURE_INIT (ip4_nat44_ei_out2in_worker_handoff, static) = {
+   .arc_name = "ip4-unicast",
+   .node_name = "nat44-ei-out2in-worker-handoff",
+   .runs_after = VNET_FEATURES ("acl-plugin-in-ip4-fa",
++			       "ip4-sv-reassembly-feature",
+ 			       "ip4-dhcp-client-detect"),
+ };
+ VNET_FEATURE_INIT (ip4_nat44_ei_in2out_output_worker_handoff, static) = {
+   .arc_name = "ip4-output",
+   .node_name = "nat44-ei-in2out-output-worker-handoff",
+-  .runs_after = VNET_FEATURES ("acl-plugin-out-ip4-fa",
+-			       "ip4-sv-reassembly-output-feature"),
++  .runs_after = VNET_FEATURES ("ip4-sv-reassembly-output-feature"),
++  .runs_before = VNET_FEATURES ("acl-plugin-out-ip4-fa"),
+ };
+ 
+ VLIB_PLUGIN_REGISTER () = {
+@@ -249,12 +251,37 @@
+   nat44_ei_main_t *nm = &nat44_ei_main;
+   int i, j = 0;
+ 
+-  if (nm->num_workers < 2)
++  if (nm->num_workers < 1)
+     return VNET_API_ERROR_FEATURE_DISABLED;
+ 
+-  if (clib_bitmap_last_set (bitmap) >= nm->num_workers)
++  if (clib_bitmap_is_zero (bitmap) ||
++      clib_bitmap_last_set (bitmap) >= nm->num_workers)
+     return VNET_API_ERROR_INVALID_WORKER;
+ 
++  /* Reapplying the same set must not disturb live sessions or port ranges. */
++  u32 selected = 0;
++  int same = 1;
++  clib_bitmap_foreach (i, bitmap)
++    {
++      if (selected >= vec_len (nm->workers) || nm->workers[selected] != i)
++        same = 0;
++      selected++;
++    }
++  if (same && selected == vec_len (nm->workers))
++    return 0;
++
++  /* Even an empty session pool can have packets queued for old workers. */
++  if (nm->enabled)
++    return VNET_API_ERROR_INSTANCE_IN_USE;
++
++  /* CLI/API hold the worker barrier. It cannot migrate existing owners. */
++  nat44_ei_main_per_thread_data_t *tnm;
++  vec_foreach (tnm, nm->per_thread_data)
++    if (pool_elts (tnm->sessions))
++      return VNET_API_ERROR_INSTANCE_IN_USE;
++  if (pool_elts (nm->static_mappings))
++    return VNET_API_ERROR_INSTANCE_IN_USE;
++
+   vec_free (nm->workers);
+   clib_bitmap_foreach (i, bitmap)
+     {
+@@ -435,7 +462,7 @@
+   vec_validate (nm->per_thread_data, num_threads);
+ 
+   /* Use all available workers by default */
+-  if (nm->num_workers > 1)
++  if (nm->num_workers > 0)
+     {
+       for (i = 0; i < nm->num_workers; i++)
+ 	bitmap = clib_bitmap_set (bitmap, i, 1);
+@@ -534,7 +561,7 @@
+   vlib_zero_simple_counter (&nm->total_sessions, 0);
+   vlib_zero_simple_counter (&nm->user_limit_reached, 0);
+ 
+-  if (nm->num_workers > 1)
++  if (nm->num_workers > 0)
+     {
+       if (nm->fq_in2out_index == ~0)
+ 	{
+@@ -651,7 +678,7 @@
+ 	{
+ 	  return 0;
+ 	}
+-      if (nm->num_workers > 1)
++      if (nm->num_workers > 0)
+ 	{
+ 	  del_feature_name = !is_inside ? "nat44-ei-in2out-worker-handoff" :
+ 					  "nat44-ei-out2in-worker-handoff";
+@@ -693,7 +720,7 @@
+     }
+   else
+     {
+-      if (nm->num_workers > 1)
++      if (nm->num_workers > 0)
+ 	{
+ 	  feature_name = is_inside ? "nat44-ei-in2out-worker-handoff" :
+ 				     "nat44-ei-out2in-worker-handoff";
+@@ -787,7 +814,7 @@
+ 
+   if (nat44_ei_interface_is_inside (i) && nat44_ei_interface_is_outside (i))
+     {
+-      if (nm->num_workers > 1)
++      if (nm->num_workers > 0)
+ 	{
+ 	  del_feature_name = "nat44-ei-handoff-classify";
+ 	  feature_name = !is_inside ? "nat44-ei-in2out-worker-handoff" :
+@@ -832,7 +859,7 @@
+     }
+   else
+     {
+-      if (nm->num_workers > 1)
++      if (nm->num_workers > 0)
+ 	{
+ 	  feature_name = is_inside ? "nat44-ei-in2out-worker-handoff" :
+ 				     "nat44-ei-out2in-worker-handoff";
+@@ -911,7 +938,7 @@
+       return VNET_API_ERROR_VALUE_EXIST;
+     }
+ 
+-  if (nm->num_workers > 1)
++  if (nm->num_workers > 0)
+     {
+       rv = ip4_sv_reass_enable_disable_with_refcnt (sw_if_index, 1);
+       if (rv)
+@@ -1010,7 +1037,7 @@
+       return VNET_API_ERROR_NO_SUCH_ENTRY;
+     }
+ 
+-  if (nm->num_workers > 1)
++  if (nm->num_workers > 0)
+     {
+       rv = ip4_sv_reass_enable_disable_with_refcnt (sw_if_index, 0);
+       if (rv)
+@@ -1588,66 +1615,44 @@
+ static_always_inline void
+ nat44_ei_user_del_sessions (nat44_ei_user_t *u, u32 thread_index)
+ {
+-  dlist_elt_t *elt;
+-  nat44_ei_session_t *s;
+-
+   nat44_ei_main_t *nm = &nat44_ei_main;
+   nat44_ei_main_per_thread_data_t *tnm = &nm->per_thread_data[thread_index];
+-
+-  // get head
+-  elt =
+-    pool_elt_at_index (tnm->list_pool, u->sessions_per_user_list_head_index);
+-  // get first element
+-  elt = pool_elt_at_index (tnm->list_pool, elt->next);
+-
+-  while (elt->value != ~0)
++  u32 *indices = 0, *index;
++  u32 head = u->sessions_per_user_list_head_index;
++  u32 next = tnm->list_pool[head].next;
++  while (next != head)
+     {
+-      s = pool_elt_at_index (tnm->sessions, elt->value);
+-      elt = pool_elt_at_index (tnm->list_pool, elt->next);
+-
+-      nat44_ei_free_session_data (nm, s, thread_index, 0);
++      vec_add1 (indices, tnm->list_pool[next].value);
++      next = tnm->list_pool[next].next;
++    }
++  vec_foreach (index, indices)
++    {
++      nat44_ei_session_t *s = pool_elt_at_index (tnm->sessions, *index);
++      nat44_ei_free_session_data_v2 (nm, s, thread_index, 0);
+       nat44_ei_delete_session (nm, s, thread_index);
+     }
++  vec_free (indices);
+ }
+ 
+ int
+ nat44_ei_user_del (ip4_address_t *addr, u32 fib_index)
+ {
+-  int rv = 1;
+-
+   nat44_ei_main_t *nm = &nat44_ei_main;
+   nat44_ei_main_per_thread_data_t *tnm;
+-
+-  nat44_ei_user_key_t user_key;
+-  clib_bihash_kv_8_8_t kv, value;
+-
+-  user_key.addr.as_u32 = addr->as_u32;
+-  user_key.fib_index = fib_index;
+-  kv.key = user_key.as_u64;
+-
+-  if (nm->num_workers > 1)
+-    {
+-      vec_foreach (tnm, nm->per_thread_data)
+-	{
+-	  if (!clib_bihash_search_8_8 (&tnm->user_hash, &kv, &value))
+-	    {
+-	      nat44_ei_user_del_sessions (
+-		pool_elt_at_index (tnm->users, value.value),
+-		tnm->thread_index);
+-	      rv = 0;
+-	      break;
+-	    }
+-	}
+-    }
+-  else
++  nat44_ei_user_key_t key = { .addr = *addr, .fib_index = fib_index };
++  clib_bihash_kv_8_8_t kv = { .key = key.as_u64 }, value;
++  int rv = 1;
++  if (!nm->enabled)
++    return rv;
++  vec_foreach (tnm, nm->per_thread_data)
+     {
+-      tnm = vec_elt_at_index (nm->per_thread_data, nm->num_workers);
+       if (!clib_bihash_search_8_8 (&tnm->user_hash, &kv, &value))
+-	{
+-	  nat44_ei_user_del_sessions (
+-	    pool_elt_at_index (tnm->users, value.value), tnm->thread_index);
+-	  rv = 0;
+-	}
++        {
++          nat44_ei_user_del_sessions (
++            pool_elt_at_index (tnm->users, value.value),
++            tnm - nm->per_thread_data);
++          rv = 0;
++        }
+     }
+   return rv;
+ }
+@@ -1729,7 +1734,7 @@
+ {
+   nat44_ei_main_t *nm = &nat44_ei_main;
+   u32 thread_idx = nm->num_workers;
+-  if (nm->num_workers > 1)
++  if (nm->num_workers > 0)
+     {
+       thread_idx = nm->first_worker_index +
+ 		   nm->workers[(e_port - 1024) / nm->port_per_thread %
+@@ -1750,6 +1755,13 @@
+   u32 proto;
+   u32 next_worker_index = 0;
+ 
++  proto = ip_proto_to_nat_proto (ip0->protocol);
++  udp = ip4_next_header (ip0);
++  port = vnet_buffer (b)->ip.reass.l4_dst_port;
++
++  /* unknown protocol */
++  if (PREDICT_FALSE (proto == NAT_PROTOCOL_OTHER))
++    {
+   /* first try static mappings without port */
+   if (PREDICT_FALSE (pool_elts (nm->static_mappings)))
+     {
+@@ -1762,13 +1774,6 @@
+ 	}
+     }
+ 
+-  proto = ip_proto_to_nat_proto (ip0->protocol);
+-  udp = ip4_next_header (ip0);
+-  port = vnet_buffer (b)->ip.reass.l4_dst_port;
+-
+-  /* unknown protocol */
+-  if (PREDICT_FALSE (proto == NAT_PROTOCOL_OTHER))
+-    {
+       /* use current thread */
+       return vlib_get_thread_index ();
+     }
+@@ -1803,6 +1808,11 @@
+ 	}
+     }
+ 
++  /* Existing translations retain their worker before host fallback. */
++  init_nat_k (&kv, ip0->dst_address, port, rx_fib_index0, proto);
++  if (!clib_bihash_search_8_8 (&nm->out2in, &kv, &value))
++    return nat_value_get_thread_index (&value);
++
+   /* try static mappings with port */
+   if (PREDICT_FALSE (pool_elts (nm->static_mappings)))
+     {
+@@ -1815,6 +1825,18 @@
+ 	}
+     }
+ 
++  /* Address-only host fallback follows sessions and exact native ports */
++  if (PREDICT_FALSE (pool_elts (nm->static_mappings)))
++    {
++      init_nat_k (&kv, ip0->dst_address, 0, rx_fib_index0, 0);
++      if (!clib_bihash_search_8_8 (&nm->static_mapping_by_external, &kv,
++				   &value))
++	{
++	  m = pool_elt_at_index (nm->static_mappings, value.value);
++	  return m->workers[0];
++	}
++    }
++
+   /* worker by outside port */
+   next_worker_index =
+     nat44_ei_get_thread_idx_by_port (clib_net_to_host_u16 (port));
+@@ -2136,6 +2158,8 @@
+ int
+ nat44_ei_reserve_port (ip4_address_t addr, u16 port, nat_protocol_t proto)
+ {
++  /* Static mapping keys use network order; the allocator bitmap uses host order. */
++  port = clib_net_to_host_u16 (port);
+   u32 ti = nat44_ei_get_thread_idx_by_port (port);
+   nat44_ei_main_t *nm = &nat44_ei_main;
+   nat44_ei_address_t *a = 0;
+@@ -2166,6 +2190,7 @@
+ int
+ nat44_ei_free_port (ip4_address_t addr, u16 port, nat_protocol_t proto)
+ {
++  port = clib_net_to_host_u16 (port);
+   u32 ti = nat44_ei_get_thread_idx_by_port (port);
+   nat44_ei_main_t *nm = &nat44_ei_main;
+   nat44_ei_address_t *a = 0;
+@@ -2535,7 +2560,7 @@
+ 	       m - nm->static_mappings);
+   clib_bihash_add_del_8_8 (&nm->static_mapping_by_external, &kv, 1);
+ 
+-  if (nm->num_workers > 1)
++  if (nm->num_workers > 0)
+     {
+       // store worker index for this record
+       ip4_header_t ip = {
+@@ -2642,7 +2667,7 @@
+   if (!nm->static_mapping_only || nm->static_mapping_connection_tracking)
+     {
+       // delete sessions for static mapping
+-      if (nm->num_workers > 1)
++      if (nm->num_workers > 0)
+ 	tnm = vec_elt_at_index (nm->per_thread_data, m->workers[0]);
+       else
+ 	tnm = vec_elt_at_index (nm->per_thread_data, nm->num_workers);
+@@ -3493,3 +3518,151 @@
+     [NAT44_EI_CLASSIFY_NEXT_DROP] = "error-drop",
+   },
+ };
++
++static clib_error_t *
++nat44_ei_host_fallback_capability (vlib_main_t *vm, unformat_input_t *input,
++                                 vlib_cli_command_t *cmd)
++{
++  vlib_cli_output (vm, "host-fallback-v1 pool-receive-v1");
++  return 0;
++}
++VLIB_CLI_COMMAND (nat44_ei_host_fallback_capability_command, static) = {
++  .path = "show nat44 ei host-fallback",
++  .short_help = "show nat44 ei host-fallback",
++  .function = nat44_ei_host_fallback_capability,
++};
++
++/* EI shares its pool receive route across outside ports in the same FIB.
++ * Pin the selected pool to its physical egress after configuring all egresses.
++ * This changes ARP/receive ownership, not the NAT allocator or sessions. */
++static clib_error_t *
++nat44_ei_pool_receive_command (vlib_main_t *vm, unformat_input_t *input,
++                             vlib_cli_command_t *cmd)
++{
++  nat44_ei_main_t *nm = &nat44_ei_main;
++  ip4_address_t address;
++  nat44_ei_address_t *pool_address;
++  nat44_ei_interface_t *interface;
++  u32 sw_if_index;
++  int found_address = 0, found_interface = 0;
++  if (!nm->enabled)
++    return clib_error_return (0, "NAT44 EI is disabled");
++  if (!unformat (input, "%U %U", unformat_ip4_address, &address,
++                 unformat_vnet_sw_interface, vnet_get_main (), &sw_if_index) ||
++      unformat_check_input (input) != UNFORMAT_END_OF_INPUT)
++    return clib_error_return (0, "Expected pool IPv4 address and outside interface");
++  vec_foreach (pool_address, nm->addresses)
++    if (pool_address->addr.as_u32 == address.as_u32)
++      found_address = 1;
++  pool_foreach (interface, nm->output_feature_interfaces)
++    if (interface->sw_if_index == sw_if_index &&
++        nat44_ei_interface_is_outside (interface))
++      found_interface = 1;
++  pool_foreach (interface, nm->interfaces)
++    if (interface->sw_if_index == sw_if_index &&
++        nat44_ei_interface_is_outside (interface))
++      found_interface = 1;
++  if (!found_address || !found_interface)
++    return clib_error_return (0, "Expected configured pool address and NAT outside interface");
++  nat44_ei_add_del_addr_to_fib (&address, 32, sw_if_index, 1);
++  return 0;
++}
++VLIB_CLI_COMMAND (nat44_ei_pool_receive_command_registration, static) = {
++  .path = "nat44 ei pool receive",
++  .short_help = "nat44 ei pool receive <pool-ip4> <outside-interface>",
++  .function = nat44_ei_pool_receive_command,
++};
++
++/* SPDX-License-Identifier: Apache-2.0
++ * Included by nat44_ei.c. Run expiry on the session's owning worker.
++ */
++
++typedef struct
++{
++  u32 cursor;
++} nat44_ei_cleaner_runtime_t;
++
++static char *nat44_ei_cleaner_errors[] = {
++  "session slots scanned",
++  "expired sessions reclaimed",
++};
++
++static uword
++nat44_ei_cleaner_worker (vlib_main_t *vm, vlib_node_runtime_t *rt,
++                       vlib_frame_t *frame)
++{
++  nat44_ei_main_t *nm = &nat44_ei_main;
++  u32 ti = vm->thread_index;
++  nat44_ei_cleaner_runtime_t *cr = (void *) rt->runtime_data;
++  u32 scanned = 0, expired = 0;
++
++  if (!nm->enabled || ti >= vec_len (nm->per_thread_data))
++    return 0;
++
++  nat44_ei_main_per_thread_data_t *tnm = &nm->per_thread_data[ti];
++  u32 length = vec_len (tnm->sessions);
++  u32 budget = clib_min (length, 4096);
++  f64 now = vlib_time_now (vm);
++
++  while (scanned < budget)
++    {
++      if (cr->cursor >= length)
++        cr->cursor = 0;
++      u32 index = cr->cursor++;
++      scanned++;
++      if (pool_is_free_index (tnm->sessions, index))
++        continue;
++
++      nat44_ei_session_t *s = pool_elt_at_index (tnm->sessions, index);
++      f64 timeout = nat_session_get_timeout (&nm->timeouts, s->nat_proto,
++                                            s->state);
++      if (now < s->last_heard + timeout)
++        continue;
++
++      /* Also releases both lookup keys, ports, user lists and HA state.
++       * Static mapping configuration is separate from its session state.
++       */
++      nat44_ei_free_session_data_v2 (nm, s, ti, 0);
++      nat44_ei_delete_session (nm, s, ti);
++      expired++;
++    }
++
++  vlib_node_increment_counter (vm, rt->node_index, 0, scanned);
++  vlib_node_increment_counter (vm, rt->node_index, 1, expired);
++  return 0;
++}
++
++VLIB_REGISTER_NODE (nat44_ei_cleaner_worker_node) = {
++  .function = nat44_ei_cleaner_worker,
++  .name = "nat44-ei-expire-worker",
++  .type = VLIB_NODE_TYPE_INPUT,
++  .state = VLIB_NODE_STATE_INTERRUPT,
++  .runtime_data_bytes = sizeof (nat44_ei_cleaner_runtime_t),
++  .n_errors = ARRAY_LEN (nat44_ei_cleaner_errors),
++  .error_strings = nat44_ei_cleaner_errors,
++};
++
++static uword
++nat44_ei_cleaner_process (vlib_main_t *vm, vlib_node_runtime_t *rt,
++                        vlib_frame_t *frame)
++{
++  uword *event_data = 0;
++  while (1)
++    {
++      vlib_process_wait_for_event_or_clock (vm, 1.0);
++      vlib_process_get_events (vm, &event_data);
++      vec_reset_length (event_data);
++      if (!nat44_ei_main.enabled)
++        continue;
++      for (u32 ti = 0; ti < vlib_get_n_threads (); ti++)
++        vlib_node_set_interrupt_pending (vlib_get_main_by_index (ti),
++                                        nat44_ei_cleaner_worker_node.index);
++    }
++  return 0;
++}
++
++VLIB_REGISTER_NODE (nat44_ei_cleaner_process_node) = {
++  .function = nat44_ei_cleaner_process,
++  .name = "nat44-ei-expire-process",
++  .type = VLIB_NODE_TYPE_PROCESS,
++};
+--- a/src/plugins/nat/nat44-ei/nat44_ei_in2out.c
++++ b/src/plugins/nat/nat44-ei/nat44_ei_in2out.c
+@@ -419,6 +419,10 @@
+ 				   thread_index);
+   if (!u)
+     {
++      /* No session owns a dynamic allocation until user/session creation succeeds. */
++      if (!is_sm)
++        nat44_ei_free_outside_address_and_port (
++          nm->addresses, thread_index, &sm_addr, sm_port, nat_proto);
+       b0->error = node->errors[NAT44_EI_IN2OUT_ERROR_CANNOT_CREATE_USER];
+       return NAT44_EI_IN2OUT_NEXT_DROP;
+     }
+@@ -426,6 +430,9 @@
+   s = nat44_ei_session_alloc_or_recycle (nm, u, thread_index, now);
+   if (!s)
+     {
++      if (!is_sm)
++        nat44_ei_free_outside_address_and_port (
++          nm->addresses, thread_index, &sm_addr, sm_port, nat_proto);
+       nat44_ei_delete_user_with_no_session (nm, u, thread_index);
+       nat_elog_warn (nm, "create NAT session failed");
+       return NAT44_EI_IN2OUT_NEXT_DROP;
+--- a/src/plugins/nat/nat44-ei/nat44_ei_cli.c
++++ b/src/plugins/nat/nat44-ei/nat44_ei_cli.c
+@@ -284,12 +284,15 @@
+ 
+   switch (rv)
+     {
++    case VNET_API_ERROR_INSTANCE_IN_USE:
++      error = clib_error_return (0, "Worker set is in use: disable NAT before changing workers.");
++      goto done;
+     case VNET_API_ERROR_INVALID_WORKER:
+       error = clib_error_return (0, "Invalid worker(s).");
+       goto done;
+     case VNET_API_ERROR_FEATURE_DISABLED:
+       error =
+-	clib_error_return (0, "Supported only if 2 or more workes available.");
++	clib_error_return (0, "Supported only if at least one worker is available.");
+       goto done;
+     default:
+       break;
+@@ -308,7 +311,7 @@
+   nat44_ei_main_t *nm = &nat44_ei_main;
+   u32 *worker;
+ 
+-  if (nm->num_workers > 1)
++  if (nm->num_workers > 0)
+     {
+       vlib_cli_output (vm, "%d workers", vec_len (nm->workers));
+       vec_foreach (worker, nm->workers)
+@@ -1401,7 +1404,7 @@
+ 
+   rv = nat44_ei_user_del (&addr, fib_index);
+ 
+-  if (!rv)
++  if (rv)
+     {
+       error = clib_error_return (0, "nat44_ei_user_del returned %d", rv);
+     }
+--- a/src/plugins/nat/nat44-ei/nat44_ei_api.c
++++ b/src/plugins/nat/nat44-ei/nat44_ei_api.c
+@@ -68,7 +68,7 @@
+ 
+   mask = clib_net_to_host_u64 (mp->worker_mask);
+ 
+-  if (nm->num_workers < 2)
++  if (nm->num_workers < 1)
+     {
+       rv = VNET_API_ERROR_FEATURE_DISABLED;
+       goto send_reply;
+--- a/src/plugins/nat/nat44-ei/nat44_ei_ha.c
++++ b/src/plugins/nat/nat44-ei/nat44_ei_ha.c
+@@ -255,7 +255,8 @@
+   if (clib_bihash_search_8_8 (&nm->out2in, &kv, &value))
+     return;
+ 
+-  ASSERT (thread_index == nat_value_get_thread_index (&value));
++  if (thread_index != nat_value_get_thread_index (&value))
++    return;
+   tnm = vec_elt_at_index (nm->per_thread_data, thread_index);
+   s = pool_elt_at_index (tnm->sessions, nat_value_get_session_index (&value));
+   nat44_ei_free_session_data_v2 (nm, s, thread_index, 1);
+@@ -278,6 +279,8 @@
+   if (clib_bihash_search_8_8 (&nm->out2in, &kv, &value))
+     return;
+ 
++  if (thread_index != nat_value_get_thread_index (&value))
++    return;
+   s = pool_elt_at_index (tnm->sessions, nat_value_get_session_index (&value));
+   s->total_pkts = total_pkts;
+   s->total_bytes = total_bytes;
+@@ -499,7 +502,7 @@
+   if (port)
+     {
+       /* if multiple worker threads first go to handoff node */
+-      if (ha->num_workers > 1)
++      if (ha->num_workers > 0)
+ 	{
+ 	  if (ha->fq_index == ~0)
+ 	    ha->fq_index = vlib_frame_queue_main_init (ha->ha_node_index, 0);
+@@ -1000,7 +1003,8 @@
+ 
+ #define foreach_nat_ha_error   \
+ _(PROCESSED, "pkts-processed") \
+-_(BAD_VERSION, "bad-version")
++_(BAD_VERSION, "bad-version") \
++_(BAD_THREAD, "bad-thread-index")
+ 
+ typedef enum
+ {
+@@ -1066,7 +1070,13 @@
+ 
+ 	  next0 = NAT_HA_NEXT_DROP;
+ 
+-	  if (h0->version != NAT_HA_VERSION)
++	  if (clib_net_to_host_u32 (h0->thread_index) != thread_index)
++        {
++          b0->error = node->errors[NAT_HA_ERROR_BAD_THREAD];
++          goto done0;
++        }
++
++      if (h0->version != NAT_HA_VERSION)
+ 	    {
+ 	      b0->error = node->errors[NAT_HA_ERROR_BAD_VERSION];
+ 	      goto done0;
+@@ -1229,7 +1239,9 @@
+       nat_ha_message_header_t *h0;
+ 
+       h0 = vlib_buffer_get_current (b[0]);
+-      ti[0] = clib_net_to_host_u32 (h0->thread_index);
++      u32 target = clib_net_to_host_u32 (h0->thread_index);
++      /* Invalid targets go to the current thread for checked rejection. */
++      ti[0] = target < vlib_get_n_threads () ? target : thread_index;
+ 
+       if (ti[0] != thread_index)
+ 	do_handoff++;

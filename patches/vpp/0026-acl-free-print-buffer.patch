@@ -1,0 +1,12 @@
+--- a/src/plugins/acl/acl.c
++++ b/src/plugins/acl/acl.c
+@@ -180,6 +180,9 @@
+       out0 = format (out0, "\n");
+       vpr (vm, out0);
+     }
++  /* vpr only resets the length; free the buffer, or every
++   * "show acl-plugin acl" leaks one vector per ACL from the main heap. */
++  vec_free (out0);
+ }
+ 
+ static void

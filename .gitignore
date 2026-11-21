@@ -1,0 +1,57 @@
+.DS_Store
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Build and test output
+*.o
+*.so
+*.so.*
+*.ko
+/out/
+/artifacts/
+
+# Deployment scratch: scripts, source bundles, backups and reports pulled from routers
+/work/
+
+# Device profiles hold real addresses; keep them outside the repository
+*.profile.json
+!deploy/profiles/example.profile.json
+
+# Editors, agents and local state
+.*
+!.gitignore
+!.github/
+*~
+*.swp
+*.tmp
+*.bak
+*.orig
+*.rej
+
+# Runtime and capture output
+*.log
+*.pcap
+*.pcapng
+core
+core.*
+*.core
+*.zst
+*.tar
+*.tar.gz
+*.tgz
+
+# Secrets and key material
+*.pem
+*.key
+*.crt
+*.p12
+ipsec.secrets
+tools/vpp-egress-gate/dist/
+tools/gate-admin/dist/
+tools/vpp-wireguard/dist/
+tools/vpp-monitor/dist/
+tools/vpp-interfaces/dist/
+tools/vpp-proxy/dist/
+tools/vpp-firewall/dist/
+tools/vpp-system/dist/

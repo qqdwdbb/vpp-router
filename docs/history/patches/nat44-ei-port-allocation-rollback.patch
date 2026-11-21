@@ -1,0 +1,23 @@
+--- a/src/plugins/nat/nat44-ei/nat44_ei_in2out.c
++++ b/src/plugins/nat/nat44-ei/nat44_ei_in2out.c
+@@ -419,6 +419,10 @@
+ 				   thread_index);
+   if (!u)
+     {
++      /* No session owns a dynamic allocation until user/session creation succeeds. */
++      if (!is_sm)
++        nat44_ei_free_outside_address_and_port (
++          nm->addresses, thread_index, &sm_addr, sm_port, nat_proto);
+       b0->error = node->errors[NAT44_EI_IN2OUT_ERROR_CANNOT_CREATE_USER];
+       return NAT44_EI_IN2OUT_NEXT_DROP;
+     }
+@@ -426,6 +430,9 @@
+   s = nat44_ei_session_alloc_or_recycle (nm, u, thread_index, now);
+   if (!s)
+     {
++      if (!is_sm)
++        nat44_ei_free_outside_address_and_port (
++          nm->addresses, thread_index, &sm_addr, sm_port, nat_proto);
+       nat44_ei_delete_user_with_no_session (nm, u, thread_index);
+       nat_elog_warn (nm, "create NAT session failed");
+       return NAT44_EI_IN2OUT_NEXT_DROP;

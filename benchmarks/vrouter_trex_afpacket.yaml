@@ -1,0 +1,15 @@
+# Temporary benchmark only: run inside vrouter-nic1-perf-wan after fixture setup.
+- version: 2
+  port_limit: 2
+  interfaces: ["--vdev=net_af_packet0,iface=eno1,qpairs=1,qdisc_bypass=1,framesz=128,framecnt=8192,blocksz=65536", "dummy"]
+  port_info:
+    - src_mac: 02:00:00:00:10:06
+      dest_mac: 02:00:00:00:10:05
+    - src_mac: 00:00:00:00:00:01
+      dest_mac: 00:00:00:00:00:02
+  platform:
+    master_thread_id: 0
+    latency_thread_id: 1
+    dual_if:
+      - socket: 0
+        threads: [2]

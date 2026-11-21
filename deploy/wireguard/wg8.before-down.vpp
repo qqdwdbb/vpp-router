@@ -1,0 +1,2 @@
+abf attach ip6 del policy 621 wg8
+abf attach ip4 del policy 620 wg8
