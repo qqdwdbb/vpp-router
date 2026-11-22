@@ -21,6 +21,7 @@
       <a id="nav-proxy" href="/proxy">代理</a>
       <a id="nav-firewall" href="/firewall">防火墙</a>
       <a id="nav-system" href="/system">系统</a>
+      <a id="nav-maint" href="/maint">维护</a>
     </nav>
     <button id="logout" class="close logout">退出</button>
   </header>
@@ -195,9 +196,19 @@
           <button id="lan-meter-toggle" class="close strong">开启</button>
         </div>
         <p class="note" id="lan-meter-help"></p>
-        <div class="scroll"><table id="lan-devices"><thead><tr><th class="text">设备</th><th class="text">状态</th><th class="text">地址</th><th id="lan-col-a">速率</th><th id="lan-col-b">连接</th><th class="text">最后出现</th><th>操作</th></tr></thead><tbody></tbody></table></div>
+        <div class="form-row" id="lan-device-filters">
+          <label>搜索 <input id="lan-device-search" type="search" placeholder="名称、IP 或 MAC" autocomplete="off" spellcheck="false"></label>
+          <label>排序 <select id="lan-device-sort">
+            <option value="name">设备名称</option>
+            <option value="up" hidden disabled>上传速率</option>
+            <option value="down" hidden disabled>下载速率</option>
+            <option value="bps">速率（NAT）</option>
+          </select></label>
+        </div>
+        <div class="scroll"><table id="lan-devices"><thead><tr><th class="text">设备</th><th class="text">状态</th><th class="text">地址</th><th id="lan-col-a">速率</th><th id="lan-col-b">连接</th><th>累计流量</th><th class="text">最后出现</th><th>操作</th></tr></thead><tbody></tbody></table></div>
         <p class="note" id="lan-devices-empty" hidden>还没有设备。</p>
         <p class="note" id="lan-nat-note"></p>
+        <p class="note" id="lan-totals-note"></p>
       </section>
       <section class="card route-card">
         <h2>静态分配</h2>
@@ -352,6 +363,73 @@
           <label>每个用户的会话数 <input id="nat-user-sessions" type="number" min="1"></label>
           <button id="nat-size-apply" class="close strong">应用并重启 VPP</button>
         </div>
+      </section>
+    </div>
+  </div>
+
+  <div id="page-maint" hidden>
+    <p class="note" id="maint-unavailable" hidden></p>
+    <div id="maint-content" hidden>
+      <p class="note" id="maint-message" role="status"></p>
+      <section class="card route-card">
+        <div class="dialog-head">
+          <h2>服务</h2>
+          <span class="head-actions">
+            <button id="maint-restart-vpp" class="close">重启 VPP</button>
+            <button id="maint-reboot" class="close">重启主机</button>
+          </span>
+        </div>
+        <p class="note section-help" id="maint-units-help">路由器的服务：VPP、依赖它的服务，以及单元文件里提到 VPP 的服务。VPP、面板和 vpp-system 只能重启，不能停止：停止后面板无法再启动它们。重启 VPP 时所有流量中断（通常十几秒），面板会暂时断开。</p>
+        <p class="note error" id="maint-pending" hidden></p>
+        <div class="scroll"><table id="maint-units"><thead><tr><th class="text">服务</th><th class="text">状态</th><th class="text">开机启动</th><th class="text">持续</th><th>内存</th><th>自动重启</th><th>操作</th></tr></thead><tbody></tbody></table></div>
+        <details id="maint-other" hidden>
+          <summary id="maint-other-summary"></summary>
+          <div class="scroll"><table id="maint-other-units"><thead><tr><th class="text">服务</th><th class="text">状态</th><th class="text">开机启动</th><th class="text">持续</th><th>内存</th><th>自动重启</th><th>操作</th></tr></thead><tbody></tbody></table></div>
+        </details>
+      </section>
+      <section class="card route-card" id="maint-logs-card">
+        <h2>日志</h2>
+        <div class="form-row">
+          <label>来源 <select id="log-unit"></select></label>
+          <label>范围 <select id="log-since">
+            <option value="">不限</option><option value="900">15 分钟内</option><option value="3600">1 小时内</option><option value="21600">6 小时内</option><option value="86400">1 天内</option><option value="boot">本次开机</option>
+          </select></label>
+          <label>最多 <select id="log-lines"><option>100</option><option selected>300</option><option>1000</option><option>2000</option></select> 行</label>
+          <label>级别 <select id="log-priority"><option value="">全部</option><option value="6">信息及以上</option><option value="4">警告及以上</option><option value="3">错误及以上</option></select></label>
+          <label>关键词 <input id="log-grep" type="search" placeholder="不区分大小写"></label>
+        </div>
+        <div class="form-row">
+          <button id="log-load" class="close strong">查看</button>
+          <label><input id="log-follow" type="checkbox"> 实时跟踪</label>
+          <a id="log-download" class="close button-link" href="#" download>下载</a>
+          <span class="note" id="log-status"></span>
+        </div>
+        <pre class="log-view" id="log-view" tabindex="0" aria-label="日志内容"></pre>
+      </section>
+      <section class="card route-card">
+        <h2>网络测试</h2>
+        <p class="note section-help" id="test-help"></p>
+        <div class="form-row">
+          <label>测试 <select id="test-kind">
+            <option value="ping">ping</option><option value="traceroute">路由跟踪</option><option value="dns">DNS 查询</option><option value="http">HTTP 访问</option>
+          </select></label>
+          <label>目标 <input id="test-target" class="wide-input" placeholder="IP 地址或域名"></label>
+          <label id="test-from-field">从 <select id="test-from"><option value="linux">Linux 本机</option><option value="vpp">VPP</option></select></label>
+          <label>接口 <select id="test-interface"></select></label>
+          <label>地址族 <select id="test-family"><option value="0">自动</option><option value="4">IPv4</option><option value="6">IPv6</option></select></label>
+          <label id="test-count-field">次数 <input id="test-count" type="number" min="1" max="20" value="4"></label>
+          <label id="test-server-field">DNS 服务器 <input id="test-server" placeholder="留空用系统的"></label>
+          <label id="test-type-field">记录 <select id="test-type"><option>A</option><option>AAAA</option><option>CNAME</option><option>MX</option><option>TXT</option><option>NS</option></select></label>
+          <button id="test-run" class="close strong">开始</button>
+        </div>
+        <pre class="log-view test-view" id="test-view" hidden></pre>
+      </section>
+      <section class="card route-card">
+        <h2>配置备份</h2>
+        <p class="note section-help">下载 <code id="backup-paths">/etc/vpp</code> 和路由器各服务的单元文件（含 drop-in），打包成 <code>.tar.gz</code>，路径保持原样，里面的 <code>MANIFEST.txt</code> 列出每个文件。不含面板的登录密码和证书，也不含运行状态（Gate 的路由账本、DHCP 租约）。</p>
+        <p class="note section-help error">备份里有 WireGuard 私钥、代理节点的密码等，和 SSH 密钥一样保管，不要发给别人。</p>
+        <p class="note section-help">恢复时在主机上解压到根目录，再重启 VPP 和相关服务：<code>sudo tar -xzf 备份.tar.gz -C / --exclude MANIFEST.txt</code>。只想取回个别文件时，先解压到别的目录再挑。</p>
+        <div class="form-row"><a id="backup-download" class="close strong button-link" href="api/system/maint/backup" download>下载配置备份</a></div>
       </section>
     </div>
   </div>
@@ -787,6 +865,7 @@
       <legend>MAC 地址</legend>
       <div class="scroll"><table id="lan-device-macs"><thead><tr><th class="text">MAC 地址</th><th class="text">类型</th><th class="text">主机名</th><th class="text">地址</th><th class="text">厂商类别</th><th class="text">最后出现</th><th>操作</th></tr></thead><tbody></tbody></table></div>
       <p class="note">随机地址是手机等设备连 Wi-Fi 时用的私有地址。“自动归入”的地址可以拆出成单独的设备。</p>
+      <p class="note" id="lan-device-v6" hidden></p>
     </fieldset>
     <fieldset id="lan-device-traffic-box" hidden>
       <legend>流量</legend>

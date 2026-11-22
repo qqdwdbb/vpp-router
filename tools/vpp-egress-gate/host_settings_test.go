@@ -2,6 +2,7 @@ package gate
 
 import (
 	"encoding/json"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"testing"
@@ -75,6 +76,30 @@ func TestHostSettingsRecordNothingWithoutAChange(t *testing.T) {
 	}
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Fatalf("a record without a change: %v", err)
+	}
+}
+
+func TestIPv6TProxyDisablesTCPEarlyDemux(t *testing.T) {
+	path := useHostSettings(t)
+	const name = "net/ipv4/tcp_early_demux"
+	writeSysctl(t, name, "1")
+	rules := []TProxyListen{{Prefix: netip.MustParsePrefix("0.0.0.0/0")}}
+	if err := ensureTProxyHostSettings(rules); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("IPv4 TPROXY recorded a setting: %v", err)
+	}
+	rules = append(rules, TProxyListen{Prefix: netip.MustParsePrefix("::/0")})
+	if err := ensureTProxyHostSettings(rules); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(linuxSysctlRoot, name))
+	if err != nil || string(data) != "0\n" {
+		t.Fatalf("sysctl = %q, error = %v", data, err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("runtime setting touched the journal: %v", err)
 	}
 }
 

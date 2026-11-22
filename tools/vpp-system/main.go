@@ -5,6 +5,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -14,6 +15,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -26,7 +28,7 @@ func main() {
 }
 
 // Handler serves the API. Whoever can reach the socket is trusted, as it is root-only.
-func (s *Service) Handler() http.Handler {
+func (s *Service) Handler(maint *Maint) http.Handler {
 	reply := func(w http.ResponseWriter, value any, err error) {
 		w.Header().Set("Content-Type", "application/json")
 		if err != nil {
@@ -88,7 +90,20 @@ func (s *Service) Handler() http.Handler {
 			reply(w, state, err)
 		})
 	}
+	if maint != nil {
+		maint.routes(mux, reply, user)
+	}
 	return mux
+}
+
+func splitList(text string) []string {
+	var list []string
+	for _, item := range strings.Split(text, ",") {
+		if item = strings.TrimSpace(item); item != "" {
+			list = append(list, item)
+		}
+	}
+	return list
 }
 
 func run(args []string) error {
@@ -109,7 +124,9 @@ func run(args []string) error {
 	fs.StringVar(&opts.NICsOrig, "nics-orig", "/var/lib/vpp-router/nics.orig", "where the installer notes each card's first driver. Empty to leave it")
 	fs.StringVar(&opts.PCIIDs, "pci-ids", "/usr/local/share/vpp-router/dpdk-pci-ids", "DPDK's PCI ID table from the build, which says what the PMDs drive")
 	fs.StringVar(&opts.DPDKPlugin, "dpdk-plugin", "", "VPP's dpdk_plugin.so, to see if it names each port of a multi-port device; found from the startup file's plugin path when empty")
-	unitDir := fs.String("unit-dir", "/etc/systemd/system", "where -vpp-unit's file is, read to see if the platform prepares RTL8125 cards")
+	unitDir := fs.String("unit-dir", "/etc/systemd/system", "where -vpp-unit's file is, read to see if the platform prepares RTL8125 cards; the maintenance page lists the services installed there")
+	units := fs.String("units", "", "comma-separated units the maintenance page lists besides those in -unit-dir")
+	backup := fs.String("backup", "/etc/vpp,/var/lib/vpp-interfaces/devices.json,/var/lib/vpp-router/nics.orig", "comma-separated files and directories in the configuration download, besides the router's unit files")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -147,7 +164,16 @@ func run(args []string) error {
 	if err := os.Chmod(*socket, 0o600); err != nil {
 		return err
 	}
+	maint := NewMaint(service, *unitDir, splitList(*units), splitList(*backup))
 	go service.watch()
 	log.Printf("listening on %s, editing %s and %s", *socket, opts.StartConf, opts.CLIFile)
-	return (&http.Server{Handler: service.Handler(), ReadHeaderTimeout: 5 * time.Second}).Serve(listener)
+	return (&http.Server{
+		Handler: service.Handler(maint), ReadHeaderTimeout: 5 * time.Second,
+		ConnContext: func(ctx context.Context, c net.Conn) context.Context {
+			if unix, ok := c.(*net.UnixConn); ok {
+				return context.WithValue(ctx, connKey{}, unix)
+			}
+			return ctx
+		},
+	}).Serve(listener)
 }

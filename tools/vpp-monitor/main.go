@@ -38,6 +38,7 @@ func main() {
 	wireguardSocket := flag.String("wireguard-socket", "/run/vpp-wireguard/wireguard.sock", "vpp-wireguard's socket, used by the VPN page")
 	interfacesSocket := flag.String("interfaces-socket", "/run/vpp-interfaces/interfaces.sock", "vpp-interfaces' socket, used by the interfaces page")
 	lanMeterFile := flag.String("lan-meter", "/run/vpp-interfaces/meter.json", "the LAN meter's rules from vpp-interfaces, for per-device traffic; empty turns it off")
+	lanTotalsFile := flag.String("lan-totals", "/var/lib/vpp-monitor/lan-external-totals.json", "checkpoint for per-device traffic totals excluding local traffic; empty keeps totals in memory")
 	proxySocket := flag.String("proxy-socket", "/run/vpp-proxy/proxy.sock", "vpp-proxy's socket, used by the proxy page")
 	firewallSocket := flag.String("firewall-socket", "/run/vpp-firewall/firewall.sock", "vpp-firewall's socket, used by the firewall page")
 	systemSocket := flag.String("system-socket", "/run/vpp-system/system.sock", "vpp-system's socket, used by the system page")
@@ -83,7 +84,8 @@ func main() {
 
 	collector.runs = loadVPPRuns(*runsFile)
 	if *lanMeterFile != "" {
-		collector.meter = newLANMeter(*lanMeterFile)
+		collector.meter = newLANMeter(*lanMeterFile, *lanTotalsFile)
+		defer collector.meter.totals.save()
 	}
 	labels := NewInterfaceLabels(func() (map[string]InterfaceInfo, error) { return readInterfaceLabels(*apiSocket) })
 	collector.labels = labels

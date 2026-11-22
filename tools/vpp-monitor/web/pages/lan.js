@@ -56,8 +56,8 @@ async function loadTraffic() {
 }
 
 function refreshTraffic() {
-  if (metering()) loadTraffic();
-  else loadNAT();
+  loadTraffic();
+  if (!metering()) loadNAT();
 }
 
 async function apply(path, body, description, after) {
@@ -101,10 +101,16 @@ function row(tr, values, actions) {
     else if (tr.children[i].textContent !== value) tr.children[i].textContent = value;
   });
   const cell = tr.lastChild;
-  const span = document.createElement('span');
-  span.className = 'row-actions';
-  span.append(...(actions || []).filter(Boolean));
-  cell.replaceChildren(span);
+  if (!cell.firstElementChild) {
+    const span = document.createElement('span');
+    span.className = 'row-actions';
+    cell.append(span);
+  }
+  const span = cell.firstElementChild;
+  const buttons = actions.filter(Boolean);
+  if (span.children.length !== buttons.length || buttons.some((node, i) => node !== span.children[i])) {
+    span.replaceChildren(...buttons);
+  }
 }
 
 function ago(time) {
@@ -151,11 +157,29 @@ function traffic(device) {
   return seen ? { bps, pps, sessions } : { bps: 0, pps: 0, sessions: 0, idle: true };
 }
 
-function status(device) {
-  const t = traffic(device);
-  if (t && !t.idle) return { text: t.meter ? '有流量' : '有连接', className: 'online', rank: 0 };
-  if (device.macs.some(m => m.active)) return { text: '租约中', className: '', rank: 1 };
-  return { text: '离线', className: 'offline', rank: 2 };
+/* The later of the last DHCP event and, with the meter on, the last time it moved traffic. */
+function lastSeen(device) {
+  let latest = device.last_seen ? new Date(device.last_seen).getTime() : 0;
+  if (metering() && page.traffic && page.traffic.active) {
+    for (const m of device.macs || [device]) {
+      const at = page.traffic.active[m.mac];
+      if (at && at * 1000 > latest) latest = at * 1000;
+    }
+  }
+  return latest ? new Date(latest).toISOString() : null;
+}
+
+/* The device's IPv6 addresses, which the meter found in VPP's neighbour table. */
+function addresses6(device) {
+  if (!metering() || !page.traffic) return [];
+  const macs = new Set(device.macs.map(m => m.mac));
+  return page.traffic.rates.filter(r => macs.has(r.mac) && r.address.includes(':')).map(r => r.address);
+}
+
+function status(device, t) {
+  if (t && !t.idle) return { text: t.meter ? '有流量' : '有连接', className: 'online' };
+  if (device.macs.some(m => m.active)) return { text: '租约中', className: '' };
+  return { text: '离线', className: 'offline' };
 }
 
 function deviceCell(device) {
@@ -195,37 +219,97 @@ function renderMeter() {
   const on = metering();
   $('lan-meter-toggle').textContent = on ? '关闭' : '开启';
   $('lan-meter-toggle').disabled = page.busy || !m;
-  let state = !m ? '不可用' : on ? `已开启，在 ${m.interface || '局域网网关'} 上统计 ${m.rules.length} 个地址` : '未开启';
+  let state = !m ? '不可用' : on ? `已开启，在 ${m.interface || '局域网网口'} 上统计 ${m.rules.length} 个地址` : '未开启';
   if (m && m.error) state += `（${m.error}）`;
   $('lan-meter-state').textContent = state;
   $('lan-meter-state').className = m && m.error ? 'error' : '';
   $('lan-meter-help').textContent = on
-    ? '速率来自局域网网关接口上的 ACL 计数：走代理、IPv6、隧道的流量都算在内，每 10 秒更新，“详情”里有流量曲线（监控进程重启后清空）。关闭后恢复用 NAT 会话估算。'
-    : '开启后在局域网网关接口上挂两张 ACL，按设备地址计数所有流量（包括走代理、IPv6 和隧道的），读取不会让 VPP 暂停，并记录每台设备的流量历史。代价是经过网关的每个包多一次 ACL 查找：R6S 小核用 64 字节小包打满时，转发能力约降 5%，平时的流量下只是多占一点 CPU。未开启时，速率来自 NAT 会话，只在页面打开时读取，走代理和 IPv6 的流量统计不到。';
+    ? '实时速率和累计流量排除局域网网段之间的互访以及本地广播、组播。速率每 10 秒更新，“详情”里可查看流量曲线。'
+    : '开启后按设备统计访问局域网以外地址的流量，并记录历史。关闭时，速率来自 NAT 会话，只在此页面打开时读取。';
   $('lan-col-a').textContent = on ? '上传' : '速率';
   $('lan-col-b').textContent = on ? '下载' : '连接';
+  const sort = $('lan-device-sort');
+  for (const option of sort.options) {
+    option.hidden = option.disabled = option.value !== 'name' && (option.value === 'bps' ? on : !on);
+  }
+  if (sort.selectedOptions[0]?.disabled) sort.value = 'name';
+}
+
+function matchesDevice(device, query) {
+  return [device.label, ...device.ips, ...addresses6(device),
+    ...device.macs.flatMap(m => [m.hostname, m.mac, m.mac.replaceAll(':', '')])]
+    .some(value => (value || '').toLowerCase().includes(query));
+}
+
+function totalsCell(device) {
+  const totals = page.traffic?.totals;
+  if (!totals) return '—';
+  const recorded = device.macs.map(m => totals[m.mac]).filter(Boolean);
+  if (!recorded.length) return '—';
+  const box = document.createElement('div');
+  for (const [label, field] of [['上传', 'up_bytes'], ['下载', 'down_bytes']]) {
+    const line = document.createElement('div');
+    const bytes = recorded.reduce((sum, counters) => sum + counters[field], 0);
+    line.textContent = `${label} ${FORMATS.bytes(bytes)}`;
+    box.append(line);
+  }
+  return box;
+}
+
+function renderDeviceRow(tr, device, t) {
+  const st = status(device, t);
+  const state = document.createElement('span');
+  state.className = st.className;
+  state.textContent = st.text;
+  const [details = button('详情', () => openDevice(device.id)), merge = button('合并')] =
+    tr.querySelector('.row-actions')?.children || [];
+  details.disabled = merge.disabled = page.busy;
+  merge.hidden = device.suggest.length !== 1;
+  const target = device.suggest[0];
+  merge.onclick = () => apply('device/merge', { id: target, from: device.id },
+    `把“${device.label}”并入“${labelOf(target)}”？`);
+  const where = device.ips.join('、') || '—';
+  const rates = t && t.meter ? [FORMATS.bps(t.up), FORMATS.bps(t.down)] : [t ? FORMATS.bps(t.bps) : '—', t ? String(t.sessions) : '—'];
+  row(tr, [deviceCell(device), state, where, ...rates, totalsCell(device), ago(lastSeen(device))], [details, merge]);
 }
 
 function renderDevices() {
-  const devices = page.state.devices.map(device => ({ device, status: status(device), traffic: traffic(device) }));
-  const volume = t => t ? (t.meter ? t.up + t.down : t.bps) : 0;
-  devices.sort((a, b) => a.status.rank - b.status.rank || volume(b.traffic) - volume(a.traffic) ||
-    a.device.label.localeCompare(b.device.label, 'zh-CN'));
-  $('lan-devices-empty').hidden = devices.length > 0;
-  fillBody($('lan-devices').tBodies[0], devices.length, (tr, i) => {
-    const { device, status: st, traffic: t } = devices[i];
-    const state = document.createElement('span');
-    state.className = st.className;
-    state.textContent = st.text;
-    const actions = [button('详情', () => openDevice(device.id), page.busy)];
-    if (device.suggest.length === 1) {
-      actions.push(button('合并', () => apply('device/merge', { id: device.suggest[0], from: device.id },
-        `把“${device.label}”并入“${labelOf(device.suggest[0])}”？`), page.busy));
-    }
-    const where = (device.ips.join('、') || '—') + (t && t.v6 ? ` +${t.v6} 个 IPv6` : '');
-    const rates = t && t.meter ? [FORMATS.bps(t.up), FORMATS.bps(t.down)] : [t ? FORMATS.bps(t.bps) : '—', t ? String(t.sessions) : '—'];
-    row(tr, [deviceCell(device), state, where, ...rates, ago(device.last_seen)], actions);
+  if (!page.state) return;
+  const query = $('lan-device-search').value.trim().toLowerCase();
+  const sort = $('lan-device-sort').value;
+  const devices = page.state.devices
+    .filter(device => !query || matchesDevice(device, query))
+    .map(device => {
+      const t = traffic(device);
+      const active = t?.meter ? !t.idle : (t?.bps ?? 0) > 0;
+      return { device, t, active };
+    });
+  devices.sort((a, b) => Number(b.active) - Number(a.active) || (b.t?.[sort] ?? 0) - (a.t?.[sort] ?? 0) ||
+    a.device.label.localeCompare(b.device.label, 'zh-CN') || a.device.id.localeCompare(b.device.id));
+  const empty = $('lan-devices-empty');
+  empty.hidden = devices.length > 0;
+  empty.textContent = query && page.state.devices.length ? '没有匹配的设备。' : '还没有设备。';
+
+  const body = $('lan-devices').tBodies[0];
+  const focused = body.contains(document.activeElement) ? document.activeElement : null;
+  const visible = new Set(devices.map(({ device }) => device.id));
+  const rows = new Map();
+  for (const tr of Array.from(body.rows)) {
+    if (visible.has(tr.dataset.deviceId)) rows.set(tr.dataset.deviceId, tr);
+    else tr.remove();
+  }
+  devices.forEach(({ device, t }, i) => {
+    const tr = rows.get(device.id) || document.createElement('tr');
+    tr.dataset.deviceId = device.id;
+    if (body.rows[i] !== tr) body.insertBefore(tr, body.rows[i] || null);
+    renderDeviceRow(tr, device, t);
   });
+  if (focused?.isConnected && document.activeElement !== focused) focused.focus({ preventScroll: true });
+  const totalsNote = $('lan-totals-note');
+  const since = page.traffic?.totals_since;
+  totalsNote.textContent = page.traffic?.totals_error ? '无法读取已保存的累计流量，当前累计仅在内存中。'
+    : since ? `自 ${new Date(since * 1000).toLocaleString('zh-CN', { hour12: false })} 起累计，面板正常停止时保存。`
+      : '开启按设备统计流量后开始累计。';
   if (metering()) {
     const tr = page.traffic;
     $('lan-nat-note').textContent = !tr ? '正在读取计数…' : tr.error ? '读取计数失败：' + tr.error
@@ -359,10 +443,13 @@ function renderDevice() {
     const m = device.macs[i];
     const kind = [m.random ? '随机' : '固定', m.auto ? '自动归入' : ''].filter(Boolean).join('，');
     const where = m.ip ? m.ip + (m.active ? (m.expires ? `（租约到 ${clock(m.expires)}）` : '（永久租约）') : '（租约已过期）') : '—';
-    row(tr, [m.mac, kind, m.hostname || '—', where, m.vendor || '—', ago(m.last_seen)], [
+    row(tr, [m.mac, kind, m.hostname || '—', where, m.vendor || '—', ago(lastSeen(m))], [
       device.macs.length > 1 ? button('拆出', () => apply('device/split', { mac: m.mac }, `把 ${m.mac} 拆成单独的设备？`), page.busy) : null,
     ]);
   });
+  const v6 = addresses6(device);
+  $('lan-device-v6').hidden = !v6.length;
+  $('lan-device-v6').textContent = v6.length ? `IPv6 地址（${v6.length} 个，系统的临时地址会定期更换）：${v6.join('、')}` : '';
   const suggest = device.suggest.filter(byID);
   $('lan-device-suggest-box').hidden = !suggest.length;
   $('lan-device-suggest-note').textContent = suggest.length
@@ -392,6 +479,8 @@ function renderDevice() {
 }
 
 export function start() {
+  $('lan-device-search').oninput = renderDevices;
+  $('lan-device-sort').onchange = renderDevices;
   $('lan-device-dialog').addEventListener('close', () => {
     clearInterval(page.plotTimer);
     if (page.plot) { page.plot.destroy(); page.plot = null; }
@@ -399,7 +488,7 @@ export function start() {
   $('lan-meter-toggle').onclick = async () => {
     const on = !metering();
     const text = on
-      ? '开启按设备统计流量？\n\n在局域网网关接口上挂两张计数用的 ACL（放行所有，不拦截），每个包多一次 ACL 查找。'
+      ? '开启按设备统计流量？\n\n在设备所在的网口上挂计数用的 ACL，每个包多一次 ACL 查找。'
       : '关闭按设备统计流量？\n\n计数 ACL 撤下，设备的流量历史不再记录。';
     if (page.busy || !confirm(text)) return;
     page.busy = true;
@@ -448,7 +537,8 @@ export function show() {
     if (document.hidden) return;
     refreshTraffic();
     /* Do not refresh the forms out from under the typing. */
-    if (page.busy || document.activeElement?.closest?.('#page-lan .form-row')) return;
+    const editing = document.activeElement?.closest?.('#page-lan .form-row');
+    if (page.busy || (editing && editing.id !== 'lan-device-filters')) return;
     load();
   }, 5000);
 }

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"strings"
 	"sync/atomic"
@@ -12,20 +13,21 @@ import (
 	"go.fd.io/govpp/adapter"
 )
 
-// The LAN meter: vpp-interfaces keeps two ACLs on the LAN gateway interface, one rule per
-// device address (input by source for upload, output by destination for download), and
+// The LAN meter: vpp-interfaces keeps two ACLs on the ports the LAN devices are on, one rule
+// per device address (input by source for upload, output by destination for download), and
 // publishes the rules in order. Their per-rule byte counters are in the stats segment, so
 // they are read here at the slow interval with the rest, without the VPP API and without
 // stopping the workers. Each MAC's rates go into the history like any other series.
 
 // meterFile is what vpp-interfaces publishes.
 type meterFile struct {
-	Enabled    bool   `json:"enabled"`
-	Generation int64  `json:"generation"`
-	Interface  string `json:"interface"`
-	ACLIn      uint32 `json:"acl_in"`
-	ACLOut     uint32 `json:"acl_out"`
-	Rules      []struct {
+	Enabled       bool     `json:"enabled"`
+	Generation    int64    `json:"generation"`
+	Interface     string   `json:"interface"`
+	ACLIn         uint32   `json:"acl_in"`
+	ACLOut        uint32   `json:"acl_out"`
+	LocalPrefixes []string `json:"local_prefixes"`
+	Rules         []struct {
 		Address string `json:"address"`
 		MAC     string `json:"mac"`
 	} `json:"rules"`
@@ -50,13 +52,18 @@ type LANTraffic struct {
 	Interface string    `json:"interface,omitempty"`
 	Time      int64     `json:"time"`
 	Rates     []LANRate `json:"rates"`
-	// Other is what no device rule matched. On a bridge's BVI it is not what it seems: what VPP
-	// sends into the bridge (downloads included) also passes the input ACL, as L2 input from
-	// the BVI, so "other up" is mostly download traffic. The device rules are not affected:
-	// they match the source address on input and the destination on output.
+	// Other is traffic outside the local prefixes that no device rule matched.
 	OtherUpBps   float64 `json:"other_up_bps"`
 	OtherDownBps float64 `json:"other_down_bps"`
+	// Active is when each MAC last moved more than activeBps, since this program started.
+	Active      map[string]int64    `json:"active"`
+	Totals      map[string]LANBytes `json:"totals"`
+	TotalsSince int64               `json:"totals_since,omitempty"`
+	TotalsError bool                `json:"totals_error,omitempty"`
 }
+
+// activeBps is the rate above which a device counts as seen: more than background chatter.
+const activeBps = 1000
 
 type lanMeter struct {
 	path string
@@ -64,14 +71,24 @@ type lanMeter struct {
 	key      string // generation and ACLs of the previous reading
 	at       time.Time
 	up, down []uint64
+	active   map[string]int64
+	totals   lanTotals
 
 	latest atomic.Pointer[LANTraffic]
 }
 
-func newLANMeter(path string) *lanMeter {
-	m := &lanMeter{path: path}
-	m.latest.Store(&LANTraffic{Rates: []LANRate{}})
+func newLANMeter(path, totalsPath string) *lanMeter {
+	m := &lanMeter{path: path, active: map[string]int64{}, totals: loadLANTotals(totalsPath)}
+	m.publish(&LANTraffic{Rates: []LANRate{}})
 	return m
+}
+
+func (m *lanMeter) publish(result *LANTraffic) {
+	result.Active = maps.Clone(m.active)
+	result.Totals = maps.Clone(m.totals.ByMAC)
+	result.TotalsSince = m.totals.Since
+	result.TotalsError = m.totals.loadErr != nil
+	m.latest.Store(result)
 }
 
 // perRule sums a combined counter over the threads, per rule.
@@ -95,8 +112,8 @@ func perRule(data adapter.Stat) []uint64 {
 // read takes a reading; gauge records a history sample.
 func (m *lanMeter) read(api adapter.StatsAPI, now time.Time, gauge func(string, float64)) {
 	result := &LANTraffic{Time: now.Unix(), Rates: []LANRate{}}
-	defer func() { m.latest.Store(result) }()
-	if m == nil || m.path == "" {
+	defer m.publish(result)
+	if m.path == "" {
 		return
 	}
 	data, err := os.ReadFile(m.path)
@@ -134,19 +151,24 @@ func (m *lanMeter) read(api adapter.StatsAPI, now time.Time, gauge func(string, 
 		}
 	}
 	n := len(file.Rules)
-	if len(up) < n || len(down) < n {
+	offset := len(file.LocalPrefixes)
+	if len(up)-offset < n || len(down)-offset < n {
 		result.Error = "ACL 计数和规则对不上，等 vpp-interfaces 更新"
 		m.key = ""
 		return
 	}
-	key := fmt.Sprintf("%d/%d/%d", file.Generation, file.ACLIn, file.ACLOut)
+	up, down = up[offset:], down[offset:]
+	key := fmt.Sprintf("%d/%d/%d/%d", file.Generation, file.ACLIn, file.ACLOut, offset)
+	if file.Error == "" && offset > 0 {
+		m.totals.record(file, key, up, down, now)
+	}
 	dt := now.Sub(m.at).Seconds()
 	ready := key == m.key && dt > 0 && len(m.up) == len(up) && len(m.down) == len(down)
 	rate := func(cur []uint64, prev []uint64, i int) float64 {
-		if !ready || cur[i] < prev[i] {
-			return 0 // counters started over
+		if !ready {
+			return 0
 		}
-		return float64(cur[i]-prev[i]) * 8 / dt
+		return float64(byteDelta(cur[i], prev[i])) * 8 / dt
 	}
 	byMAC := map[string][2]float64{}
 	for i, r := range file.Rules {
@@ -166,6 +188,9 @@ func (m *lanMeter) read(api adapter.StatsAPI, now time.Time, gauge func(string, 
 		for mac, v := range byMAC {
 			gauge("lan/up/"+mac, v[0])
 			gauge("lan/down/"+mac, v[1])
+			if v[0]+v[1] > activeBps {
+				m.active[mac] = now.Unix()
+			}
 		}
 	}
 	m.key, m.at, m.up, m.down = key, now, up, down

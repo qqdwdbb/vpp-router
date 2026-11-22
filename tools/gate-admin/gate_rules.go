@@ -93,6 +93,7 @@ type adminSystem interface {
 	check() error                // validate the configuration on disk without changing anything
 	sync() error                 // regenerate what Gate runs from the configuration on disk
 	restart() error              // restart Gate
+	reload() (bool, error)       // reload collections; reports whether Gate restarted
 	ready() error                // wait until Gate answers DNS
 	stop() error                 // stop Gate
 	flush() error                // undo what a stopped Gate did at run time, with its leases
@@ -180,6 +181,7 @@ type adminBackup struct {
 
 // AdminPending is an applied change waiting for confirmation.
 type AdminPending struct {
+	Reload      bool          `json:"reload,omitempty"`
 	ID          string        `json:"id"`
 	Description string        `json:"description"`
 	User        string        `json:"user"`
@@ -2188,6 +2190,17 @@ func (a *Admin) finish(description, outcome, detail string, outage time.Duration
 }
 
 // restartGate applies the configuration on disk, returning how long DNS was unavailable.
+func (a *Admin) applyPending() (time.Duration, error) {
+	if a.pending != nil && a.pending.Reload {
+		restarted, err := a.sys.reload()
+		if restarted && err == nil {
+			a.pending.Reload = false
+		}
+		return 0, err
+	}
+	return a.restartGate()
+}
+
 func (a *Admin) restartGate() (time.Duration, error) {
 	if err := a.sys.sync(); err != nil {
 		return 0, fmt.Errorf("device sync: %w", err)
@@ -2227,14 +2240,14 @@ func (a *Admin) restoreFiles() error {
 	return first
 }
 
-// rollbackLocked restores the previous configuration and restarts Gate with it.
+// rollbackLocked restores the previous files using the same apply mode as the change.
 func (a *Admin) rollbackLocked(reason string) {
 	description := a.pending.Description
 	if err := a.restoreFiles(); err != nil {
 		a.finish(description, "rollback-failed", err.Error(), 0)
 		return // the backups stay, for someone to look at
 	}
-	outage, err := a.restartGate()
+	outage, err := a.applyPending()
 	if err != nil {
 		a.finish(description, "rollback-failed", reason+": "+err.Error(), outage)
 		a.clearPending()
@@ -2317,6 +2330,12 @@ func (a *Admin) changeWith(description, user string, remove []string, mutate fun
 	a.nextID++
 	id := fmt.Sprintf("%d-%d", a.now().Unix(), a.nextID)
 	pending := &AdminPending{ID: id, Description: description, User: user, Remove: remove}
+	pending.Reload = len(files) > 0 && len(remove) == 0
+	for path := range files {
+		if !listFileName.MatchString(filepath.Base(path)) && !rangeFileName.MatchString(filepath.Base(path)) {
+			pending.Reload = false
+		}
+	}
 	for path := range files {
 		backup := adminBackup{Path: path, Backup: filepath.Join(a.opts.StateDir, id+"-"+strconv.Itoa(len(pending.Files)))}
 		data, err := os.ReadFile(path)
@@ -2362,7 +2381,7 @@ func (a *Admin) changeWith(description, user string, remove []string, mutate fun
 		}
 		return nil, fmt.Errorf("the configuration was refused and nothing changed: %w", err)
 	}
-	outage, err := a.restartGate()
+	outage, err := a.applyPending()
 	if err != nil {
 		a.rollbackLocked(err.Error())
 		return nil, fmt.Errorf("the change was rolled back: %w", err)
@@ -2669,6 +2688,36 @@ func (s *realAdminSystem) check() error {
 
 func (s *realAdminSystem) sync() error {
 	return s.run(s.binary, "--config", s.opts.Config, "--sync-devices")
+}
+
+func (s *realAdminSystem) reload() (bool, error) {
+	if err := s.sync(); err != nil {
+		return false, err
+	}
+	path, err := s.stateSocket()
+	if err != nil {
+		return false, err
+	}
+	conn, err := net.DialTimeout("unix", path+".reload", adminLedgerTimeout)
+	if err != nil {
+		return false, err
+	}
+	defer conn.Close()
+	conn.SetDeadline(time.Now().Add(adminCommandLimit))
+	var result gate.ListReloadResult
+	if err := json.NewDecoder(conn).Decode(&result); err != nil {
+		return false, err
+	}
+	if result.Error != "" {
+		return false, errors.New(result.Error)
+	}
+	if result.Restart {
+		if err := s.restart(); err != nil {
+			return false, err
+		}
+		return true, s.ready()
+	}
+	return false, nil
 }
 
 func (s *realAdminSystem) restart() error {

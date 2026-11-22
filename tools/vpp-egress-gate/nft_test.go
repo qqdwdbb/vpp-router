@@ -7,7 +7,7 @@ import (
 )
 
 func TestDNSHijackNftScriptRedirectsPort53(t *testing.T) {
-	script := strings.Join(dnsHijackNftScript([]string{"br-mgmt", "lan"}, 1053), "\n")
+	script := strings.Join(dnsHijackNftScript([]string{"br-mgmt", "lan"}, 1053, nil), "\n")
 	for _, want := range []string{
 		"table inet egress_gate",
 		"chain hijack",
@@ -20,9 +20,29 @@ func TestDNSHijackNftScriptRedirectsPort53(t *testing.T) {
 			t.Fatalf("missing %q in %s", want, script)
 		}
 	}
-	single := strings.Join(dnsHijackNftScript([]string{"br-mgmt"}, 1053), "\n")
+	single := strings.Join(dnsHijackNftScript([]string{"br-mgmt"}, 1053, nil), "\n")
 	if !strings.Contains(single, `iifname "br-mgmt"`) || strings.Contains(single, `iifname {`) {
 		t.Fatalf("single iface %s", single)
+	}
+}
+
+func TestDNSHijackUsesBoundIPv6TargetsBeforeRedirect(t *testing.T) {
+	script := strings.Join(dnsHijackNftScript([]string{"vpp-host", "br0"}, 1053, map[string][]netip.Addr{
+		"vpp-host": {netip.MustParseAddr("fd00::2"), netip.MustParseAddr("2001:db8::2")},
+		"br0":      {netip.MustParseAddr("fd00:1::2")},
+	}), "\n")
+	last := -1
+	for _, want := range []string{
+		`iifname "vpp-host" ip6 daddr 2001:db8::2 meta l4proto { tcp, udp } th dport 53 dnat ip6 to [2001:db8::2]:1053`,
+		`iifname "vpp-host" meta nfproto ipv6 meta l4proto { tcp, udp } th dport 53 dnat ip6 to [fd00::2]:1053`,
+		`iifname "br0" meta nfproto ipv6 meta l4proto { tcp, udp } th dport 53 dnat ip6 to [fd00:1::2]:1053`,
+		`iifname { "vpp-host", "br0" } meta l4proto { tcp, udp } th dport 53 redirect to :1053`,
+	} {
+		pos := strings.Index(script, want)
+		if pos <= last {
+			t.Fatalf("missing or out of order: %q in %s", want, script)
+		}
+		last = pos
 	}
 }
 

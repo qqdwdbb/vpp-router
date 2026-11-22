@@ -8,13 +8,14 @@ import { start as startProxy, show as showProxy, hide as hideProxy } from './pag
 import { start as startFirewall, show as showFirewall, hide as hideFirewall } from './pages/firewall.js';
 import { start as startSystem, show as showSystem, hide as hideSystem } from './pages/system.js';
 import { start as startLAN, show as showLAN, hide as hideLAN } from './pages/lan.js';
+import { start as startMaint, show as showMaint, hide as hideMaint } from './pages/maint.js';
 
 $('logout').onclick = async () => {
   await fetch('api/logout', { method: 'POST' });
   location.href = '/login.html';
 };
 
-const PAGES = { overview: {}, routes: { show: showRoutes, hide: hideRoutes }, vpn: { show: showVPN, hide: hideVPN }, interfaces: { show: showInterfaces, hide: hideInterfaces }, proxy: { show: showProxy, hide: hideProxy }, firewall: { show: showFirewall, hide: hideFirewall }, system: { show: showSystem, hide: hideSystem }, lan: { show: showLAN, hide: hideLAN } };
+const PAGES = { overview: {}, routes: { show: showRoutes, hide: hideRoutes }, vpn: { show: showVPN, hide: hideVPN }, interfaces: { show: showInterfaces, hide: hideInterfaces }, proxy: { show: showProxy, hide: hideProxy }, firewall: { show: showFirewall, hide: hideFirewall }, system: { show: showSystem, hide: hideSystem }, lan: { show: showLAN, hide: hideLAN }, maint: { show: showMaint, hide: hideMaint } };
 
 function route() {
   const wanted = location.pathname.slice(1);
@@ -35,6 +36,7 @@ startProxy();
 startFirewall();
 startSystem();
 startLAN();
+startMaint();
 // Links from when pages were addressed as #routes.
 const oldPage = location.hash.slice(1);
 if (PAGES[oldPage]) history.replaceState(null, '', oldPage === 'overview' ? '/' : '/' + oldPage);

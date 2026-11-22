@@ -3,6 +3,7 @@ package gate
 import (
 	"context"
 	"fmt"
+	"net"
 	"net/netip"
 	"regexp"
 	"sort"
@@ -120,6 +121,17 @@ func tproxyPortRules(cfg *Config) []TProxyListen {
 	return out
 }
 
+func ensureTProxyHostSettings(rules []TProxyListen) error {
+	for _, rule := range rules {
+		if rule.Prefix.Addr().Is6() {
+			// IPv6 uses this knob too. Early socket lookup can attach the
+			// transparent socket before the packet is routed back to VPP.
+			return setSysctlValue("net/ipv4/tcp_early_demux", "0", false)
+		}
+	}
+	return nil
+}
+
 func tproxyPortClearScript() []string {
 	return []string{
 		"flush chain inet egress_gate gate_tproxy",
@@ -162,7 +174,51 @@ func tproxyPortNftScript(rules []TProxyListen) []string {
 	return []string{strings.TrimSuffix(b.String(), "\n")}
 }
 
-func dnsHijackNftScript(ifaces []string, port int) []string {
+// Use a bound IPv6 address on each ingress interface. REDIRECT can pick an
+// unrelated address (for example, a delegated global address before the ULA).
+func dnsHijackIPv6Targets(g *GateFile) map[string][]netip.Addr {
+	var listeners []netip.Addr
+	for _, endpoint := range g.Listen {
+		addr, err := netip.ParseAddr(endpoint.Host)
+		if err != nil || !addr.Is6() || addr.Is4In6() || addr.IsLoopback() {
+			continue
+		}
+		if addr.IsUnspecified() {
+			return nil // A wildcard listener can receive the original REDIRECT.
+		}
+		if addr.IsGlobalUnicast() && addr.Zone() == "" {
+			listeners = append(listeners, addr)
+		}
+	}
+	if len(listeners) == 0 {
+		return nil
+	}
+	targets := make(map[string][]netip.Addr)
+	for _, name := range g.HijackInterfaces {
+		iface, err := net.InterfaceByName(name)
+		if err != nil {
+			continue
+		}
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+		assigned := make(map[netip.Addr]bool)
+		for _, addr := range addrs {
+			if prefix, err := netip.ParsePrefix(addr.String()); err == nil {
+				assigned[prefix.Addr()] = true
+			}
+		}
+		for _, addr := range listeners {
+			if assigned[addr] {
+				targets[name] = append(targets[name], addr)
+			}
+		}
+	}
+	return targets
+}
+
+func dnsHijackNftScript(ifaces []string, port int, ipv6Targets map[string][]netip.Addr) []string {
 	if len(ifaces) == 0 || port < 1 {
 		return nil
 	}
@@ -178,6 +234,19 @@ func dnsHijackNftScript(ifaces []string, port int) []string {
 	b.WriteString("table inet egress_gate {\n")
 	b.WriteString("  chain hijack {\n")
 	b.WriteString("    type nat hook prerouting priority dstnat; policy accept;\n")
+	for _, name := range ifaces {
+		targets := ipv6Targets[name]
+		if len(targets) == 0 {
+			continue
+		}
+		// Preserve the destination when it already names a listener.
+		for _, addr := range targets[1:] {
+			fmt.Fprintf(&b, "    iifname %q ip6 daddr %s meta l4proto { tcp, udp } th dport 53 dnat ip6 to %s\n",
+				name, addr, netip.AddrPortFrom(addr, uint16(port)))
+		}
+		fmt.Fprintf(&b, "    iifname %q meta nfproto ipv6 meta l4proto { tcp, udp } th dport 53 dnat ip6 to %s\n",
+			name, netip.AddrPortFrom(targets[0], uint16(port)))
+	}
 	fmt.Fprintf(&b, "    iifname %s meta l4proto { tcp, udp } th dport 53 redirect to :%d\n", iif, port)
 	b.WriteString("  }\n")
 	b.WriteString("}\n")
@@ -195,7 +264,7 @@ func syncDNSHijack(g *GateFile) error {
 	if g == nil || !g.HijackDNS {
 		return clearDNSHijack()
 	}
-	return applyNft(dnsHijackNftScript(g.HijackInterfaces, g.Listen[0].Port), "DNS hijack")
+	return applyNft(dnsHijackNftScript(g.HijackInterfaces, g.Listen[0].Port, dnsHijackIPv6Targets(g)), "DNS hijack")
 }
 
 func clearDNSHijack() error {

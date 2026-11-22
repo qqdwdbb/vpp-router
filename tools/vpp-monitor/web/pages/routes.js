@@ -41,11 +41,15 @@ const RESTART_NOTE = '应用时会重启 Gate，局域网 DNS 会短暂中断。
 
 async function apply(path, body, description, note = RESTART_NOTE) {
   if (routes.busy) return false;
-  if (!confirm(`${description}\n\n${note}`)) return false;
+  if (note && !confirm(`${description}\n\n${note}`)) return false;
   routes.busy = true;
-  message('正在应用，等待 Gate 重新启动…');
+  message(note ? '正在应用，等待 Gate 重新启动…' : '正在保存…');
   try {
     routes.state = await postJSON(API + path, body);
+    if (!note && routes.state.pending?.reload) {
+      await postJSON(API + 'confirm', {});
+      routes.state = await fetchJSON(API);
+    }
     routes.order = null;
     message('');
     return true;
@@ -599,9 +603,8 @@ async function uploadFile() {
   const body = { name, content, overwrite: !!existing };
   let done;
   if (existing && existing.used_by.length) {
-    done = await apply('upload', body, `用上传的内容替换 ${name}，它正被 ${existing.used_by.join('、')} 使用。`);
+    done = await apply('upload', body, `用上传的内容替换 ${name}，它正被 ${existing.used_by.join('、')} 使用。`, null);
   } else {
-    if (existing && !confirm(`${name} 已存在，用上传的内容覆盖吗？`)) return;
     done = await act('upload', '正在保存…', body);
   }
   if (done) { $('upload-file').value = ''; $('upload-name').value = ''; message(`已保存 ${name}`); }
@@ -678,7 +681,7 @@ function renderFileChanges() {
 async function applyFile() {
   const additions = parsedAdditions();
   const description = `修改${KIND[routes.file.kind]} ${routes.file.name}：添加 ${additions.length} 个，删除 ${routes.remove.size} 个`;
-  const done = await apply('file', { path: routes.file.path, add: additions, remove: [...routes.remove] }, description);
+  const done = await apply('file', { path: routes.file.path, add: additions, remove: [...routes.remove] }, description, null);
   if (done) $('routes-file-dialog').close();
 }
 
@@ -689,7 +692,7 @@ export function start() {
   $('exit-save').onclick = saveExit;
   $('exit-dhcp').onchange = renderExits;
   $('routes-confirm').onclick = () => act('confirm', '正在确认…');
-  $('routes-rollback').onclick = () => { if (confirm('立即恢复到修改前？Gate 会再次重启。')) act('rollback', '正在恢复…'); };
+  $('routes-rollback').onclick = () => { if (confirm('立即恢复到修改前？')) act('rollback', '正在恢复…'); };
   $('routes-save-order').onclick = () => {
     const order = currentOrder().map(group => group.id);
     apply('order', { order }, `调整规则优先级：${order.join(' > ')}`);

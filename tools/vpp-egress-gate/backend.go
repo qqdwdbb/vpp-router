@@ -281,6 +281,9 @@ func (b *VPPBackend) SyncTProxy() error {
 		return err
 	}
 	rules := tproxyPortRules(b.Config)
+	if err := ensureTProxyHostSettings(rules); err != nil {
+		return err
+	}
 	script := tproxyPortNftScript(rules)
 	if len(rules) == 0 {
 		return clearNftChain(b.context(), "gate_tproxy", script, "lease TPROXY")

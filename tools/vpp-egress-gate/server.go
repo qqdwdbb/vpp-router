@@ -27,6 +27,7 @@ type Resolver interface {
 
 // Gate forwards a query, installs selected routes, then releases the answer.
 type Gate struct {
+	reloadLock sync.RWMutex
 	Controller Resolver
 	Upstream   Upstream
 	Timeout    time.Duration
@@ -64,6 +65,8 @@ func (g *Gate) Shutdown() {
 }
 
 func (g *Gate) Exchange(query []byte, tcp bool) []byte {
+	g.reloadLock.RLock()
+	defer g.reloadLock.RUnlock()
 	if err := g.context().Err(); err != nil {
 		return Servfail(query)
 	}

@@ -195,3 +195,39 @@ func TestVPPHijackKeeperAppliesOncePerVPP(t *testing.T) {
 		t.Fatalf("applied %d", applied)
 	}
 }
+
+func TestVPPHijackKeeperFollowsPrefixChanges(t *testing.T) {
+	captureWaitLog(t)
+	signature, applied := "old", 0
+	k := &vppHijackKeeper{
+		apply:      func() error { applied++; return nil },
+		generation: func() (string, error) { return "same-vpp", nil },
+		refresh:    func() (string, error) { return signature, nil },
+		problems:   failureLog{what: "test"},
+	}
+	k.ensure()
+	k.ensure()
+	signature = "new"
+	k.ensure()
+	k.ensure()
+	if applied != 2 {
+		t.Fatalf("applied %d times", applied)
+	}
+}
+
+func TestHijackSourcesIncludeDelegatedPrefix(t *testing.T) {
+	fixed := []netip.Prefix{netip.MustParsePrefix("fd00::/64")}
+	found := []netip.Prefix{
+		netip.MustParsePrefix("2001:db8:4b74::1/64"),
+		netip.MustParsePrefix("fd00::1/64"),
+		netip.MustParsePrefix("fe80::1/64"),
+	}
+	got := appendHijackPrefixes(fixed, found)
+	if len(got) != 2 || got[0].String() != "2001:db8:4b74::/64" || len(fixed) != 1 {
+		t.Fatalf("sources %v, fixed %v", got, fixed)
+	}
+	got = appendHijackPrefixes(fixed, []netip.Prefix{netip.MustParsePrefix("2001:db8:4b75::/64")})
+	if len(got) != 2 || got[0].String() != "2001:db8:4b75::/64" {
+		t.Fatal(got)
+	}
+}

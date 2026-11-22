@@ -11,6 +11,7 @@ import (
 	"go.fd.io/govpp/binapi/interface_types"
 	"go.fd.io/govpp/binapi/ip_neighbor"
 	"go.fd.io/govpp/binapi/ip_types"
+	"go.fd.io/govpp/binapi/tapv2"
 )
 
 // The VPP calls the LAN meter makes. They are main-thread API calls, but few and small: a
@@ -24,6 +25,7 @@ type meterVPP interface {
 	countersEnabled() (bool, error)
 	enableCounters(on bool) error
 	neighbors(sw uint32) ([]neighbor, error)
+	tapHosts() (map[uint32]string, error) // each TAP's Linux name
 }
 
 type neighbor struct {
@@ -178,4 +180,26 @@ func (s *realSystem) neighbors(sw uint32) ([]neighbor, error) {
 		}
 	}
 	return out, nil
+}
+
+func (s *realSystem) tapHosts() (map[uint32]string, error) {
+	conn, ch, err := s.connect()
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Disconnect()
+	defer ch.Close()
+	out := map[uint32]string{}
+	request := ch.SendMultiRequest(&tapv2.SwInterfaceTapV2Dump{SwIfIndex: interface_types.InterfaceIndex(^uint32(0))})
+	for {
+		var reply tapv2.SwInterfaceTapV2Details
+		stop, err := request.ReceiveReply(&reply)
+		if err != nil {
+			return nil, err
+		}
+		if stop {
+			return out, nil
+		}
+		out[reply.SwIfIndex] = strings.TrimRight(reply.HostIfName, "\x00")
+	}
 }

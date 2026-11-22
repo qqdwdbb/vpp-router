@@ -33,7 +33,7 @@ func NewHandler(collector *Collector, store *Store, nat *NATService, vpn *VPNSer
 	mux := http.NewServeMux()
 	mux.Handle("GET /", http.FileServerFS(static))
 	// The pages are one document that shows the part its path names.
-	for _, page := range []string{"GET /routes", "GET /vpn", "GET /interfaces", "GET /proxy", "GET /firewall", "GET /system", "GET /lan"} {
+	for _, page := range []string{"GET /routes", "GET /vpn", "GET /interfaces", "GET /proxy", "GET /firewall", "GET /system", "GET /lan", "GET /maint"} {
 		mux.HandleFunc(page, func(w http.ResponseWriter, r *http.Request) {
 			http.ServeFileFS(w, r, static, "index.html")
 		})

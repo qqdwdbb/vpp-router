@@ -6,6 +6,8 @@ import (
 	"log"
 	"net"
 	"net/netip"
+	"slices"
+	"sort"
 	"strings"
 
 	"go.fd.io/govpp/api"
@@ -438,11 +440,13 @@ type vppHijackKeeper struct {
 	generation func() (string, error)
 	done       string
 	problems   failureLog
+	refresh    func() (string, error)
+	signature  string
 }
 
 func newVPPHijackKeeper(cfg *Config, g *GateFile, backend Backend) *vppHijackKeeper {
 	wanted := vppHijackPolicies(g)
-	return &vppHijackKeeper{
+	k := &vppHijackKeeper{
 		apply: func() error { return applyVPPHijack(cfg, wanted) },
 		check: func() []string {
 			var problems []string
@@ -458,11 +462,88 @@ func newVPPHijackKeeper(cfg *Config, g *GateFile, backend Backend) *vppHijackKee
 		generation: backend.Generation,
 		problems:   failureLog{what: "DNS sent elsewhere is not going through Gate"},
 	}
+	k.refresh = func() (string, error) {
+		if len(g.HijackVPP) == 0 || len(g.LANInterfaces) == 0 {
+			return "", nil
+		}
+		next := *g
+		next.HijackVPP = append([]HijackVPPEntry(nil), g.HijackVPP...)
+		// A delegated prefix also covers Linux's global source addresses.
+		// Keep this resolver's own upstream queries out of interception.
+		addresses, err := net.InterfaceAddrs()
+		if err != nil {
+			return "", err
+		}
+		next.Listen = append([]Upstream(nil), g.Listen...)
+		for _, address := range addresses {
+			if prefix, err := netip.ParsePrefix(address.String()); err == nil && prefix.Addr().Is6() {
+				next.Listen = append(next.Listen, Upstream{Host: prefix.Addr().String()})
+			}
+		}
+		err = (vppDefaultRouteAPI{cfg: cfg, backend: backend}).session(func(s *vppAPISession) error {
+			for i, entry := range g.HijackVPP {
+				if !slices.Contains(g.LANInterfaces, entry.Interface) {
+					continue
+				}
+				prefixes, _, err := s.interfacePrefixes6([]string{entry.Interface})
+				if err != nil {
+					return err
+				}
+				next.HijackVPP[i].Sources = appendHijackPrefixes(entry.Sources, prefixes)
+			}
+			return nil
+		})
+		if err != nil {
+			return "", err
+		}
+		var parts []string
+		for _, address := range next.Listen {
+			parts = append(parts, address.Host)
+		}
+		sort.Strings(parts)
+		for _, entry := range next.HijackVPP {
+			parts = append(parts, entry.Interface)
+			for _, prefix := range entry.Sources {
+				parts = append(parts, prefix.String())
+			}
+		}
+		wanted = vppHijackPolicies(&next)
+		return strings.Join(parts, "|"), nil
+	}
+	return k
+}
+
+func appendHijackPrefixes(fixed, discovered []netip.Prefix) []netip.Prefix {
+	out := append([]netip.Prefix(nil), fixed...)
+	seen := map[netip.Prefix]bool{}
+	for _, prefix := range fixed {
+		seen[prefix] = true
+	}
+	for _, prefix := range discovered {
+		prefix = prefix.Masked()
+		if usableLANPrefix(prefix, nil) && !seen[prefix] {
+			out = append(out, prefix)
+			seen[prefix] = true
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].String() < out[j].String() })
+	return out
 }
 
 func (k *vppHijackKeeper) ensure() {
 	generation, err := k.generation()
-	if err != nil || generation == k.done {
+	if err != nil {
+		return
+	}
+	signature := ""
+	if k.refresh != nil {
+		signature, err = k.refresh()
+		if err != nil {
+			k.problems.failed(err)
+			return
+		}
+	}
+	if generation == k.done && signature == k.signature {
 		return
 	}
 	if err := k.apply(); err != nil {
@@ -470,6 +551,7 @@ func (k *vppHijackKeeper) ensure() {
 		return
 	}
 	k.done = generation
+	k.signature = signature
 	k.problems.recovered("VPP now sends DNS to Linux")
 	if k.check != nil {
 		for _, problem := range k.check() {

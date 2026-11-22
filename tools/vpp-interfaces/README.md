@@ -131,10 +131,10 @@ sudo systemctl enable --now vpp-interfaces
 
 ### 按设备统计流量
 
-面板“局域网”页的开关，默认关闭。开启后，在局域网网关接口（地址是 dnsmasq 发的网关的那个接口，网桥的 BVI）上挂两张 ACL：入方向按源地址、出方向按目的地址，每个设备地址一条放行规则，最后放行所有 IPv4 和 IPv6，不拦截任何包；并打开 ACL 插件的计数（VPP 全局开关，记下原来的状态，关闭时恢复）。这样无论流量之后走 NAT、Linux 上的代理、隧道还是 IPv6，都按设备计入。VPP 把每条规则的字节数记在统计段（`/acl/<编号>/matches`），`vpp-monitor` 读取时不用 VPP API，也不让 worker 暂停。
+面板“局域网”页的开关，默认关闭。开启后，在设备所在的网桥端口上挂两张 ACL。入方向先按目的地址、出方向先按源地址放行本地前缀，这些规则的计数不纳入设备流量。其余流量入方向按设备源地址、出方向按设备目的地址统计。两张 ACL 都放行所有流量。排除的范围包括设备 LAN、其他 LAN 网桥的前缀以及链路本地、广播和组播地址。VPP 在统计段（`/acl/<编号>/matches`）公布计数，`vpp-monitor` 直接读取。
 
 - 计数的地址：有效租约和静态分配的 IPv4 地址，加上 VPP 在这个接口上的邻居表里的全局地址（手机自己生成的 IPv6 地址就是这样找到的）。每分钟、修改 DHCP 后各检查一次，地址变了就原地替换规则（计数从零开始，`generation` 跟着变）；VPP 重启后 ACL 没了，或编号被别人占了，就重新建、重新挂。挂载用 `acl_interface_add_del`，不动接口上别人的 ACL。
-- 规则顺序写进 `--meter-file`，第 i 条规则统计 `rules[i]`；状态写进 `--meter-state`，本程序重启后照旧。
+- 规则顺序写进 `--meter-file`，ACL 先列出 `local_prefixes`，然后与 `rules` 逐项对应。状态写进 `--meter-state`，本程序重启后照旧。
 - 代价：经过网关的每个包多一次 ACL 查找。往局域网发的包（下载）还会从 BVI 以二层方式经过入方向 ACL，所以下载方向查两次。R6S 的 A55 小核用 64 字节小包打满时，上传方向转发能力约降 2.5%（只有规则）到 5%（加计数），下载方向估计约 10%；平时的流量下只是多占一点 CPU。
 - VPP 26.06 对 `acl_stats_intf_counters_enable` 回的是 `acl_del_reply`（acl.c 的 `REPLY_MACRO (VL_API_ACL_DEL_REPLY)`），所以按它接收回复，再从 `show acl-plugin tables mask` 读回开关状态确认。
 

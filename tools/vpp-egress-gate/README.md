@@ -97,6 +97,8 @@ sudo python3 install.py --binary dist/vpp-egress-gate-linux-arm64 --dry-run
 
 DoH、DoT 不会被劫持。
 
+当 `hijack_vpp.interface` 同时列在 `lan_interfaces` 中时，Gate 会把该接口当前的 IPv6 前缀加入 DNS 劫持的来源范围，并在前缀变化时更新 ACL。Linux 本机的 IPv6 源地址会排除，避免上游 DNS 查询循环。
+
 `hijack_vpp` 的可选字段 `via_interface` 指定通向 Linux 下一跳的 VPP 接口。默认与 `interface` 相同；VPN 入接口与 Linux 所在 LAN 不同时，可用 `{"interface":"wg0","via_interface":"loop0","via":["10.61.30.2"],"sources":["10.10.0.0/24"]}`，避免把 DNS 下一跳错误地送回隧道。该选项不改变非 DNS 流量的路由。
 
 没有这样的接口时不开启劫持，Gate 只监听 `127.0.0.1:1053`，而不经过 Gate 的域名不会下发路由，`install.py` 结束时会提示。已存在的配置不会被修改；`listen` 只有回环地址且没开 `hijack_dns` 时同样提示，本机已有解析器转发给 Gate 时可以不管。Gate 退出时撤掉两侧的劫持，被强杀时规则留到下次启动，这期间 LAN 的 DNS 不通，服务 5 秒后重启。
@@ -504,6 +506,9 @@ TPROXY 规则使用标记 1。手写时，Linux 必须已有相应的 fwmark 策
 代理须在指定端口开启透明接收。`tproxy_interface` 是流量进入 Linux 的接口，
 不一定与 VPP 中的 `tap2490` 同名。若这些规则由现有防火墙维护，省略
 `tproxy_port`、`tproxy_interface`，保留 Fake-IP DNS、地址池和 VPP 出口即可。
+
+同步 IPv6 TPROXY 规则时，Gate 把运行中的 `net.ipv4.tcp_early_demux` 设为 0。
+Linux 的 IPv6 TCP 也读取这个主机级设置。此项只写入运行中的内核，系统重启时失效。
 
 ## 8. Linux 内部接口出口：每个出口一个设备
 

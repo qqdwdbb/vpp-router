@@ -237,7 +237,11 @@ func run(args []string) error {
 		return err
 	}
 	if service.dhcp != nil {
-		if service.meter, err = NewMeter(opts.Meter, vpp, service.dhcp, vpp.read); err != nil {
+		hostTap := ""
+		if env, _, err := envValues(opts.RouterEnv); err == nil {
+			hostTap = env["HOST_TAP"] // the TAP to Linux is no device port
+		}
+		if service.meter, err = NewMeter(opts.Meter, vpp, service.dhcp, vpp.read, hostTap); err != nil {
 			return err
 		}
 		go service.meter.Run()

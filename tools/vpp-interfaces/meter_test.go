@@ -24,6 +24,7 @@ type fakeMeterVPP struct {
 	in, out  map[uint32][]uint32
 	counters bool
 	neigh    []neighbor
+	taps     map[uint32]string
 	calls    []string
 }
 
@@ -68,10 +69,11 @@ func (f *fakeMeterVPP) attachACL(sw, index uint32, input, add bool) error {
 	return nil
 }
 func (f *fakeMeterVPP) countersEnabled() (bool, error) { return f.counters, nil }
-func (f *fakeMeterVPP) enableCounters(on bool) error  { f.counters = on; return nil }
+func (f *fakeMeterVPP) enableCounters(on bool) error   { f.counters = on; return nil }
 func (f *fakeMeterVPP) neighbors(uint32) ([]neighbor, error) {
 	return f.neigh, nil
 }
+func (f *fakeMeterVPP) tapHosts() (map[uint32]string, error) { return f.taps, nil }
 
 func meterSetup(t *testing.T) (*Meter, *fakeMeterVPP, *dhcpFixture) {
 	t.Helper()
@@ -83,8 +85,9 @@ func meterSetup(t *testing.T) (*Meter, *fakeMeterVPP, *dhcpFixture) {
 		{IP: netip.MustParseAddr("10.61.30.101"), MAC: "02:00:00:00:30:02"},
 	}
 	live := func() (*liveState, error) { return installerLive(), nil }
-	// The fixture's LAN is 10.61.30.0/24 with gateway 10.61.30.1, which loop0 (index 3) holds.
-	m, err := NewMeter(MeterOptions{State: filepath.Join(f.dir, "meter-state.json"), Published: filepath.Join(f.dir, "run", "meter.json")}, vpp, f.d, live)
+	// The fixture's LAN is 10.61.30.0/24 with gateway 10.61.30.1, which loop0 (index 3), the
+	// BVI of bridge 1, holds; eth0 (index 1) is the bridge's only other member.
+	m, err := NewMeter(MeterOptions{State: filepath.Join(f.dir, "meter-state.json"), Published: filepath.Join(f.dir, "run", "meter.json")}, vpp, f.d, live, "vpp-host")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -122,15 +125,33 @@ func TestMeterCountsEveryDeviceAddressAndCleansUp(t *testing.T) {
 	if !slices.Equal(addrs, want) {
 		t.Fatalf("rules %v", addrs)
 	}
-	if status.Interface != "loop0" || !slices.Equal(vpp.in[3], []uint32{2, status.ACLIn}) || !slices.Equal(vpp.out[3], []uint32{status.ACLOut}) {
-		t.Fatalf("attached %+v in %v out %v", status, vpp.in[3], vpp.out[3])
+	// On the device port, as L2; the firewall's ACL on the gateway is left alone.
+	if status.Interface != "eth0" || !slices.Equal(vpp.in[1], []uint32{status.ACLIn}) || !slices.Equal(vpp.out[1], []uint32{status.ACLOut}) ||
+		!slices.Equal(vpp.in[3], []uint32{2}) || len(vpp.out[3]) != 0 {
+		t.Fatalf("attached %+v in %v out %v", status, vpp.in, vpp.out)
 	}
 	in := vpp.acls[status.ACLIn].rules
-	if len(in) != 6 || in[0].SrcPrefix.String() != "10.61.30.20/32" || in[3].SrcPrefix.String() != "2001:db8:30::5/128" ||
+	out := vpp.acls[status.ACLOut].rules
+	offset := len(status.LocalPrefixes)
+	if offset == 0 || len(in) != offset+6 || len(out) != offset+6 {
+		t.Fatalf("unexpected ACL sizes in %d out %d local %v", len(in), len(out), status.LocalPrefixes)
+	}
+	if !slices.Contains(status.LocalPrefixes, netip.MustParsePrefix("10.61.30.0/24")) {
+		t.Fatalf("LAN prefix not excluded: %v", status.LocalPrefixes)
+	}
+	for i, prefix := range status.LocalPrefixes {
+		if in[i].DstPrefix.String() != prefix.String() || out[i].SrcPrefix.String() != prefix.String() ||
+			in[i].SrcPrefix.Len != 0 || out[i].DstPrefix.Len != 0 ||
+			in[i].IsPermit != acl_types.ACL_ACTION_API_PERMIT || out[i].IsPermit != acl_types.ACL_ACTION_API_PERMIT {
+			t.Fatalf("local permit %s: input %+v output %+v", prefix, in[i], out[i])
+		}
+	}
+	in, out = in[offset:], out[offset:]
+	if in[0].SrcPrefix.String() != "10.61.30.20/32" || in[3].SrcPrefix.String() != "2001:db8:30::5/128" ||
 		in[4].SrcPrefix.String() != "0.0.0.0/0" || in[5].SrcPrefix.String() != "::/0" {
 		t.Fatalf("input rules %v", in)
 	}
-	if out := vpp.acls[status.ACLOut].rules; out[1].DstPrefix.String() != "10.61.30.101/32" || out[1].SrcPrefix.String() != "0.0.0.0/0" {
+	if out[1].DstPrefix.String() != "10.61.30.101/32" || out[1].SrcPrefix.String() != "0.0.0.0/0" {
 		t.Fatalf("output rules %v", out)
 	}
 	if !vpp.counters || published(t, m).Generation != status.Generation {
@@ -158,7 +179,7 @@ func TestMeterCountsEveryDeviceAddressAndCleansUp(t *testing.T) {
 	m.Reconcile()
 	after := m.Status()
 	if !slices.Equal(vpp.calls, []string{"create lan-meter-in", "create lan-meter-out"}) || after.ACLIn == status.ACLIn ||
-		vpp.acls[status.ACLIn].tag != "other" || !slices.Contains(vpp.in[3], after.ACLIn) || !vpp.counters {
+		vpp.acls[status.ACLIn].tag != "other" || !slices.Contains(vpp.in[1], after.ACLIn) || !vpp.counters {
 		t.Fatalf("not remade: %v %+v %v", vpp.calls, after, vpp.in)
 	}
 	// Off: detached, deleted, and the counters back off as they were before.
@@ -166,7 +187,7 @@ func TestMeterCountsEveryDeviceAddressAndCleansUp(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if status.Enabled || len(vpp.in[3]) != 0 || len(vpp.out[3]) != 0 || vpp.counters {
+	if status.Enabled || len(vpp.in[1]) != 0 || len(vpp.out[1]) != 0 || vpp.counters {
 		t.Fatalf("not cleaned: %+v in %v out %v counters %v", status, vpp.in, vpp.out, vpp.counters)
 	}
 	if len(vpp.acls) != 1 || vpp.acls[firstIn].tag != "other" {
@@ -185,7 +206,7 @@ func TestMeterLeavesCountersOnWhenTheyWereOn(t *testing.T) {
 		t.Fatal(err)
 	}
 	// A restart of this service finds the meter on, from its state file.
-	again, err := NewMeter(m.opts, vpp, m.dhcp, m.live)
+	again, err := NewMeter(m.opts, vpp, m.dhcp, m.live, m.hostTap)
 	if err != nil || !again.st.Enabled || again.st.CountersBefore == nil || !*again.st.CountersBefore {
 		t.Fatalf("state %+v %v", again.st, err)
 	}
@@ -207,4 +228,58 @@ func TestMeterWithoutTheGatewayInterface(t *testing.T) {
 		t.Fatalf("published %+v", s)
 	}
 	os.Remove(m.opts.Published)
+}
+
+func TestMeterPortsAreTheBridgeMembersFacingDevices(t *testing.T) {
+	m, vpp, _ := meterSetup(t)
+	live := installerLive()
+	live.Interfaces = append(live.Interfaces,
+		&liveInterface{Index: 7, Name: "tap0", Bridge: 1}, &liveInterface{Index: 8, Name: "tap5", Bridge: 1},
+		&liveInterface{Index: 9, Name: "lan1", Bridge: 2})
+	vpp.taps = map[uint32]string{7: "vpp-host", 8: "vm1"}
+	m.live = func() (*liveState, error) { return live, nil }
+	status, err := m.Set(true, "admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// eth0 and the VM's TAP, not the TAP to Linux, the BVI or another bridge's port.
+	if status.Interface != "eth0, tap5" || len(vpp.in[7]) != 0 || len(vpp.in[9]) != 0 || !slices.Equal(vpp.in[8], []uint32{status.ACLIn}) {
+		t.Fatalf("ports %q in %v", status.Interface, vpp.in)
+	}
+	// The VM's TAP leaves the bridge: the ACLs come off it.
+	live.Interfaces[len(live.Interfaces)-2].Bridge = 0
+	m.Reconcile()
+	if len(vpp.in[8]) != 0 || len(vpp.out[8]) != 0 || m.Status().Interface != "eth0" {
+		t.Fatalf("left on a former port: %v %v", vpp.in, m.Status().Interface)
+	}
+}
+
+func TestMeterMovesOffTheGatewayAfterAnUpgrade(t *testing.T) {
+	m, vpp, f := meterSetup(t)
+	// The state an earlier version left: ACLs 20 and 21 on loop0.
+	vpp.acls[20], vpp.acls[21] = fakeACL{tag: meterTagIn}, fakeACL{tag: meterTagOut}
+	vpp.in[3], vpp.out[3] = []uint32{2, 20}, []uint32{21}
+	write(t, m.opts.State, `{"enabled":true,"acl_in":20,"acl_out":21,"interface":3,"attached":true}`)
+	again, err := NewMeter(m.opts, vpp, f.d, m.live, "vpp-host")
+	if err != nil {
+		t.Fatal(err)
+	}
+	again.Reconcile()
+	if !slices.Equal(vpp.in[3], []uint32{2}) || len(vpp.out[3]) != 0 || !slices.Equal(vpp.in[1], []uint32{20}) || again.Status().Error != "" {
+		t.Fatalf("in %v out %v status %+v", vpp.in, vpp.out, again.Status())
+	}
+}
+
+func TestMeterWithoutABridgeUsesTheGatewayInterface(t *testing.T) {
+	m, vpp, _ := meterSetup(t)
+	live := installerLive()
+	for _, iface := range live.Interfaces {
+		if iface.Name == "loop0" {
+			iface.BVI, iface.Bridge = false, 0
+		}
+	}
+	m.live = func() (*liveState, error) { return live, nil }
+	if status, err := m.Set(true, "admin"); err != nil || status.Interface != "loop0" || !slices.Contains(vpp.in[3], status.ACLIn) {
+		t.Fatalf("%v %+v %v", err, status, vpp.in)
+	}
 }

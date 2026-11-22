@@ -135,6 +135,16 @@ textarea { width: 100%; font: 13px ui-monospace, Menlo, monospace; color: var(--
 #sys-nics td input { width: 9em; }
 #sys-nics-blocked-table th, #sys-nics-blocked-table td { text-align: left; vertical-align: top; }
 #sys-nics-blocked-table td:nth-child(5) { white-space: normal; min-width: 260px; }
+#lan-devices { table-layout: fixed; min-width: 880px; }
+#lan-devices th, #lan-devices td { box-sizing: border-box; text-align: left; padding-inline: 10px; }
+#lan-devices td.text { min-width: 0; overflow-wrap: anywhere; }
+#lan-devices th:nth-child(1) { width: 21%; }
+#lan-devices th:nth-child(2) { width: 8%; }
+#lan-devices th:nth-child(3) { width: 17%; }
+#lan-devices th:nth-child(4), #lan-devices th:nth-child(5) { width: 10%; }
+#lan-devices th:nth-child(6) { width: 13%; }
+#lan-devices th:nth-child(7) { width: 10%; }
+#lan-devices .row-actions { flex-wrap: wrap; }
 #routes-groups th:nth-child(1) { width: 6%; }
 #routes-groups th:nth-child(2) { width: 14%; }
 #routes-groups th:nth-child(3) { width: 10%; }
@@ -254,3 +264,18 @@ textarea { width: 100%; font: 13px ui-monospace, Menlo, monospace; color: var(--
 #sys-rx td, #sys-placement td { overflow: hidden; text-overflow: ellipsis; }
 #sys-rx select, #sys-placement select { width: 100%; max-width: 220px; }
 #thr-devices input { width: 80px; font: inherit; color: var(--ink); background: var(--page); border: 1px solid var(--border); border-radius: 6px; padding: 4px 8px; }
+/* Maintenance page. */
+#maint-units th, #maint-units td, #maint-other-units th, #maint-other-units td { text-align: left; }
+#maint-units th:last-child, #maint-units td:last-child, #maint-other-units th:last-child, #maint-other-units td:last-child { text-align: right; }
+#maint-units td:first-child, #maint-other-units td:first-child { white-space: normal; min-width: 200px; }
+.unit-desc { display: block; color: var(--muted); font-size: 12px; }
+.unit-failed { color: var(--critical); }
+.unit-active { color: var(--good); }
+.unit-changing { color: var(--serious); }
+a.button-link { display: inline-block; text-decoration: none; color: inherit; }
+a.button-link.strong { color: var(--page); }
+.log-view { margin: 8px 0 0; padding: 8px 10px; max-height: 60vh; min-height: 120px; overflow: auto; font: 12px/1.5 ui-monospace, Menlo, monospace; background: var(--page); border: 1px solid var(--border); border-radius: 6px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.log-view .p3 { color: var(--critical); }
+.log-view .p4 { color: var(--serious); }
+.log-view .src { color: var(--muted); }
+.test-view { min-height: 0; }

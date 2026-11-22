@@ -38,6 +38,8 @@ type Client struct {
 	Params   string    `json:"params,omitempty"` // the parameter request list, option 55
 	First    time.Time `json:"first"`
 	Last     time.Time `json:"last"`
+	// Older records may have been updated by replaying or expiring a lease.
+	LastConfirmed bool `json:"last_confirmed,omitempty"`
 }
 
 func (c Client) fingerprint() string { return c.Vendor + "|" + c.Params }
@@ -99,7 +101,11 @@ var dhcpEventActions = map[string]bool{"add": true, "old": true, "del": true, "i
 // dhcpEvent is the dhcp-script: "add|old|del MAC IP [hostname]", the rest in DNSMASQ_*
 // variables. It never fails, so that dnsmasq is never held up by it.
 func dhcpEvent(args []string, getenv func(string) string, now time.Time) int {
-	if len(args) < 3 || (args[0] != "add" && args[0] != "old" && args[0] != "del") {
+	if len(args) < 3 || (args[0] != "add" && args[0] != "old") {
+		return 0
+	}
+	// dnsmasq also sends "old" when it replays leases on startup or reload.
+	if args[0] == "old" && (getenv("DNSMASQ_DATA_MISSING") == "1" || getenv("DNSMASQ_INTERFACE") == "") {
 		return 0
 	}
 	mac, ok := normalMAC(args[1])
@@ -120,13 +126,12 @@ func dhcpEvent(args []string, getenv func(string) string, now time.Time) int {
 			c.First = now
 		}
 		c.Last = now
-		if args[0] != "del" {
-			c.IP = args[2]
-			for field, value := range map[*string]string{&c.Hostname: hostname, &c.ClientID: getenv("DNSMASQ_CLIENT_ID"),
-				&c.Vendor: getenv("DNSMASQ_VENDOR_CLASS"), &c.Params: getenv("DNSMASQ_REQUESTED_OPTIONS")} {
-				if value != "" {
-					*field = value
-				}
+		c.LastConfirmed = true
+		c.IP = args[2]
+		for field, value := range map[*string]string{&c.Hostname: hostname, &c.ClientID: getenv("DNSMASQ_CLIENT_ID"),
+			&c.Vendor: getenv("DNSMASQ_VENDOR_CLASS"), &c.Params: getenv("DNSMASQ_REQUESTED_OPTIONS")} {
+			if value != "" {
+				*field = value
 			}
 		}
 		clients[mac] = c
@@ -351,8 +356,10 @@ func (d *DHCP) devicesLocked(hosts []StaticHost, leases []Lease) ([]DeviceView, 
 			mv := MACView{MAC: m.MAC, Auto: m.Auto, Random: randomMAC(m.MAC), Hostname: names[m.MAC]}
 			if c, ok := clients[m.MAC]; ok {
 				mv.Vendor = c.Vendor
-				last := c.Last
-				mv.LastSeen = &last
+				if c.LastConfirmed && !c.Last.IsZero() {
+					last := c.Last
+					mv.LastSeen = &last
+				}
 			}
 			for _, l := range leases {
 				if l.MAC == m.MAC {

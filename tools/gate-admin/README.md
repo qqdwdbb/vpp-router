@@ -54,3 +54,5 @@ GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go test -c -o dist/gate-admin.test .
 **编辑规则**：`POST /gate/rule/edit`，`{"group","exit","dns","file":[…],"ranges":[…],"keywords":[…]}`，一次修改一组规则的出口、DNS、域名表、网段表和关键词，作为一次修改等待确认。`exit` 等于当前出口时不切换；`dns` 省略时用出口自带的 DNS，空字符串是默认 DNS。域名表和关键词写到组里每条规则；网段表按里面网段的地址族分给对应的规则，组里没有那个地址族时拒绝。规则里手写的 `domains` 保留，所有匹配条件都为空时拒绝，什么都没变时也拒绝。状态里每组带 `files`（域名表）和 `range_files`（网段表）。`POST /gate/defaults`，`{"exit","dns"}`，一次修改默认出口和默认 DNS，省略的项不变。
 
 每次改动都会备份文件、写入、用 `--sync-devices --dry-run` 校验、执行 `--sync-devices`、重启 Gate 并等待 DNS 应答。校验失败时什么都不改；Gate 没恢复或到期未确认时，恢复旧文件并再次重启。管理服务重启后会继续倒计时，已过期的立即恢复。
+
+修改正在使用的域名表或 IP 集合内容时，面板请求 Gate 热加载，并同步路由差异。确认超时或手动回滚也走热加载。集合从空变为启用等涉及出口设备变化的情况仍走重启流程。未使用的集合直接保存。

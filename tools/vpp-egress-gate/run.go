@@ -86,7 +86,7 @@ func Run(args []string) (err error) {
 		}
 	}()
 
-	// Configuration is loaded once, at startup.
+	// Collection contents can also be reloaded through the control socket.
 	controller, err := NewController(routePath, g.LeaseFile, NewVPPBackend, domainPath)
 	if err != nil {
 		return err
@@ -111,6 +111,9 @@ func Run(args []string) (err error) {
 	backend := NewVPPBackend(cfg)
 	defaults := newDefaultRouteKeeper(func() *Config { cfg, _ := controller.loaded(); return cfg }, vppDefaultRouteAPI{cfg: cfg, backend: backend})
 	if err = StartStateServer(cfg, stop, defaults.Status); err != nil {
+		return err
+	}
+	if err = startListReloadServer(cfg, gate, controller, stop); err != nil {
 		return err
 	}
 	// Subscribe before the first reconciliation so that no link change falls between them.

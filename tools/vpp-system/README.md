@@ -33,7 +33,9 @@ sudo systemctl enable --now vpp-system
 | `--nics-orig` | `/var/lib/vpp-router/nics.orig` | 安装器记录每块网卡原驱动的文件，加网卡时补上一行；空字符串不写 |
 | `--pci-ids` | `/usr/local/share/vpp-router/dpdk-pci-ids` | 安装器从 DPDK 构建产物生成的 PCI ID 表，判断这次编译的 PMD 支持哪些网卡 |
 | `--dpdk-plugin` | 从启动文件找 | VPP 的 `dpdk_plugin.so`，判断能否给同一 PCI 设备的几个口分别命名 |
-| `--unit-dir` | `/etc/systemd/system` | `--vpp-unit` 的单元文件所在目录，用来判断平台是否要在启动前初始化 RTL8125 |
+| `--unit-dir` | `/etc/systemd/system` | `--vpp-unit` 的单元文件所在目录，用来判断平台是否要在启动前初始化 RTL8125；维护页列出这里安装的服务 |
+| `--units` | 无 | 维护页在 `--unit-dir` 之外还要列出的单元，逗号分隔 |
+| `--backup` | `/etc/vpp,/var/lib/vpp-interfaces/devices.json,/var/lib/vpp-router/nics.orig` | 配置备份里的文件和目录，逗号分隔，另外总是加上路由器服务的单元文件 |
 
 ## 各项设置存在哪里、怎么生效
 
@@ -108,6 +110,53 @@ NAT 会话表太大、主堆内存不够时插件启用失败，VPP 照常启动
 ### 调速器
 
 写 `/sys/devices/system/cpu/cpufreq/policyN/scaling_governor`，只接受该策略 `scaling_available_governors` 里的值，写后读回。本服务启动时把 `system.json` 里的设置都写一次；别的程序（比如 rc.local）之后再改的，页面上显示“设置的是 X”。没有 cpufreq 的机器（虚拟机、固定频率）这一节为空。
+
+## 维护
+
+面板“维护”页面的后端。
+
+### 服务
+
+列出 `--unit-dir` 里管理员安装的服务（普通文件，不含模板 `@.service` 和指向 `/dev/null` 的屏蔽链接）、`--vpp-unit` 和 `--units`，用 `systemctl show` 读状态。下面这些算路由器的服务，排在前面，其余折叠在“其他服务”里：VPP 的单元，`After`、`Requires`、`Wants`、`BindsTo`、`PartOf`、`Requisite` 里有 VPP 单元的，单元文件里出现 `vpp`（不区分大小写）或运行 `gate-admin` 的。
+
+启动、停止、重启用 `systemctl … --no-block`，不等待完成，页面接着刷新状态。限制：
+
+- VPP 的单元、面板（连到 socket 的进程所在的单元，按 `SO_PEERCRED` 和 cgroup 找）和本程序只能重启：停止后面板无法再启动它们。
+- 重启面板和本程序用 `systemd-run --on-active=2s` 延迟执行，先回复请求。重启主机也一样。
+- 本程序或 `vpp-interfaces` 有改动等待确认时，不能重启 VPP 或主机：重启会让确认流程失去意义。
+
+### 日志
+
+`journalctl -o json`，单元必须是列出的服务，`kernel` 读内核日志（`--dmesg`），空的读全部。关键词不区分大小写，在本程序里过滤（不依赖 journalctl 的 `--grep`，它要 PCRE2），有关键词时先读最后 2 万行再挑。每次最多返回 2000 行，带 journal 游标，页面用 `after` 从游标继续，做实时跟踪。`vpp:logging` 是 VPP 的 `show logging`。下载用 `-o short-iso`，最多 5 万行。
+
+### 网络测试
+
+| 测试 | 做法 |
+|---|---|
+| ping | Linux：`ping -n -c N -i 0.5 -W 2 [-4/-6] [-I 接口]`。VPP：`ping 地址 repeat N interval 0.5 [source 接口]`，域名先用主机的 DNS 解析 |
+| 路由跟踪 | Linux 的 traceroute（或 busybox）：`traceroute -n -w 2 -q 1 -m 20 [-4/-6] [-i 接口]`。GNU inetutils 的 traceroute 没有 `-n`、不能指定接口、只支持 IPv4：`traceroute -w 2 -q 1 -m 20`，IPv6 改用 tracepath。没有 traceroute 时用 `tracepath -n -m 20 [-4/-6]`（不能指定接口）。有 `stdbuf` 时按行输出，35 秒到时停止也能看到已经走过的跳 |
+| DNS | Go 的解析器，A、AAAA、CNAME、MX、TXT、NS。不填服务器时用主机的设置；填了直接问它，可以绑定接口 |
+| HTTP | GET，不跟随跳转，读最多 1 MiB，报告解析、连接、TLS、第一个字节和完成的时间、状态码和证书。可以绑定接口（`SO_BINDTODEVICE`） |
+
+目标只接受 IP 地址和域名（HTTP 是网址），不会被命令当成选项。同一时间只跑一个测试，最长 40 秒。
+
+### 配置备份
+
+把 `--backup` 的文件和目录，以及路由器服务的单元文件和 drop-in 目录，按原路径打包成 `.tar.gz`，加一个 `MANIFEST.txt`。符号链接按链接保存，大于 16 MiB 的文件跳过并记在清单里。不含面板的账号和证书（`/var/lib/vpp-monitor`）。
+
+### 接口
+
+| 路径 | 内容 |
+|---|---|
+| `GET /system/maint/units` | 服务、VPP 单元名、不能重启 VPP 的原因、开机时间、备份的路径 |
+| `POST /system/maint/units` | `{"unit","action"}`，`action` 是 `start`、`stop`、`restart`，或 `reboot`（不需要 `unit`）；返回新的服务列表 |
+| `GET /system/maint/logs` | 参数 `unit`、`lines`、`since`（Unix 秒）、`boot=1`、`priority`（0–7）、`grep`、`after`（游标） |
+| `GET /system/maint/logs.txt` | 同上，下载文本 |
+| `GET /system/maint/sources` | 测试可用的 Linux 接口、VPP 接口和路由跟踪工具 |
+| `POST /system/maint/test` | `{"kind","target","from","interface","family","count","server","type"}` |
+| `GET /system/maint/backup` | 下载配置备份 |
+
+每个操作都写入服务日志（`audit:`）。
 
 ## 配置文件
 

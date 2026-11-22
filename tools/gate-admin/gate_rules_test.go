@@ -27,8 +27,12 @@ type fakeAdminSystem struct {
 	routesErr error
 }
 
-func (f *fakeAdminSystem) check() error   { f.calls = append(f.calls, "check"); return f.checkErr }
-func (f *fakeAdminSystem) sync() error    { f.calls = append(f.calls, "sync"); return nil }
+func (f *fakeAdminSystem) check() error { f.calls = append(f.calls, "check"); return f.checkErr }
+func (f *fakeAdminSystem) sync() error  { f.calls = append(f.calls, "sync"); return nil }
+func (f *fakeAdminSystem) reload() (bool, error) {
+	f.calls = append(f.calls, "sync", "reload")
+	return false, nil
+}
 func (f *fakeAdminSystem) restart() error { f.calls = append(f.calls, "restart"); return nil }
 func (f *fakeAdminSystem) ready() error   { f.calls = append(f.calls, "ready"); return f.readyErr }
 func (f *fakeAdminSystem) stop() error    { f.calls = append(f.calls, "stop"); return f.stopErr }
@@ -618,7 +622,7 @@ func TestReplacingAFileInUseGoesThroughConfirmation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if state.Pending == nil || strings.Join(f.sys.calls, ",") != "check,sync,restart,ready" {
+	if state.Pending == nil || strings.Join(f.sys.calls, ",") != "check,sync,reload" {
 		t.Fatalf("pending %v, calls %v", state.Pending, f.sys.calls)
 	}
 	if err := f.admin.Rollback("admin"); err != nil {

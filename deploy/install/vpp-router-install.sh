@@ -2804,7 +2804,7 @@ EOF
 	if [ -n "${PLAT:-}" ] && [ -n "${PLAT_MAX_WORKERS:-}" ]; then max_workers=" --max-workers $PLAT_MAX_WORKERS"; fi
 	cat >"$UNIT_DIR/vpp-system.service" <<EOF
 [Unit]
-Description=VPP system settings: threads, DPDK cards, RX modes and placement, NAT44-EI, CPU governors
+Description=VPP system settings and maintenance: threads, DPDK cards, RX modes and placement, NAT44-EI, CPU governors, services, logs, network tests, backup
 # 改线程、加网卡和改 NAT 会话表时重启 VPP 并等待确认，所以不随 VPP 停止；VPP 重启后由它恢复收包设置
 # 加的网卡写进 router.env 的 NICS（vpp-router-ctl prep 绑定），原驱动记入 nics.orig（--restore 交还）
 

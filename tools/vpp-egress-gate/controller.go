@@ -30,6 +30,7 @@ type Controller struct {
 	BackendFactory   BackendFactory
 
 	mutex       sync.Mutex
+	reloadLock  sync.RWMutex
 	cacheLock   sync.Mutex
 	flightLock  sync.Mutex
 	orderedLock sync.Mutex
@@ -184,14 +185,14 @@ func seenEqual(a, b map[SeenKey]int64) bool {
 	return true
 }
 
-// loaded returns the configuration read at startup, with its current exclusions.
+// loaded returns the current configuration and exclusions.
 func (c *Controller) loaded() (*Config, []Rule) {
 	c.cacheLock.Lock()
 	defer c.cacheLock.Unlock()
 	return c.config, c.rules
 }
 
-// load reads the configuration, once, when the controller starts.
+// load reads configuration and collection contents while route writers are excluded.
 func (c *Controller) load() error {
 	rulePaths, err := DomainRoutePaths(c.DomainRoutesPath)
 	if err != nil {
@@ -981,6 +982,8 @@ func (c *Controller) ensure(ctx context.Context, cfg *Config, backend Backend, r
 }
 
 func (c *Controller) Reconcile(ctx context.Context, records []Record, q *Question, forceAudit bool) error {
+	c.reloadLock.RLock()
+	defer c.reloadLock.RUnlock()
 	if ctx == nil {
 		ctx = context.Background()
 	}

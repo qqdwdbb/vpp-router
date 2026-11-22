@@ -2,7 +2,7 @@
 
 ## 拓扑
 
-一个物理口（`nic0`）承载：不打标的 LAN、VLAN 100 的 WAN 和 VLAN 10 的 VPS 桥。VPP 持有 LAN 网关，Linux 通过 TAP 提供 DHCP、DNS 和控制面服务。独立的管理口（`mgmt0`）始终由 Linux 持有，切换前必须确认它可以独立登录。
+一个物理口（`nic0`）承载：不打标的 LAN、VLAN 100 的 WAN。VPP 持有 LAN 网关，Linux 通过 TAP 提供 DHCP、DNS 和控制面服务。独立的管理口（`mgmt0`）始终由 Linux 持有，切换前必须确认它可以独立登录。
 
 ## 步骤
 

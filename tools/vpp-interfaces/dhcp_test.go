@@ -211,8 +211,11 @@ func TestDHCPScriptRecordsWhatClientsSay(t *testing.T) {
 	phone := map[string]string{"DNSMASQ_SUPPLIED_HOSTNAME": "Pixel-8", "DNSMASQ_VENDOR_CLASS": "android-dhcp-14",
 		"DNSMASQ_REQUESTED_OPTIONS": "1,3,6,15,26,28,51,58,59,43,114,108", "DNSMASQ_CLIENT_ID": "01:da:00:00:00:00:01"}
 	event(t, path, dhcpNow, phone, "add", "DA:00:00:00:00:01", "10.61.30.150")
-	event(t, path, dhcpNow.Add(time.Hour), map[string]string{}, "old", "da:00:00:00:00:01", "10.61.30.151")
+	event(t, path, dhcpNow.Add(time.Hour), map[string]string{"DNSMASQ_INTERFACE": "vpp-host"}, "old", "da:00:00:00:00:01", "10.61.30.151")
 	event(t, path, dhcpNow.Add(2*time.Hour), map[string]string{}, "del", "da:00:00:00:00:01", "10.61.30.151")
+	event(t, path, dhcpNow.Add(3*time.Hour), map[string]string{"DNSMASQ_DATA_MISSING": "1"}, "old", "da:00:00:00:00:01", "10.61.30.151")
+	event(t, path, dhcpNow.Add(4*time.Hour), map[string]string{"DNSMASQ_INTERFACE": "vpp-host", "DNSMASQ_DATA_MISSING": "1"}, "old", "da:00:00:00:00:01", "10.61.30.151")
+	event(t, path, dhcpNow.Add(5*time.Hour), map[string]string{}, "old", "da:00:00:00:00:02", "10.61.30.152")
 	event(t, path, dhcpNow, phone, "add", "00:01:00:01:aa:bb:cc", "fd00::5") // DHCPv6
 	event(t, path, dhcpNow, phone, "tftp", "1000", "10.61.30.150", "/boot")
 	clients, err := readClients(path)
@@ -224,8 +227,36 @@ func TestDHCPScriptRecordsWhatClientsSay(t *testing.T) {
 		t.Fatalf("clients %+v", clients)
 	}
 	if c.Hostname != "Pixel-8" || c.Vendor != "android-dhcp-14" || c.Params == "" || c.IP != "10.61.30.151" ||
-		!c.First.Equal(dhcpNow) || !c.Last.Equal(dhcpNow.Add(2*time.Hour)) {
+		!c.First.Equal(dhcpNow) || !c.Last.Equal(dhcpNow.Add(time.Hour)) || !c.LastConfirmed {
 		t.Fatalf("client %+v", c)
+	}
+}
+
+func TestDeviceLastSeenRequiresConfirmedDHCPEvent(t *testing.T) {
+	f := newDHCPFixture(t)
+	const mac = "02:00:00:00:30:02"
+	if err := withClients(f.d.opts.Clients, func(clients map[string]Client) bool {
+		clients[mac] = Client{First: dhcpNow.Add(-time.Hour), Last: dhcpNow}
+		return true
+	}); err != nil {
+		t.Fatal(err)
+	}
+	state, err := f.d.State()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dev := deviceOf(state, mac)
+	if dev == nil || dev.LastSeen != nil {
+		t.Fatalf("legacy lease replay appeared as activity: %+v", dev)
+	}
+	event(t, f.d.opts.Clients, dhcpNow, nil, "add", mac, "10.61.30.101")
+	state, err = f.d.State()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dev = deviceOf(state, mac)
+	if dev == nil || dev.LastSeen == nil || !dev.LastSeen.Equal(dhcpNow) {
+		t.Fatalf("confirmed activity missing: %+v", dev)
 	}
 }
 

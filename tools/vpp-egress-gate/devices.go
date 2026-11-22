@@ -1554,6 +1554,10 @@ func loadFixedRules(ctx context.Context, state *DeviceState) error {
 }
 
 func setSysctl(name, value string) error {
+	return setSysctlValue(name, value, true)
+}
+
+func setSysctlValue(name, value string, record bool) error {
 	path := filepath.Join(linuxSysctlRoot, name)
 	current, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
@@ -1562,7 +1566,7 @@ func setSysctl(name, value string) error {
 	if err == nil && strings.TrimSpace(string(current)) == value {
 		return nil
 	}
-	if err == nil {
+	if err == nil && record {
 		err = recordHostSetting(name, strings.TrimSpace(string(current)), value)
 	}
 	if err == nil {
@@ -1571,7 +1575,7 @@ func setSysctl(name, value string) error {
 	if err != nil {
 		return fmt.Errorf("cannot set %s: %w", name, err)
 	}
-	log.Printf("devices: set %s to %s for Linux exits", name, value)
+	log.Printf("host setting: set %s to %s", name, value)
 	return nil
 }
 
