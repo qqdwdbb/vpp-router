@@ -29,6 +29,7 @@ type fakeSystem struct {
 	addrs      string
 	ipCommands []string
 	ipFail     string
+	natSummary string // what show nat44 summary prints: NAT44-ED's summary, or unknown input for EI
 }
 
 func (f *fakeSystem) ip(args ...string) error {
@@ -54,6 +55,12 @@ func (f *fakeSystem) vppCLI(command string) (string, error) {
 	}
 	if command == "show wireguard peer" {
 		return f.peers, nil
+	}
+	if command == "show nat44 summary" {
+		if f.natSummary == "" {
+			return "show nat44: unknown input `summary'", nil
+		}
+		return f.natSummary, nil
 	}
 	if command == "show interface" {
 		return f.ifaces, f.ifacesErr
@@ -420,6 +427,27 @@ func TestWireGuardConfigChoosesFreeInstanceAndPort(t *testing.T) {
 	}
 }
 
+func TestWireGuardConfigUnderNATED(t *testing.T) {
+	f := newFixture(t)
+	f.admin.opts.NATInterface = "eth0"
+	f.sys.natSummary = "max translations per thread: 65536 fib 0\ntotal sessions: 0 (timed out: 0)\n"
+	addWGConfig(t, f)
+	if _, err := f.admin.StartWireGuardConfig("wg100", "admin"); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(onlyChanges(f.sys.commands), "\n"); !strings.Contains(got, "\nnat44 add identity mapping external eth0 udp 51900\n") {
+		t.Fatalf("commands:\n%s", got)
+	}
+	f.sys.ifaces = wg0Line + "wg100                             12     up          1400/0/0/0\n"
+	f.sys.commands = nil
+	if _, err := f.admin.StopWireGuardConfig("wg100", "admin"); err != nil {
+		t.Fatal(err)
+	}
+	if got := onlyChanges(f.sys.commands); len(got) == 0 || got[0] != "nat44 add identity mapping external eth0 udp 51900 del" {
+		t.Fatalf("commands:\n%s", strings.Join(got, "\n"))
+	}
+}
+
 func TestWireGuardConfigStartAndStop(t *testing.T) {
 	f := newFixture(t)
 	f.admin.opts.NATInterface = "eth0"
@@ -768,6 +796,54 @@ func TestCommandsRunAfterUpAndBeforeDown(t *testing.T) {
 	got := onlyChanges(f.sys.commands)
 	if len(got) == 0 || got[0] != "set interface nat66 in wg100 del" || got[len(got)-1] != "wireguard delete wg100" {
 		t.Fatalf("commands:\n%s", strings.Join(got, "\n"))
+	}
+}
+
+// NAT44 commands run in the form of the plugin VPP runs, whichever form they were written in.
+// Under ED the context is not run, and the pool address it named loses its tenant-vrf.
+func TestNATCommandsFollowTheRunningPlugin(t *testing.T) {
+	f := newFixture(t)
+	afterUp := "set interface nat44 ei out wg100 output-feature\nnat44 ei add address 10.1.5.2 tenant-vrf 101\nnat44 ei context wg100 loop101\nset interface nat66 in wg100\n"
+	beforeDown := "nat44 ei context wg100 loop101 del\nset interface nat44 ei out wg100 output-feature del\n"
+	if _, err := f.admin.AddWireGuardConfig("home", "10.61.10.2", wgConf, afterUp, beforeDown, "", false, "admin"); err != nil {
+		t.Fatal(err)
+	}
+	f.sys.natSummary = "max translations per thread: 65536\n"
+	if _, err := f.admin.StartWireGuardConfig("wg100", "admin"); err != nil {
+		t.Fatal(err)
+	}
+	want := append(wgStartCommands(), "set interface nat44 out wg100 output-feature", "nat44 add address 10.1.5.2", "set interface nat66 in wg100")
+	if got := onlyChanges(f.sys.commands); strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("commands:\n%s", strings.Join(got, "\n"))
+	}
+	f.sys.ifaces = wg0Line + "wg100                             12     up          1400/0/0/0\n"
+	f.sys.commands = nil
+	if _, err := f.admin.StopWireGuardConfig("wg100", "admin"); err != nil {
+		t.Fatal(err)
+	}
+	if got := onlyChanges(f.sys.commands); len(got) == 0 || got[0] != "set interface nat44 out wg100 output-feature del" {
+		t.Fatalf("commands:\n%s", strings.Join(got, "\n"))
+	}
+	stored, _ := f.admin.loadWGStore()
+	if strings.Join(stored.Configs[1].AfterUp, "\n")+"\n" != afterUp {
+		t.Fatal("the stored commands changed")
+	}
+	// Under EI all of it runs as written.
+	f.sys.natSummary = ""
+	f.sys.ifaces = wg0Line
+	f.sys.commands = nil
+	if _, err := f.admin.StartWireGuardConfig("wg100", "admin"); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(onlyChanges(f.sys.commands), "\n"); !strings.Contains(got, strings.TrimSuffix(afterUp, "\n")) {
+		t.Fatalf("commands:\n%s", got)
+	}
+	// Under EI, ED forms get the word.
+	if got := natCommandFor("nat44 add identity mapping external eth0 udp 500", true); got != "nat44 ei add identity mapping external eth0 udp 500" {
+		t.Fatal(got)
+	}
+	if got := natCommandFor("nat44 add static mapping tcp local 10.0.0.2 80 external eth0 80 twice-nat", true); got != "nat44 add static mapping tcp local 10.0.0.2 80 external eth0 80 twice-nat" {
+		t.Fatal(got)
 	}
 }
 

@@ -16,6 +16,7 @@ import (
 	"go.fd.io/govpp/binapi/interface_types"
 	"go.fd.io/govpp/binapi/ip"
 	"go.fd.io/govpp/binapi/ip_types"
+	"go.fd.io/govpp/binapi/nat44_ed"
 	"go.fd.io/govpp/binapi/nat44_ei"
 	"go.fd.io/govpp/core"
 )
@@ -31,7 +32,8 @@ type iface struct {
 	Addrs []netip.Prefix
 }
 
-// mapping is a NAT44-EI static or identity mapping. One made on an interface shows twice in
+// mapping is a NAT44 static or identity mapping, of NAT44-EI or NAT44-ED, whichever plugin VPP
+// runs; both behave alike here. One made on an interface shows twice in
 // VPP's dumps: as the request on the interface (ExternalIf set) and, once the interface has
 // an address, as the mapping on that address (ExternalIf is noIndex).
 type mapping struct {
@@ -57,9 +59,9 @@ type aclList struct{ Input, Output []uint32 }
 // vppState is one reading of what the firewall depends on.
 type vppState struct {
 	Interfaces []iface
-	// NATOutside are the interfaces NAT44-EI translates traffic leaving by (output feature).
+	// NATOutside are the interfaces NAT44 translates traffic leaving by (output feature).
 	NATOutside []uint32
-	NAT        bool // the NAT44-EI API is there
+	NAT        bool // the NAT44-EI or NAT44-ED API is there
 	ACL        bool // the ACL API is there
 	// Statics says Mappings has the static mappings too, not only the identity mappings.
 	Statics  bool
@@ -89,7 +91,7 @@ func (s *vppState) byIndex(index uint32) *iface {
 // vppAPI is what the service does to VPP. One value is one connection.
 type vppAPI interface {
 	// Read reads the state; addresses for every interface when all, else for wanted only.
-	// Static mappings only when statics: NAT44-EI's dump holds VPP's worker barrier while it
+	// Static mappings only when statics: NAT44's dump holds VPP's worker barrier while it
 	// lists them all, thousands with large ranges.
 	Read(all, statics bool, wanted func(name string, natOutside bool) bool) (*vppState, error)
 	Mapping(m mapping, add bool) error
@@ -103,6 +105,30 @@ type vppAPI interface {
 type realVPP struct {
 	conn *core.Connection
 	ch   api.Channel
+	// mode is the NAT44 plugin VPP runs, found on first use: "ei", "ed" or "none".
+	mode string
+}
+
+// natMode finds which NAT44 plugin's API VPP has; only the loaded plugin's messages are in
+// its table.
+func (v *realVPP) natMode() string {
+	if v.mode != "" {
+		return v.mode
+	}
+	switch {
+	case v.ch.CheckCompatiblity((*nat44_ed.Nat44AddDelStaticMapping)(nil), (*nat44_ed.Nat44AddDelIdentityMapping)(nil),
+		(*nat44_ed.Nat44StaticMappingDump)(nil), (*nat44_ed.Nat44StaticMappingDetails)(nil),
+		(*nat44_ed.Nat44IdentityMappingDump)(nil), (*nat44_ed.Nat44IdentityMappingDetails)(nil),
+		(*nat44_ed.Nat44EdOutputInterfaceGet)(nil), (*nat44_ed.Nat44EdOutputInterfaceGetReply)(nil), (*nat44_ed.Nat44EdOutputInterfaceDetails)(nil)) == nil:
+		v.mode = "ed"
+	case v.ch.CheckCompatiblity((*nat44_ei.Nat44EiAddDelStaticMapping)(nil), (*nat44_ei.Nat44EiAddDelIdentityMapping)(nil),
+		(*nat44_ei.Nat44EiStaticMappingDump)(nil), (*nat44_ei.Nat44EiStaticMappingDetails)(nil),
+		(*nat44_ei.Nat44EiIdentityMappingDump)(nil), (*nat44_ei.Nat44EiIdentityMappingDetails)(nil)) == nil:
+		v.mode = "ei"
+	default:
+		v.mode = "none"
+	}
+	return v.mode
 }
 
 func dialVPP(socket string) (vppAPI, error) {
@@ -175,9 +201,7 @@ func (v *realVPP) Read(all, statics bool, wanted func(string, bool) bool) (*vppS
 		st.Interfaces = append(st.Interfaces, iface{Index: uint32(d.SwIfIndex), Name: strings.TrimRight(d.InterfaceName, "\x00")})
 	}
 
-	st.NAT = v.ch.CheckCompatiblity((*nat44_ei.Nat44EiAddDelStaticMapping)(nil), (*nat44_ei.Nat44EiAddDelIdentityMapping)(nil),
-		(*nat44_ei.Nat44EiStaticMappingDump)(nil), (*nat44_ei.Nat44EiStaticMappingDetails)(nil),
-		(*nat44_ei.Nat44EiIdentityMappingDump)(nil), (*nat44_ei.Nat44EiIdentityMappingDetails)(nil)) == nil
+	st.NAT = v.natMode() != "none"
 	if st.NAT {
 		if st.NATOutside, err = v.natOutside(); err != nil {
 			return nil, err
@@ -244,6 +268,9 @@ func (v *realVPP) Read(all, statics bool, wanted func(string, bool) bool) (*vppS
 // natOutside reads the output-feature interfaces. VPP 23.10 and later list them with a
 // cursor get; older ones with a dump.
 func (v *realVPP) natOutside() ([]uint32, error) {
+	if v.natMode() == "ed" {
+		return v.edOutside()
+	}
 	var out []uint32
 	if v.ch.CheckCompatiblity((*nat44_ei.Nat44EiOutputInterfaceGet)(nil), (*nat44_ei.Nat44EiOutputInterfaceGetReply)(nil), (*nat44_ei.Nat44EiOutputInterfaceDetails)(nil)) == nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -294,7 +321,85 @@ func (v *realVPP) natOutside() ([]uint32, error) {
 	return out, nil
 }
 
+// edOutside is natOutside for NAT44-ED, which has only the cursor get.
+func (v *realVPP) edOutside() ([]uint32, error) {
+	var out []uint32
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	stream, err := v.conn.NewStream(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer stream.Close()
+	cursor := uint32(0)
+	for round := 0; round < 64; round++ {
+		if err := stream.SendMsg(&nat44_ed.Nat44EdOutputInterfaceGet{Cursor: cursor}); err != nil {
+			return nil, fmt.Errorf("读取 NAT 出口：%w", err)
+		}
+		for {
+			msg, err := stream.RecvMsg()
+			if err != nil {
+				return nil, fmt.Errorf("读取 NAT 出口：%w", err)
+			}
+			if d, ok := msg.(*nat44_ed.Nat44EdOutputInterfaceDetails); ok {
+				out = append(out, uint32(d.SwIfIndex))
+				continue
+			}
+			reply, ok := msg.(*nat44_ed.Nat44EdOutputInterfaceGetReply)
+			if !ok {
+				return nil, fmt.Errorf("读取 NAT 出口：意外的消息 %s", msg.GetMessageName())
+			}
+			if reply.Retval == -165 && reply.Cursor != noIndex {
+				cursor = reply.Cursor
+				break
+			}
+			return out, nil
+		}
+	}
+	return out, nil
+}
+
+// edMappings is mappings for NAT44-ED, whose dumps have the same shape.
+func (v *realVPP) edMappings(withStatics bool) ([]mapping, error) {
+	var out []mapping
+	if withStatics {
+		statics, err := dumpAll(v.ch, &nat44_ed.Nat44StaticMappingDump{}, func() (*nat44_ed.Nat44StaticMappingDetails, api.Message) {
+			d := &nat44_ed.Nat44StaticMappingDetails{}
+			return d, d
+		})
+		if err != nil {
+			return nil, fmt.Errorf("读取 NAT 静态映射：%w", err)
+		}
+		for _, d := range statics {
+			m := mapping{Proto: d.Protocol, ExternalPort: d.ExternalPort, ExternalIf: uint32(d.ExternalSwIfIndex),
+				LocalIP: netip.AddrFrom4(d.LocalIPAddress), LocalPort: d.LocalPort, Tag: strings.TrimRight(d.Tag, "\x00")}
+			if m.ExternalIf == noIndex {
+				m.ExternalIP = netip.AddrFrom4(d.ExternalIPAddress)
+			}
+			out = append(out, m)
+		}
+	}
+	identities, err := dumpAll(v.ch, &nat44_ed.Nat44IdentityMappingDump{}, func() (*nat44_ed.Nat44IdentityMappingDetails, api.Message) {
+		d := &nat44_ed.Nat44IdentityMappingDetails{}
+		return d, d
+	})
+	if err != nil {
+		return nil, fmt.Errorf("读取 NAT identity mapping：%w", err)
+	}
+	for _, d := range identities {
+		m := mapping{Identity: true, Proto: d.Protocol, ExternalPort: d.Port, ExternalIf: uint32(d.SwIfIndex), Tag: strings.TrimRight(d.Tag, "\x00")}
+		if m.ExternalIf == noIndex {
+			m.ExternalIP = netip.AddrFrom4(d.IPAddress)
+		}
+		out = append(out, m)
+	}
+	return out, nil
+}
+
 func (v *realVPP) mappings(withStatics bool) ([]mapping, error) {
+	if v.natMode() == "ed" {
+		return v.edMappings(withStatics)
+	}
 	var out []mapping
 	var statics []*nat44_ei.Nat44EiStaticMappingDetails
 	var err error
@@ -340,6 +445,19 @@ func ip4(addr netip.Addr) ip_types.IP4Address {
 }
 
 func (v *realVPP) Mapping(m mapping, add bool) error {
+	if v.natMode() == "ed" {
+		if m.Identity {
+			reply := &nat44_ed.Nat44AddDelIdentityMappingReply{}
+			err := v.ch.SendRequest(&nat44_ed.Nat44AddDelIdentityMapping{IsAdd: add, Protocol: m.Proto, Port: m.ExternalPort,
+				SwIfIndex: interface_types.InterfaceIndex(m.ExternalIf), VrfID: noIndex, Tag: m.Tag}).ReceiveReply(reply)
+			return checkRetval("NAT identity mapping", reply.Retval, err)
+		}
+		reply := &nat44_ed.Nat44AddDelStaticMappingReply{}
+		err := v.ch.SendRequest(&nat44_ed.Nat44AddDelStaticMapping{IsAdd: add, LocalIPAddress: ip4(m.LocalIP), Protocol: m.Proto,
+			LocalPort: m.LocalPort, ExternalPort: m.ExternalPort, ExternalSwIfIndex: interface_types.InterfaceIndex(m.ExternalIf),
+			VrfID: noIndex, Tag: m.Tag}).ReceiveReply(reply)
+		return checkRetval(fmt.Sprintf("NAT 静态映射 %s %d", protoName(m.Proto), m.ExternalPort), reply.Retval, err)
+	}
 	if m.Identity {
 		reply := &nat44_ei.Nat44EiAddDelIdentityMappingReply{}
 		err := v.ch.SendRequest(&nat44_ei.Nat44EiAddDelIdentityMapping{IsAdd: add, Protocol: m.Proto, Port: m.ExternalPort,

@@ -1,5 +1,5 @@
 /* System: how VPP receives and on which CPUs it runs, PCI cards added to VPP through DPDK, the
-   CPUs' governors, and NAT44-EI's timeouts and table size. vpp-system makes the changes. RX
+   CPUs' governors, and NAT44's mode, timeouts and table size. vpp-system makes the changes. RX
    settings, governors and timeouts take effect at once; the thread layout, a new card and the
    NAT table restart VPP and are undone unless confirmed in time. */
 import { $, fetchJSON, postJSON, fillBody } from '../lib.js';
@@ -361,19 +361,38 @@ function renderGovernors() {
   });
 }
 
+const natNames = { ei: 'NAT44-EI', ed: 'NAT44-ED' };
+const natName = mode => natNames[mode] || 'NAT44';
+
 function renderNAT() {
   const s = page.state;
   const n = s.nat;
+  const mode = n.file_mode || n.mode;
+  const ed = mode === 'ed';
   $('nat-cli-file').textContent = s.cli_file;
+  $('nat-mode-files').textContent = s.cli_file;
   const running = n.running;
   let help;
-  if (!n.enabled) help = `${s.cli_file} 里没有启用 NAT44-EI（nat44 ei plugin enable），这里不能修改。在接口页把上行口设为出口后会启用。`;
-  else if (!running) help = 'VPP 没有 NAT44-EI 插件，下面是配置文件里的值。';
+  if (!n.enabled) help = `${s.cli_file} 里没有启用 NAT44（nat44 ei plugin enable 或 nat44 plugin enable），这里不能修改超时和会话表。在接口页把上行口设为出口后会启用。`;
+  else if (!running) help = `VPP 没有 ${natName(mode)} 插件，下面是配置文件里的值。`;
   else {
     const t = running.timeouts, z = running.size;
-    help = `VPP 现在：TCP 已建立 ${t.tcp_established} 秒、握手和关闭 ${t.tcp_transitory} 秒、UDP ${t.udp} 秒、ICMP ${t.icmp} 秒；每线程 ${z.sessions} 个会话、${z.users} 个用户，每个用户 ${z.user_sessions} 个会话。`;
+    const size = running.mode === 'ed' ? `每线程 ${z.sessions} 个会话` : `每线程 ${z.sessions} 个会话、${z.users} 个用户，每个用户 ${z.user_sessions} 个会话`;
+    help = `VPP 现在运行 ${natName(running.mode)}：TCP 已建立 ${t.tcp_established} 秒、握手和关闭 ${t.tcp_transitory} 秒、UDP ${t.udp} 秒、ICMP ${t.icmp} 秒；${size}。`;
+    if (n.file_mode && running.mode !== n.file_mode) help += ` ${s.cli_file} 里却是 ${natName(n.file_mode)} 的命令，下次启动会失败，把模式改一致。`;
   }
   $('nat-help').textContent = help;
+  $('nat-mode-now').textContent = n.mode ? `启动文件加载 ${natName(n.mode)}` : '启动文件没有加载 NAT 插件';
+  const target = n.mode === 'ed' ? 'ei' : 'ed';
+  $('nat-mode-switch').textContent = `改为 ${natName(target)}`;
+  $('nat-mode-switch').disabled = !n.mode || !!n.switch_problem || locked() || !s.can_restart;
+  $('nat-mode-problem').hidden = !n.switch_problem;
+  $('nat-mode-problem').textContent = n.switch_problem ? '不能切换：' + n.switch_problem : '';
+  $('nat-size-help').textContent = ed
+    ? '会话数是每个线程的上限（主线程和每个 worker 各一份）。表满时新连接被丢弃。表越大占用 VPP 主堆内存越多，内存不够时插件启用失败，VPP 会自动恢复旧值。要重启 VPP，60 秒内不确认就恢复。'
+    : '会话数和用户数是每个线程的上限（主线程和每个 worker 各一份），每个用户的会话数是一个局域网地址最多同时占用的会话。表满时新连接被丢弃。表越大占用 VPP 主堆内存越多，内存不够时插件启用失败，VPP 会自动恢复旧值。要重启 VPP，60 秒内不确认就恢复。';
+  $('nat-size-users-label').hidden = ed;
+  $('nat-user-sessions-label').hidden = ed;
   if (!page.formsFilled) {
     const t = n.file_timeouts, z = n.file_size;
     $('nat-tcp-est').value = t.tcp_established;
@@ -408,17 +427,37 @@ function render() {
   page.formsFilled = true;
 }
 
+function fileNATName() {
+  const n = page.state.nat;
+  return natName(n.file_mode || n.mode);
+}
+
 function applyTimeouts() {
   const body = {
     tcp_established: Number($('nat-tcp-est').value), tcp_transitory: Number($('nat-tcp-trans').value),
     udp: Number($('nat-udp').value), icmp: Number($('nat-icmp').value),
   };
-  apply('nat/timeouts', body, `NAT44-EI 超时改为：TCP 已建立 ${body.tcp_established} 秒、握手和关闭 ${body.tcp_transitory} 秒、UDP ${body.udp} 秒、ICMP ${body.icmp} 秒`);
+  apply('nat/timeouts', body, `${fileNATName()} 超时改为：TCP 已建立 ${body.tcp_established} 秒、握手和关闭 ${body.tcp_transitory} 秒、UDP ${body.udp} 秒、ICMP ${body.icmp} 秒`);
 }
 
 function applySize() {
+  const n = page.state.nat;
+  if ((n.file_mode || n.mode) === 'ed') {
+    const body = { sessions: Number($('nat-size-sessions').value) };
+    apply('nat/size', body, `${fileNATName()} 会话表改为每线程 ${body.sessions} 个会话`, true);
+    return;
+  }
   const body = { sessions: Number($('nat-size-sessions').value), users: Number($('nat-size-users').value), user_sessions: Number($('nat-user-sessions').value) };
-  apply('nat/size', body, `NAT44-EI 会话表改为每线程 ${body.sessions} 个会话、${body.users} 个用户，每个用户 ${body.user_sessions} 个会话`, true);
+  apply('nat/size', body, `${fileNATName()} 会话表改为每线程 ${body.sessions} 个会话、${body.users} 个用户，每个用户 ${body.user_sessions} 个会话`, true);
+}
+
+function applyNATMode() {
+  const n = page.state.nat;
+  const target = n.mode === 'ed' ? 'ei' : 'ed';
+  const what = target === 'ed'
+    ? 'NAT 改为 NAT44-ED：外部端口按目的地复用，只放行回应已有连接的包。需要外部主机主动连进来的游戏或 P2P 应用可能要用端口转发。'
+    : 'NAT 改为 NAT44-EI：每个内网端口对所有目的地用同一个外部端口，任何外部主机都能发进来。';
+  apply('nat/mode', { mode: target }, what + `会改写启动文件和 ${page.state.cli_file} 里的 NAT 命令，所有 NAT 连接重建。`, true);
 }
 
 export function start() {
@@ -436,6 +475,7 @@ export function start() {
     $('nat-icmp').value = d.icmp;
   };
   $('nat-size-apply').onclick = applySize;
+  $('nat-mode-switch').onclick = applyNATMode;
 }
 
 export function show() {

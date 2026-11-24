@@ -45,6 +45,19 @@ class DnsmasqLanTests(unittest.TestCase):
             self.assertIn(line, lines)
         self.assertTrue(self.hosts.exists())
 
+    def test_set_repairs_hosts_access_after_dnsmasq_drops_privileges(self):
+        self.hosts.parent.mkdir(parents=True, mode=0o700)
+        self.hosts.write_text("02:00:00:00:10:01,10.61.30.20,nas\n")
+        self.hosts.chmod(0o600)
+        secret = self.hosts.parent / "secret"
+        secret.write_text("private")
+        secret.chmod(0o600)
+        self.set()
+        self.assertEqual(self.hosts.stat().st_mode & 0o777, 0o644)
+        self.assertEqual(self.hosts.parent.stat().st_mode & 0o777, 0o701)
+        self.assertEqual(secret.stat().st_mode & 0o777, 0o600)
+        self.assertIn("10.61.30.20", self.hosts.read_text())
+
     def test_managed_lines_change_in_place_and_others_stay(self):
         self.conf.parent.mkdir(parents=True)
         self.conf.write_text('# mine\nlocal=/lan/\ndhcp-range=10.61.30.50,10.61.30.60,1h\n'

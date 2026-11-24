@@ -42,7 +42,10 @@ type Options struct {
 	// OtherPending is vpp-interfaces' pending change. It edits the same CLI file and puts the
 	// whole file back on rollback, so neither starts a change while the other waits.
 	OtherPending string
-	Sysfs        string
+	// WireGuardStore is vpp-wireguard's configurations. It runs their commands' NAT44 lines in
+	// the running plugin's form, so a switch only reads it, for commands with no equivalent.
+	WireGuardStore string
+	Sysfs          string
 	// RouterEnv is the installer's router.env, whose NICS vpp-router-ctl binds before VPP starts;
 	// NICsOrig is where the installer notes each card's first driver; PCIIDs is DPDK's PCI ID
 	// table; UnitFile is VPP's unit file. Empty RouterEnv turns adding cards off.
@@ -336,6 +339,13 @@ func (s *Service) restartChange(user, description string, files map[string]strin
 		paths = append(paths, path)
 	}
 	sort.Strings(paths)
+	backups := map[string]string{}
+	for _, path := range paths {
+		if other, ok := backups[s.backupPath(path)]; ok {
+			return nil, fmt.Errorf("%s 和 %s 同名，备份会互相覆盖，先把其中一个改名", other, path)
+		}
+		backups[s.backupPath(path)] = path
+	}
 	for _, path := range paths {
 		data, err := os.ReadFile(path)
 		if err != nil {
@@ -448,7 +458,7 @@ func (s *Service) loadCLI() (*cliFile, error) {
 	return parseCLI(string(data)), nil
 }
 
-// NAT44-EI.
+// NAT44.
 
 func checkTimeouts(t natTimeouts) error {
 	for _, v := range []struct {
@@ -477,8 +487,9 @@ func (s *Service) SetNATTimeouts(t natTimeouts, user string) (*State, error) {
 	if err != nil {
 		return nil, err
 	}
+	mode := file.natMode()
 	if !file.setTimeouts(t) {
-		return nil, errors.New(s.opts.CLIFile + " 里没有启用 NAT44-EI（nat44 ei plugin enable）")
+		return nil, errors.New(s.opts.CLIFile + " 里没有启用 NAT44（nat44 ei plugin enable 或 nat44 plugin enable）")
 	}
 	v, err := s.dial()
 	if err != nil {
@@ -490,7 +501,10 @@ func (s *Service) SetNATTimeouts(t natTimeouts, user string) (*State, error) {
 		return nil, err
 	}
 	if running == nil {
-		return nil, errors.New("VPP 没有 NAT44-EI 插件")
+		return nil, errors.New("VPP 没有 NAT44 插件")
+	}
+	if running.Mode != mode {
+		return nil, fmt.Errorf("%s 里是 %s 的命令，VPP 运行的却是 %s", s.opts.CLIFile, mode, running.Mode)
 	}
 	if err := v.SetNATTimeouts(t); err != nil {
 		return nil, err
@@ -499,13 +513,16 @@ func (s *Service) SetNATTimeouts(t natTimeouts, user string) (*State, error) {
 		v.SetNATTimeouts(running.Timeouts)
 		return nil, err
 	}
-	log.Printf("audit: NAT44-EI timeouts udp %d tcp-established %d tcp-transitory %d icmp %d by %s", t.UDP, t.TCPEstablished, t.TCPTransitory, t.ICMP, user)
+	log.Printf("audit: %s timeouts udp %d tcp-established %d tcp-transitory %d icmp %d by %s", mode, t.UDP, t.TCPEstablished, t.TCPTransitory, t.ICMP, user)
 	return s.stateLocked(), nil
 }
 
-func checkSize(size natSize) error {
+func checkSize(mode natMode, size natSize) error {
 	if size.Sessions < 1024 || size.Sessions > 1<<24 {
 		return errors.New("会话数要在 1024 到 16777216 之间")
+	}
+	if mode == natED {
+		return nil // no users
 	}
 	if size.Users < 1 || size.Users > 1<<20 {
 		return errors.New("用户数要在 1 到 1048576 之间")
@@ -518,9 +535,6 @@ func checkSize(size natSize) error {
 
 // SetNATSize changes the table sizes, which VPP takes only when the plugin is enabled.
 func (s *Service) SetNATSize(size natSize, user string) (*State, error) {
-	if err := checkSize(size); err != nil {
-		return nil, err
-	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err := s.otherPending(); err != nil {
@@ -530,20 +544,224 @@ func (s *Service) SetNATSize(size natSize, user string) (*State, error) {
 	if err != nil {
 		return nil, err
 	}
+	mode := file.natMode()
+	if mode == natED {
+		size.Users, size.UserSessions = 0, 0
+	}
+	if err := checkSize(mode, size); err != nil {
+		return nil, err
+	}
 	if current, ok := file.natSize(); ok && current == size {
 		return nil, errors.New("没有改动")
 	}
 	if !file.setNATSize(size) {
-		return nil, errors.New(s.opts.CLIFile + " 里没有启用 NAT44-EI（nat44 ei plugin enable）")
+		return nil, errors.New(s.opts.CLIFile + " 里没有启用 NAT44（nat44 ei plugin enable 或 nat44 plugin enable）")
 	}
-	description := fmt.Sprintf("NAT44-EI 会话表：每线程 %d 个会话、%d 个用户，每个用户 %d 个会话", size.Sessions, size.Users, size.UserSessions)
+	description := fmt.Sprintf("%s 会话表：每线程 %d 个会话、%d 个用户，每个用户 %d 个会话", mode, size.Sessions, size.Users, size.UserSessions)
+	if mode == natED {
+		description = fmt.Sprintf("%s 会话表：每线程 %d 个会话", mode, size.Sessions)
+	}
 	return s.restartChange(user, description, map[string]string{s.opts.CLIFile: file.String()}, nil, nil, func(v vppAPI) error {
 		running, err := v.NAT()
 		if err != nil {
 			return err
 		}
-		if running == nil || running.Size.Sessions != size.Sessions || running.Size.Users != size.Users || running.Size.UserSessions != size.UserSessions {
-			return errors.New("NAT44-EI 的会话表大小不是新设置的值（插件可能启用失败，比如内存不够）")
+		if running == nil || running.Mode != mode || running.Size.Sessions != size.Sessions || mode == natEI && (running.Size.Users != size.Users || running.Size.UserSessions != size.UserSessions) {
+			return fmt.Errorf("%s 的会话表大小不是新设置的值（插件可能启用失败，比如内存不够）", mode)
+		}
+		return nil
+	})
+}
+
+// natModeFiles are the CLI file and the files it runs with exec, at any depth, with their NAT44
+// commands rewritten for mode: the new text of each file that changes, keyed by path. The CLI
+// file is always included. It refuses commands that have no equivalent, naming their file, and
+// the WireGuard configurations' commands that have none (see wireGuardNATProblems).
+func (s *Service) natModeFiles(file *cliFile, mode natMode) (map[string]string, error) {
+	type found struct {
+		path string
+		file *cliFile
+	}
+	var all []found
+	seen := map[string]bool{s.opts.CLIFile: true}
+	var walk func(path string, f *cliFile) error
+	walk = func(path string, f *cliFile) error {
+		all = append(all, found{path, f})
+		for _, next := range f.execFiles() {
+			if seen[next] {
+				continue
+			}
+			seen[next] = true
+			data, err := os.ReadFile(next)
+			if err != nil {
+				if errors.Is(err, os.ErrNotExist) {
+					continue // VPP reports it at start, as it did before
+				}
+				return fmt.Errorf("%s 执行的 %s 读不出来：%w", path, next, err)
+			}
+			if err := walk(next, parseCLI(string(data))); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	if err := walk(s.opts.CLIFile, file); err != nil {
+		return nil, err
+	}
+	configs, err := s.wireGuardConfigs()
+	if err != nil {
+		return nil, err
+	}
+	m := newMultiExit()
+	for _, f := range all {
+		m.scan(f.file.lines)
+	}
+	for _, c := range configs {
+		for _, address := range c.Addresses {
+			m.addOwn(c.iface(), address)
+		}
+		m.scan(c.AfterUp)
+	}
+	files := map[string]string{}
+	var problems []string
+	for _, f := range all {
+		out, bad := f.file.withNATMode(mode, m)
+		if len(bad) > 0 {
+			problems = append(problems, f.path+" 里的 "+strings.Join(bad, "；"))
+		}
+		if f.path == s.opts.CLIFile || out.String() != f.file.String() {
+			files[f.path] = out.String()
+		}
+	}
+	problems = append(problems, wireGuardNATProblems(configs, mode, m)...)
+	if len(problems) > 0 {
+		return nil, fmt.Errorf("这些 NAT 命令在 %s 里没有对应的写法，先改掉：%s", mode, strings.Join(problems, "；"))
+	}
+	return files, nil
+}
+
+// wgConfig is what a switch reads of a vpp-wireguard configuration.
+type wgConfig struct {
+	Name       string   `json:"name"`
+	Instance   int      `json:"instance"`
+	Addresses  []string `json:"addresses"`
+	AfterUp    []string `json:"after_up"`
+	BeforeDown []string `json:"before_down"`
+}
+
+func (c wgConfig) iface() string { return "wg" + strconv.Itoa(c.Instance) }
+
+func (s *Service) wireGuardConfigs() ([]wgConfig, error) {
+	if s.opts.WireGuardStore == "" {
+		return nil, nil
+	}
+	data, err := os.ReadFile(s.opts.WireGuardStore)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("读不出 WireGuard 配置 %s：%w", s.opts.WireGuardStore, err)
+	}
+	var store struct {
+		Configs []wgConfig `json:"configs"`
+	}
+	if err := json.Unmarshal(data, &store); err != nil {
+		return nil, fmt.Errorf("WireGuard 配置 %s 无法解析", s.opts.WireGuardStore)
+	}
+	return store.Configs, nil
+}
+
+// wireGuardNATProblems names the WireGuard configurations' commands that are NAT44 commands
+// with no equivalent in mode. vpp-wireguard runs them in the running plugin's form: under ED it
+// skips the EI-only multi-exit commands and drops tenant-vrf from the pool address of a
+// configuration that has a context, so they are checked as the files are. The commands are not
+// quoted: the file holds private keys, and nothing of it reaches a reply.
+func wireGuardNATProblems(configs []wgConfig, mode natMode, m *multiExit) []string {
+	var problems []string
+	for _, c := range configs {
+		hasContext := slices.ContainsFunc(c.AfterUp, func(command string) bool { return hasWords(cliFields(command), "nat44", "ei", "context") })
+		for _, list := range []struct {
+			what     string
+			commands []string
+		}{{"接口附加命令", c.AfterUp}, {"停止前命令", c.BeforeDown}} {
+			for i, command := range list.commands {
+				f := cliFields(command)
+				if !isNATCommand(f) || lineMode(f) == mode {
+					continue
+				}
+				where := fmt.Sprintf("VPN「%s」（%s）的%s第 %d 条", c.Name, c.iface(), list.what, i+1)
+				if mode == natED {
+					problem := m.edProblem(f)
+					if problem == "" && hasContext && tenantVRF(f) != "" {
+						if _, ok := m.exitOf(tenantVRF(f)); !ok {
+							problem = "tenant-vrf " + tenantVRF(f) + " 不是这个 VPN 的 nat44 ei context 的路由表"
+						}
+					}
+					if problem != "" {
+						problems = append(problems, where+"（"+problem+"）")
+						continue
+					}
+					if isEIOnly(f) {
+						continue
+					}
+					if hasContext {
+						f = withoutTenantVRF(f)
+					}
+				}
+				if _, ok := translateNAT(f, mode); !ok {
+					problems = append(problems, where)
+				}
+			}
+		}
+	}
+	return problems
+}
+
+// SetNATMode makes VPP run the other NAT44 plugin: the startup file loads it instead and every
+// NAT44 command in the CLI file is rewritten for it. VPP restarts, losing its NAT sessions, and
+// the change waits for confirmation. Port forwards and the other services' mappings are put
+// back by their services, which follow the plugin VPP runs.
+func (s *Service) SetNATMode(mode natMode, user string) (*State, error) {
+	if mode != natEI && mode != natED {
+		return nil, errors.New("NAT 模式只能是 ei 或 ed")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.otherPending(); err != nil {
+		return nil, err
+	}
+	conf, err := s.loadStartConf()
+	if err != nil {
+		return nil, err
+	}
+	current, err := conf.natMode()
+	if err != nil {
+		return nil, err
+	}
+	if current == mode {
+		return nil, errors.New("NAT 已经是 " + mode.String())
+	}
+	file, err := s.loadCLI()
+	if err != nil {
+		return nil, err
+	}
+	files, err := s.natModeFiles(file, mode)
+	if err != nil {
+		return nil, err
+	}
+	newConf, err := conf.withNATMode(mode)
+	if err != nil {
+		return nil, err
+	}
+	description := fmt.Sprintf("NAT 模式由 %s 改为 %s", current, mode)
+	files[s.opts.StartConf] = newConf
+	return s.restartChange(user, description, files, nil, nil, func(v vppAPI) error {
+		running, err := v.NAT()
+		if err != nil {
+			return err
+		}
+		if running == nil || running.Mode != mode {
+			return fmt.Errorf("VPP 运行的不是 %s（插件没有加载，或 %s 里的 NAT 命令执行失败）", mode, s.opts.CLIFile)
 		}
 		return nil
 	})
@@ -1016,11 +1234,16 @@ type RxView struct {
 }
 
 type NATView struct {
-	Enabled      bool        `json:"enabled"` // the CLI file enables it
-	Running      *natRunning `json:"running"`
-	FileSize     natSize     `json:"file_size"`
-	FileTimeouts natTimeouts `json:"file_timeouts"`
-	Defaults     natTimeouts `json:"defaults"`
+	Enabled bool `json:"enabled"` // the CLI file enables it
+	// Mode is the plugin the startup file loads; FileMode the one the CLI file's enable line is for.
+	Mode     natMode `json:"mode"`
+	FileMode natMode `json:"file_mode"`
+	// SwitchProblem is why the mode cannot be switched to the other plugin, empty when it can.
+	SwitchProblem string      `json:"switch_problem"`
+	Running       *natRunning `json:"running"`
+	FileSize      natSize     `json:"file_size"`
+	FileTimeouts  natTimeouts `json:"file_timeouts"`
+	Defaults      natTimeouts `json:"defaults"`
 }
 
 type State struct {
@@ -1154,6 +1377,23 @@ func (s *Service) stateLocked() *State {
 	} else {
 		state.NAT.FileSize, state.NAT.Enabled = file.natSize()
 		state.NAT.FileTimeouts = file.timeouts()
+		state.NAT.FileMode = file.natMode()
+		if conf, err := s.loadStartConf(); err != nil {
+			state.NAT.SwitchProblem = err.Error()
+		} else if mode, err := conf.natMode(); err != nil {
+			state.NAT.SwitchProblem = err.Error()
+		} else {
+			state.NAT.Mode = mode
+			to := natED
+			if mode == natED {
+				to = natEI
+			}
+			if _, err := s.natModeFiles(file, to); err != nil {
+				state.NAT.SwitchProblem = err.Error()
+			} else if _, err := conf.withNATMode(to); err != nil {
+				state.NAT.SwitchProblem = err.Error()
+			}
+		}
 	}
 
 	for _, q := range queues {

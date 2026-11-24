@@ -6,9 +6,35 @@ import (
 	"strings"
 )
 
-// An exit is an interface whose outgoing traffic NAT44-EI translates to the interface's own
+// An exit is an interface whose outgoing traffic NAT44 translates to the interface's own
 // address, as the installer sets up its WAN. The panel turns it on and off for any interface,
-// so that a second uplink needs no hand-written NAT.
+// so that a second uplink needs no hand-written NAT. VPP runs NAT44-EI or NAT44-ED, whichever
+// plugin its startup file enables; the commands follow that.
+
+// natModeOf is the NAT44 plugin the file's NAT lines are written for and the one VPP runs.
+// The file's lines win when VPP has no NAT plugin; it is an error when the two differ, or
+// when neither says.
+func natModeOf(file *cliFile, name string, live *liveState) (natMode, error) {
+	var mode natMode
+	for _, line := range file.lines {
+		switch line.kind {
+		case lineNATEnable, lineNATAddress, lineNATOutput:
+			if mode != "" && line.nat != mode {
+				return "", fmt.Errorf("%s 里同时有 NAT44-EI 和 NAT44-ED 的命令", name)
+			}
+			mode = line.nat
+		}
+	}
+	switch {
+	case mode == "" && live.NAT == "":
+		return "", errors.New("VPP 没有加载 NAT 插件（nat44_ei_plugin.so 或 nat_plugin.so）")
+	case mode == "":
+		return live.NAT, nil
+	case live.NAT != "" && live.NAT != mode:
+		return "", fmt.Errorf("%s 里是 %s 的命令，VPP 运行的却是 %s，先在系统页把 NAT 模式改一致", name, mode, live.NAT)
+	}
+	return mode, nil
+}
 
 // natLines returns the file's NAT lines for iface: the pool from its address, and the output
 // feature.
@@ -63,16 +89,20 @@ func (s *Service) SetNAT(name string, enable bool, user string) (*State, error) 
 		if enable == natEnabled(file, name) && (enable || len(pool)+len(output) == 0) {
 			return nil, errors.New("出口设置没有变化")
 		}
+		mode, err := natModeOf(file, s.opts.CLIFile, live)
+		if err != nil {
+			return nil, err
+		}
 		if !enable {
 			if refs := natReferences(file, name); len(refs) > 0 {
 				return nil, fmt.Errorf("配置文件里还有引用 %s 的 NAT 命令，先删掉：%s", name, strings.TrimSpace(refs[0].text))
 			}
 			c := &change{file: file, description: "取消 " + name + " 的出口（NAT）"}
 			if len(output) > 0 {
-				c.steps = append(c.steps, step{natOutputCommand(name, true), natOutputCommand(name, false)})
+				c.steps = append(c.steps, step{natOutputCommand(mode, name, true), natOutputCommand(mode, name, false)})
 			}
 			if len(pool) > 0 {
-				c.steps = append(c.steps, step{natAddressCommand(name, true), natAddressCommand(name, false)})
+				c.steps = append(c.steps, step{natAddressCommand(mode, name, true), natAddressCommand(mode, name, false)})
 			}
 			file.remove(append(pool, output...)...)
 			return c, nil
@@ -91,18 +121,18 @@ func (s *Service) SetNAT(name string, enable bool, user string) (*State, error) 
 		if enableLine < 0 {
 			// The file is what VPP ran, so without the line the plugin is off.
 			at := file.insertionPoint(name)
-			file.insert(at, natEnableCommand, natTimeoutCommand)
+			file.insert(at, natEnableCommand(mode), natTimeoutCommand(mode))
 			enableLine = at + 1
-			c.steps = append(c.steps, step{natEnableCommand, "nat44 ei plugin disable"}, step{natTimeoutCommand, ""})
+			c.steps = append(c.steps, step{natEnableCommand(mode), natDisableCommand(mode)}, step{natTimeoutCommand(mode), ""})
 		}
 		var texts []string
 		if len(pool) == 0 {
-			texts = append(texts, natAddressCommand(name, false))
-			c.steps = append(c.steps, step{natAddressCommand(name, false), natAddressCommand(name, true)})
+			texts = append(texts, natAddressCommand(mode, name, false))
+			c.steps = append(c.steps, step{natAddressCommand(mode, name, false), natAddressCommand(mode, name, true)})
 		}
 		if len(output) == 0 {
-			texts = append(texts, natOutputCommand(name, false))
-			c.steps = append(c.steps, step{natOutputCommand(name, false), natOutputCommand(name, true)})
+			texts = append(texts, natOutputCommand(mode, name, false))
+			c.steps = append(c.steps, step{natOutputCommand(mode, name, false), natOutputCommand(mode, name, true)})
 		}
 		file.insert(file.insertionPoint(name, append(append([]int{enableLine}, pool...), output...)...), texts...)
 		return c, nil

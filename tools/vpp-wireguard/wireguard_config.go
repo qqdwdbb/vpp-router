@@ -471,7 +471,16 @@ func (a *Service) wgNATLine(c *wgStored, suffix string) string {
 	if a.opts.NATInterface == "" || c.SkipNATOpen || err != nil || !address.Is4() {
 		return ""
 	}
-	return fmt.Sprintf("nat44 ei add identity mapping external %s udp %d%s", a.opts.NATInterface, c.ListenPort, suffix)
+	return fmt.Sprintf("nat44 %sadd identity mapping external %s udp %d%s", a.natWord(), a.opts.NATInterface, c.ListenPort, suffix)
+}
+
+// natWord is "ei " when VPP runs NAT44-EI and nothing for NAT44-ED, whose commands lack the
+// word. Only NAT44-ED has "show nat44 summary".
+func (a *Service) natWord() string {
+	if output, err := a.sys.vppCLI("show nat44 summary"); err == nil && strings.Contains(output, "translations") {
+		return ""
+	}
+	return "ei "
 }
 
 type wgStep struct{ command, what string }
@@ -495,8 +504,8 @@ func (a *Service) wgUpSteps(c *wgStored) []wgStep {
 		steps = append(steps, wgStep{line, "放行监听端口"})
 	}
 	steps = append(steps, wgStep{"set interface state " + name + " up", "启用接口"})
-	for index, command := range c.AfterUp {
-		steps = append(steps, wgStep{command, fmt.Sprintf("附加命令第 %d 条", index+1)})
+	for _, step := range a.natCommands(c, c.AfterUp) {
+		steps = append(steps, wgStep{step.command, fmt.Sprintf("附加命令第 %d 条", step.index+1)})
 	}
 	return steps
 }
@@ -529,8 +538,8 @@ func cleanCommands(text string) ([]string, error) {
 func (a *Service) wgDown(c *wgStored) error {
 	name := c.iface()
 	dnsErr := a.stopWGDNS(c)
-	for _, command := range c.BeforeDown {
-		if _, err := a.sys.vppCLI(command); err != nil {
+	for _, step := range a.natCommands(c, c.BeforeDown) {
+		if _, err := a.sys.vppCLI(step.command); err != nil {
 			log.Printf("wireguard: a before-down command of %s: %v", name, err)
 		}
 	}

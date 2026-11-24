@@ -84,3 +84,12 @@ IPsec 接入联测增加 `ipsec_pool_routes`：池与 LAN 共用 /64 时，自�
 的更具体路由到 WAN 默认网关，使回包命中 WAN SPD。记录位于同一 `/run` 状态，
 前缀撤销/网关变化清理旧路径，VPP socket 变化重建。实际 PD/EAP/重连验证和
 非重启式 starter 重载边界见 `../ipsec/README.md`；生产 reload 命令仍未配置。
+
+Linux 透明代理也需要池范围的更具体回程路由，否则重启后学习到的 LAN /64
+直连路由可能使代理回复尝试对 VPN 客户端进行邻居发现。启用 `ipsec_pool_routes`
+时，可另设 `host_interface` 和 `ipsec_host_gateway`，分别指定 Linux 到 VPP 的
+接口及固定 IPv6 下一跳（例如 `vpp-host` 和设备的 VPP ULA 网关）。同步器会将
+同一公网地址池的范围安装到 Linux，使用 metric 100；随前缀变化先添加新路径再
+删除旧路径，撤销时清理，并在同步服务重启后重新应用。状态记录为
+`ipsec_host_routes`。此配置使用固定 ULA 下一跳，不把动态公网前缀写死在启动单元中。
+未设置 `ipsec_host_gateway` 时不管理 Linux 地址池路由。

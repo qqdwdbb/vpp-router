@@ -50,6 +50,7 @@ func installerLive() *liveState {
 			{Index: 4, Name: "wg0", Hardware: true, Up: true, MTU: 1420, Addresses: []netip.Prefix{pfx("10.9.0.1/24")}},
 			{Index: 5, Name: "eth1", Hardware: true, MTU: 1500},
 		},
+		NAT: natEI,
 	}
 }
 
@@ -692,7 +693,7 @@ func TestNATEnablesThePlugin(t *testing.T) {
 	if _, err := s.SetNAT("eth0.100", true, "admin"); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{natEnableCommand, natTimeoutCommand, "nat44 ei add interface address eth0.100", "set interface nat44 ei out eth0.100 output-feature"}
+	want := []string{natEnableCommand(natEI), natTimeoutCommand(natEI), "nat44 ei add interface address eth0.100", "set interface nat44 ei out eth0.100 output-feature"}
 	if !slices.Equal(sys.commands, want) {
 		t.Fatalf("commands %q", sys.commands)
 	}
@@ -728,6 +729,83 @@ func TestNATOffAndRefusals(t *testing.T) {
 	}
 	if got := read(t, path); strings.Contains(got, "ei add interface address") || !strings.Contains(got, "nat44 ei plugin enable") {
 		t.Fatalf("file:\n%s", got)
+	}
+}
+
+// edFile is installerFile as the installer writes it for NAT44-ED.
+var edFile = strings.Replace(installerFile, "nat44 ei plugin enable sessions 65536 users 4096 user-sessions 16384\nnat44 ei add interface address eth0.100\nset interface nat44 ei out eth0.100 output-feature\n",
+	"nat44 plugin enable sessions 65536\nset nat timeout tcp-established 1800 tcp-transitory 120\nnat44 add interface address eth0.100\nset interface nat44 out eth0.100 output-feature\n", 1)
+
+func TestNATUnderED(t *testing.T) {
+	s, sys, path := setup(t, edFile, "")
+	sys.live.NAT = natED
+	state := s.State()
+	for _, v := range state.Interfaces {
+		if v.Name == "eth0.100" && !v.NAT {
+			t.Fatal("the ED lines do not make eth0.100 an exit")
+		}
+	}
+	if _, err := s.SetFamily("eth1", false, Family{Mode: modeDHCP}, "admin"); err != nil {
+		t.Fatal(err)
+	}
+	s.Confirm("admin")
+	sys.commands = nil
+	if _, err := s.SetNAT("eth1", true, "admin"); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(sys.commands, []string{"nat44 add interface address eth1", "set interface nat44 out eth1 output-feature"}) {
+		t.Fatalf("commands %q", sys.commands)
+	}
+	if got := read(t, path); !strings.HasSuffix(got, "set interface nat44 out eth0.100 output-feature\nset dhcp client intfc eth1\nnat44 add interface address eth1\nset interface nat44 out eth1 output-feature\n") {
+		t.Fatalf("file:\n%s", got)
+	}
+	sys.commands = nil
+	s.Rollback("admin")
+	if !slices.Equal(sys.commands, []string{"set interface nat44 out eth1 output-feature del", "nat44 add interface address eth1 del"}) {
+		t.Fatalf("undo %q", sys.commands)
+	}
+	sys.commands = nil
+	if _, err := s.SetNAT("eth0.100", false, "admin"); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(sys.commands, []string{"set interface nat44 out eth0.100 output-feature del", "nat44 add interface address eth0.100 del"}) {
+		t.Fatalf("off %q", sys.commands)
+	}
+}
+
+func TestNATEnablesTheEDPlugin(t *testing.T) {
+	file := strings.Replace(installerFile, "nat44 ei plugin enable sessions 65536 users 4096 user-sessions 16384\nnat44 ei add interface address eth0.100\nset interface nat44 ei out eth0.100 output-feature\n", "", 1)
+	s, sys, _ := setup(t, file, "")
+	sys.live.NAT = natED
+	if _, err := s.SetNAT("eth0.100", true, "admin"); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"nat44 plugin enable sessions 65536", "set nat timeout tcp-established 1800 tcp-transitory 120", "nat44 add interface address eth0.100", "set interface nat44 out eth0.100 output-feature"}
+	if !slices.Equal(sys.commands, want) {
+		t.Fatalf("commands %q", sys.commands)
+	}
+	sys.commands = nil
+	s.Rollback("admin")
+	if !slices.Equal(sys.commands, []string{"set interface nat44 out eth0.100 output-feature del", "nat44 add interface address eth0.100 del", "nat44 plugin disable"}) {
+		t.Fatalf("undo %q", sys.commands)
+	}
+}
+
+func TestNATModeMismatch(t *testing.T) {
+	s, sys, _ := setup(t, installerFile, "")
+	if _, err := s.SetFamily("eth1", false, Family{Mode: modeDHCP}, "admin"); err != nil {
+		t.Fatal(err)
+	}
+	s.Confirm("admin")
+	sys.live.NAT = natED
+	if _, err := s.SetNAT("eth1", true, "admin"); err == nil || !strings.Contains(err.Error(), "NAT44-ED") {
+		t.Fatalf("EI lines with ED running: %v", err)
+	}
+	file := strings.Replace(installerFile, "nat44 ei plugin enable sessions 65536 users 4096 user-sessions 16384\nnat44 ei add interface address eth0.100\nset interface nat44 ei out eth0.100 output-feature\n", "", 1)
+	s, sys, _ = setup(t, file, "")
+	sys.live.NAT = ""
+	if _, err := s.SetNAT("eth0.100", true, "admin"); err == nil || !strings.Contains(err.Error(), "nat_plugin.so") {
+		t.Fatalf("no NAT plugin: %v", err)
 	}
 }
 

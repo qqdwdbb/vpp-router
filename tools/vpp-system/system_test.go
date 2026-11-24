@@ -205,6 +205,219 @@ func TestCLIFileNAT(t *testing.T) {
 	}
 }
 
+func TestCLIFileNATED(t *testing.T) {
+	file := parseCLI("nat44 plugin enable sessions 65536 inside-vrf 0\nset nat timeout tcp-established 1800 tcp-transitory 120\nnat44 add interface address port0\n")
+	if file.natMode() != natED {
+		t.Fatal(file.natMode())
+	}
+	if size, ok := file.natSize(); !ok || size != (natSize{Sessions: 65536}) {
+		t.Fatal(size, ok)
+	}
+	if got := file.timeouts(); got != (natTimeouts{UDP: 300, TCPEstablished: 1800, TCPTransitory: 120, ICMP: 60}) {
+		t.Fatal(got)
+	}
+	file.setNATSize(natSize{Sessions: 131072, Users: 9, UserSessions: 9})
+	file.setTimeouts(natTimeouts{600, 3600, 60, 30})
+	if want := "nat44 plugin enable sessions 131072 inside-vrf 0\nset nat timeout udp 600 tcp-established 3600 tcp-transitory 60 icmp 30\nnat44 add interface address port0\n"; file.String() != want {
+		t.Fatalf("%q", file.String())
+	}
+}
+
+const natCommandsEI = `nat44 ei plugin enable sessions 65536 users 4096 user-sessions 16384
+set nat44 ei timeout tcp-established 1800 tcp-transitory 120
+nat44 ei add interface address port0
+set interface nat44 ei out port0 output-feature
+set int nat44 ei in loop0 out port1
+  nat44 ei add identity mapping external port0 udp 500
+nat44 ei add static mapping tcp local 192.168.1.10 22 external port0 2222
+nat44 ei add address 10.0.0.1 - 10.0.0.4 tenant-vrf 0
+set interface state port0 up
+show nat44 ei sessions
+`
+
+const natCommandsED = `nat44 plugin enable sessions 65536
+set nat timeout tcp-established 1800 tcp-transitory 120
+nat44 add interface address port0
+set interface nat44 out port0 output-feature
+set int nat44 in loop0 out port1
+  nat44 add identity mapping external port0 udp 500
+nat44 add static mapping tcp local 192.168.1.10 22 external port0 2222
+nat44 add address 10.0.0.1 - 10.0.0.4 tenant-vrf 0
+set interface state port0 up
+show nat44 ei sessions
+`
+
+func TestNATModeTranslation(t *testing.T) {
+	// show commands are not configuration and stay as they are.
+	file := parseCLI(natCommandsEI)
+	ed, problems := file.withNATMode(natED, newMultiExit())
+	if len(problems) != 0 || ed.String() != natCommandsED {
+		t.Fatalf("%q\n%s", problems, ed.String())
+	}
+	ei, problems := ed.withNATMode(natEI, newMultiExit())
+	if len(problems) != 0 || ei.String() != file.String() {
+		t.Fatalf("%q\n%s", problems, ei.String())
+	}
+	// A context without its loopback's VRF, and a pool receive of an address that is not the
+	// interface's, cannot be done NAT44-ED's way.
+	for _, line := range []string{"nat44 ei context wg1 loop101", "nat44 ei pool receive 10.9.9.9 port0", "nat44 ei plugin enable static-mapping-only"} {
+		if _, problems := parseCLI(line).withNATMode(natED, newMultiExit()); len(problems) != 1 {
+			t.Fatalf("%s translated", line)
+		}
+	}
+	for _, line := range []string{"nat44 add static mapping tcp local 1.1.1.1 1 external 2.2.2.2 1 twice-nat", "nat44 add interface address port0 twice-nat", "nat44 forwarding enable"} {
+		if _, problems := parseCLI(line).withNATMode(natEI, newMultiExit()); len(problems) != 1 {
+			t.Fatalf("%s translated", line)
+		}
+	}
+	// A small ED table caps the EI user-sessions.
+	ei, _ = parseCLI("nat44 plugin enable sessions 4096\n").withNATMode(natEI, newMultiExit())
+	if ei.String() != "nat44 ei plugin enable sessions 4096 users 4096 user-sessions 4096\n" {
+		t.Fatal(ei.String())
+	}
+}
+
+// The R6S's multi-exit lines: a bridged loopback exit with its context VRF, the WAN's output
+// chain and the pool receive lines.
+const multiExitEI = `nat44 ei add interface address wan0.100
+set interface nat44 ei out wan0.100 output-feature
+set interface ip address loop10 192.168.20.3/24
+ip table add 102
+create loopback interface instance 102
+set interface ip table loop102 102
+ip route add 0.0.0.0/0 table 102 via ip4-lookup-in-table 0
+set interface nat44 ei out loop10 output-feature
+nat44 ei context loop10 loop102
+nat44 ei add address 192.168.20.3 tenant-vrf 102
+nat44 ei add address 10.0.0.1 tenant-vrf 7
+nat44 ei output-chain wan0.100
+  nat44 ei pool receive 192.168.20.3 loop10
+nat44 ei pool receive 192.168.1.2 wan0.100
+`
+
+const multiExitED = `nat44 add interface address wan0.100
+set interface nat44 out wan0.100 output-feature
+set interface ip address loop10 192.168.20.3/24
+ip table add 102
+create loopback interface instance 102
+set interface ip table loop102 102
+ip route add 0.0.0.0/0 table 102 via ip4-lookup-in-table 0
+set interface nat44 out loop10 output-feature
+#ei-only: nat44 ei context loop10 loop102
+#ei-only: nat44 ei add address 192.168.20.3 tenant-vrf 102
+nat44 add address 192.168.20.3
+nat44 add address 10.0.0.1 tenant-vrf 7
+#ei-only: nat44 ei output-chain wan0.100
+  #ei-only: nat44 ei pool receive 192.168.20.3 loop10
+#ei-only: nat44 ei pool receive 192.168.1.2 wan0.100
+`
+
+func TestMultiExitNATMode(t *testing.T) {
+	file := parseCLI(multiExitEI)
+	m := newMultiExit()
+	m.scan(file.lines)
+	ed, problems := file.withNATMode(natED, m)
+	if len(problems) != 0 || ed.String() != multiExitED {
+		t.Fatalf("%q\n%s", problems, ed.String())
+	}
+	ei, problems := ed.withNATMode(natEI, newMultiExit())
+	if len(problems) != 0 || ei.String() != multiExitEI {
+		t.Fatalf("%q\n%s", problems, ei.String())
+	}
+	// An ED line edited by hand stays, in EI's form, after the restored line.
+	edited := strings.Replace(multiExitED, "nat44 add address 192.168.20.3\n", "nat44 add address 192.168.20.4\n", 1)
+	ei, _ = parseCLI(edited).withNATMode(natEI, newMultiExit())
+	if !strings.Contains(ei.String(), "nat44 ei add address 192.168.20.3 tenant-vrf 102\nnat44 ei add address 192.168.20.4\n") {
+		t.Fatal(ei.String())
+	}
+	// A context VRF's pool must be its exit's own address.
+	bad := parseCLI(strings.Replace(multiExitEI, "add address 192.168.20.3 tenant-vrf", "add address 192.168.20.9 tenant-vrf", 1))
+	m = newMultiExit()
+	m.scan(bad.lines)
+	if _, problems := bad.withNATMode(natED, m); len(problems) != 1 || !strings.Contains(problems[0], "192.168.20.9 不是出口 loop10 自己的地址") {
+		t.Fatal(problems)
+	}
+}
+
+// The R6S's layout through the service: its multi-exit file and a WireGuard exit with a context.
+func TestSetNATModeMultiExit(t *testing.T) {
+	s, fake := natTestService(t)
+	dir := filepath.Dir(s.opts.CLIFile)
+	local := filepath.Join(dir, "router-local.vpp")
+	localText := multiExitEI + "set interface ip table loop101 101\n"
+	writeTestFile(t, local, localText)
+	file := routerVPP + "exec " + local + "\n"
+	writeTestFile(t, s.opts.CLIFile, file)
+	s.opts.WireGuardStore = filepath.Join(dir, "wireguard.json")
+	store := `{"configs":[{"name":"vps","instance":1,"addresses":["10.1.5.2/24"],"after_up":["set interface nat44 ei out wg1 output-feature","nat44 ei context wg1 loop101","nat44 ei add address 10.1.5.2 tenant-vrf 101","nat44 ei pool receive 192.168.20.3 loop10"],"before_down":["nat44 ei add address 10.1.5.2 tenant-vrf 101 del","nat44 ei context wg1 loop101 del","set interface nat44 ei out wg1 output-feature del"]}]}`
+	writeTestFile(t, s.opts.WireGuardStore, store)
+	if st := s.State(); st.NAT.SwitchProblem != "" {
+		t.Fatal(st.NAT.SwitchProblem)
+	}
+	if _, err := s.SetNATMode(natED, "admin"); err != nil {
+		t.Fatal(err)
+	}
+	if got := readFile(t, local); got != multiExitED+"set interface ip table loop101 101\n" {
+		t.Fatal(got)
+	}
+	if readFile(t, s.opts.WireGuardStore) != store {
+		t.Fatal("the WireGuard store changed")
+	}
+	s.Confirm("admin")
+	if _, err := s.SetNATMode(natEI, "admin"); err != nil {
+		t.Fatal(err)
+	}
+	if readFile(t, local) != localText || readFile(t, s.opts.CLIFile) != file || fake.nat.Mode != natEI {
+		t.Fatal(readFile(t, local))
+	}
+	s.Confirm("admin")
+	// A pool address that is not the WireGuard exit's own refuses, naming the VPN.
+	writeTestFile(t, s.opts.WireGuardStore, strings.Replace(store, `"addresses":["10.1.5.2/24"]`, `"addresses":["10.1.5.3/24"]`, 1))
+	if _, err := s.SetNATMode(natED, "admin"); err == nil || !strings.Contains(err.Error(), "VPN「vps」（wg1）的接口附加命令第 3 条（10.1.5.2 不是出口 wg1 自己的地址") {
+		t.Fatal(err)
+	}
+}
+
+func TestStartConfNATMode(t *testing.T) {
+	withEI := strings.Replace(installerConf, "  plugin dpdk_plugin.so { enable }\n", "  plugin nat44_ei_plugin.so { enable }\n  plugin dpdk_plugin.so { enable }\n", 1)
+	conf, _ := parseStartConf(withEI)
+	if mode, err := conf.natMode(); mode != natEI || err != nil {
+		t.Fatal(mode, err)
+	}
+	text, err := conf.withNATMode(natED)
+	if err != nil || text != strings.Replace(withEI, "nat44_ei_plugin.so", "nat_plugin.so", 1) {
+		t.Fatalf("%v\n%s", err, text)
+	}
+	conf, _ = parseStartConf(text)
+	if mode, _ := conf.natMode(); mode != natED {
+		t.Fatal(mode)
+	}
+	// Both named: the enable moves.
+	both := strings.Replace(withEI, "  plugin dpdk_plugin.so", "  plugin nat_plugin.so { disable }\n  plugin dpdk_plugin.so", 1)
+	conf, _ = parseStartConf(both)
+	text, _ = conf.withNATMode(natED)
+	if !strings.Contains(text, "plugin nat44_ei_plugin.so { disable }\n  plugin nat_plugin.so { enable }") {
+		t.Fatal(text)
+	}
+	// Plugins on by default: the old one must be turned off.
+	open := strings.Replace(withEI, "  plugin default { disable }\n", "", 1)
+	conf, _ = parseStartConf(open)
+	if _, err := conf.natMode(); err == nil {
+		t.Fatal("both plugins load by default")
+	}
+	text, _ = conf.withNATMode(natED)
+	conf, _ = parseStartConf(text)
+	if mode, err := conf.natMode(); mode != natED || err != nil || !strings.Contains(text, "plugin nat44_ei_plugin.so { disable }") {
+		t.Fatalf("%v %v\n%s", mode, err, text)
+	}
+	// Neither named, default off: the plugin is added.
+	conf, _ = parseStartConf(installerConf)
+	text, _ = conf.withNATMode(natED)
+	if !strings.Contains(text, "  plugin dpdk_plugin.so { enable }\n  plugin nat_plugin.so { enable }\n}") {
+		t.Fatal(text)
+	}
+}
+
 func TestParseHardware(t *testing.T) {
 	text := `              Name                Idx   Link  Hardware
 port0                              1     up   port0
@@ -273,8 +486,27 @@ func (f *fakeVPP) start() {
 		}
 	}
 	file := parseCLI(readFile(f.t, filepath.Join(f.dir, "router.vpp")))
+	mode, err := conf.natMode()
+	if err != nil {
+		f.down = true
+		return
+	}
+	if mode == "" {
+		mode = file.natMode() // the fixture's plugins section names no NAT plugin
+	}
+	f.nat = nil
+	if mode == "" {
+		return
+	}
 	size, _ := file.natSize()
-	f.nat = &natRunning{Size: size, Timeouts: file.timeouts()}
+	f.nat = &natRunning{Mode: mode, Size: size, Timeouts: file.timeouts()}
+	if file.natMode() != mode {
+		// The other plugin's commands fail; the plugin runs with its defaults.
+		f.nat.Size, f.nat.Timeouts = defaultSize, defaultTimeouts
+		if mode == natED {
+			f.nat.Size = natSize{Sessions: defaultSize.Sessions}
+		}
+	}
 	if size.Sessions > 1<<20 {
 		f.nat.Size = defaultSize // the plugin could not enable
 	}
@@ -478,6 +710,152 @@ func TestPendingSurvivesRestart(t *testing.T) {
 	}
 }
 
+func natTestService(t *testing.T) (*Service, *fakeVPP) {
+	s, fake, _ := newTestService(t)
+	conf := strings.Replace(installerConf, "  plugin dpdk_plugin.so { enable }\n", "  plugin nat44_ei_plugin.so { enable }\n  plugin dpdk_plugin.so { enable }\n", 1)
+	writeTestFile(t, s.opts.StartConf, conf)
+	writeTestFile(t, s.opts.CLIFile, routerVPP+"nat44 ei add identity mapping external port0 udp 500\n")
+	fake.start()
+	return s, fake
+}
+
+func TestSetNATMode(t *testing.T) {
+	s, fake := natTestService(t)
+	conf, file := readFile(t, s.opts.StartConf), readFile(t, s.opts.CLIFile)
+	if st := s.State(); st.NAT.Mode != natEI || st.NAT.SwitchProblem != "" || st.NAT.Running.Mode != natEI {
+		t.Fatalf("%+v", st.NAT)
+	}
+	if _, err := s.SetNATMode(natEI, "admin"); err == nil {
+		t.Fatal("switched to the mode it runs")
+	}
+	state, err := s.SetNATMode(natED, "admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Pending == nil || fake.nat == nil || fake.nat.Mode != natED || fake.nat.Size != (natSize{Sessions: 65536}) || fake.nat.Timeouts.TCPEstablished != 1800 {
+		t.Fatalf("%+v %+v", state.Pending, fake.nat)
+	}
+	got := readFile(t, s.opts.CLIFile)
+	if !strings.Contains(got, "nat44 plugin enable sessions 65536\nset nat timeout tcp-established 1800 tcp-transitory 120\nnat44 add interface address port0\nset interface nat44 out port0 output-feature\nnat44 add identity mapping external port0 udp 500\n") {
+		t.Fatal(got)
+	}
+	if !strings.Contains(readFile(t, s.opts.StartConf), "plugin nat_plugin.so { enable }") {
+		t.Fatal(readFile(t, s.opts.StartConf))
+	}
+	// ED has sessions only.
+	if _, err := s.Rollback("admin"); err != nil {
+		t.Fatal(err)
+	}
+	if readFile(t, s.opts.StartConf) != conf || readFile(t, s.opts.CLIFile) != file || fake.nat.Mode != natEI {
+		t.Fatal("rollback did not restore EI")
+	}
+	if _, err := s.SetNATMode(natED, "admin"); err != nil {
+		t.Fatal(err)
+	}
+	s.Confirm("admin")
+	if _, err := s.SetNATSize(natSize{Sessions: 131072, Users: 1, UserSessions: 1}, "admin"); err != nil {
+		t.Fatal(err)
+	}
+	if fake.nat.Size != (natSize{Sessions: 131072}) || !strings.Contains(readFile(t, s.opts.CLIFile), "nat44 plugin enable sessions 131072\n") {
+		t.Fatalf("%+v", fake.nat)
+	}
+	s.Confirm("admin")
+	if _, err := s.SetNATTimeouts(natTimeouts{UDP: 120, TCPEstablished: 3600, TCPTransitory: 60, ICMP: 30}, "admin"); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(readFile(t, s.opts.CLIFile), "set nat timeout udp 120 tcp-established 3600 tcp-transitory 60 icmp 30\n") {
+		t.Fatal(readFile(t, s.opts.CLIFile))
+	}
+	if _, err := s.SetNATMode(natEI, "admin"); err != nil {
+		t.Fatal(err)
+	}
+	if fake.nat.Mode != natEI || fake.nat.Size != (natSize{131072, eiUsers, eiUserSessions}) || fake.nat.Timeouts.UDP != 120 {
+		t.Fatalf("%+v", fake.nat)
+	}
+}
+
+func TestSetNATModeRefusals(t *testing.T) {
+	s, _ := natTestService(t)
+	writeTestFile(t, s.opts.CLIFile, routerVPP+"nat44 ei context wg1 loop101\n")
+	if _, err := s.SetNATMode(natED, "admin"); err == nil || !strings.Contains(err.Error(), "nat44 ei context wg1 loop101") {
+		t.Fatal(err)
+	}
+	if st := s.State(); !strings.Contains(st.NAT.SwitchProblem, "context") {
+		t.Fatalf("%+v", st.NAT)
+	}
+	other := filepath.Join(filepath.Dir(s.opts.CLIFile), "more.cli")
+	writeTestFile(t, other, "nat44 ei add identity mapping external port0 udp 4500\nnat44 ei context wg1 loop101\n")
+	writeTestFile(t, s.opts.CLIFile, routerVPP+"exec "+other+"\n")
+	if _, err := s.SetNATMode(natED, "admin"); err == nil || !strings.Contains(err.Error(), other) || !strings.Contains(err.Error(), "context") {
+		t.Fatal(err)
+	}
+	if s.pending != nil {
+		t.Fatal("a refused change is pending")
+	}
+	// A WireGuard configuration's commands run in the running plugin's form, so only one with
+	// no equivalent refuses, and its commands are not quoted.
+	writeTestFile(t, s.opts.CLIFile, routerVPP)
+	s.opts.WireGuardStore = filepath.Join(filepath.Dir(s.opts.CLIFile), "wireguard.json")
+	writeTestFile(t, s.opts.WireGuardStore, `{"configs":[{"name":"vps","instance":1,"private_key":"secret","after_up":["set interface nat44 ei out wg1 output-feature","nat44 ei context wg1 loop101"],"before_down":["nat44 ei context wg1 loop101 del"]}]}`)
+	_, err := s.SetNATMode(natED, "admin")
+	if err == nil || !strings.Contains(err.Error(), "VPN「vps」（wg1）的接口附加命令第 2 条") || !strings.Contains(err.Error(), "停止前命令第 1 条") || strings.Contains(err.Error(), "context") || strings.Contains(err.Error(), "secret") {
+		t.Fatal(err)
+	}
+	writeTestFile(t, s.opts.WireGuardStore, `{"configs":[{"name":"vps","instance":1,"after_up":["set interface nat44 ei out wg1 output-feature"]}]}`)
+	if st := s.State(); st.NAT.SwitchProblem != "" {
+		t.Fatal(st.NAT.SwitchProblem)
+	}
+	s.opts.WireGuardStore = ""
+	// Two files with one base name would share a backup.
+	same := filepath.Join(t.TempDir(), filepath.Base(s.opts.CLIFile))
+	writeTestFile(t, same, "set interface nat44 ei out port0 output-feature\n")
+	writeTestFile(t, s.opts.CLIFile, routerVPP+"exec "+same+"\n")
+	if _, err := s.SetNATMode(natED, "admin"); err == nil || !strings.Contains(err.Error(), "同名") {
+		t.Fatal(err)
+	}
+	if s.pending != nil {
+		t.Fatal("a refused change is pending")
+	}
+}
+
+// The NAT44 commands of files the CLI file runs, at any depth, are rewritten and rolled back too.
+func TestSetNATModeExecFiles(t *testing.T) {
+	s, fake := natTestService(t)
+	dir := filepath.Dir(s.opts.CLIFile)
+	local := filepath.Join(dir, "router-local.vpp")
+	deeper := filepath.Join(dir, "deeper.vpp")
+	plain := filepath.Join(dir, "plain.vpp")
+	localText := "create loopback interface instance 10\n  set interface nat44 ei out loop10 output-feature\nexec " + deeper + "\nexec " + local + "\n"
+	deeperText := "# exits\nnat44 ei add address 192.0.2.10\n"
+	plainText := "set interface state loop10 up\n"
+	writeTestFile(t, local, localText)
+	writeTestFile(t, deeper, deeperText)
+	writeTestFile(t, plain, plainText)
+	file := routerVPP + "exec " + local + "\nexec " + plain + "\nexec " + filepath.Join(dir, "missing.vpp") + "\n"
+	writeTestFile(t, s.opts.CLIFile, file)
+	if st := s.State(); st.NAT.SwitchProblem != "" {
+		t.Fatal(st.NAT.SwitchProblem)
+	}
+	if _, err := s.SetNATMode(natED, "admin"); err != nil {
+		t.Fatal(err)
+	}
+	if got := readFile(t, local); got != strings.Replace(localText, "nat44 ei out", "nat44 out", 1) {
+		t.Fatal(got)
+	}
+	if got := readFile(t, deeper); got != "# exits\nnat44 add address 192.0.2.10\n" {
+		t.Fatal(got)
+	}
+	if readFile(t, plain) != plainText || !slices.Contains(s.pending.Files, local) || !slices.Contains(s.pending.Files, deeper) || slices.Contains(s.pending.Files, plain) {
+		t.Fatalf("%v", s.pending.Files)
+	}
+	if _, err := s.Rollback("admin"); err != nil {
+		t.Fatal(err)
+	}
+	if readFile(t, local) != localText || readFile(t, deeper) != deeperText || readFile(t, s.opts.CLIFile) != file || fake.nat.Mode != natEI {
+		t.Fatal("rollback did not restore the exec'd files")
+	}
+}
+
 func TestNATTimeouts(t *testing.T) {
 	s, fake, _ := newTestService(t)
 	want := natTimeouts{UDP: 120, TCPEstablished: 3600, TCPTransitory: 60, ICMP: 30}
@@ -591,9 +969,62 @@ func TestStateJSON(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{`"devices":[]`, `"running":{"size":{"sessions":65536`, `"timeouts":{"udp":300`} {
+	for _, want := range []string{`"devices":[]`, `"running":{"mode":"ei","size":{"sessions":65536`, `"timeouts":{"udp":300`} {
 		if !strings.Contains(string(data), want) {
 			t.Errorf("state has no %s: %s", want, data)
 		}
+	}
+}
+
+// The installer's offline rewrite: the CLI file it wrote for ED, and an exec'd file still in EI's form.
+func TestNATModeCommand(t *testing.T) {
+	dir := t.TempDir()
+	local := filepath.Join(dir, "router-local.vpp")
+	cli := filepath.Join(dir, "router.vpp")
+	conf := filepath.Join(dir, "router.conf")
+	writeTestFile(t, local, multiExitEI)
+	edCLI := "nat44 plugin enable sessions 65536\nexec " + local + "\n"
+	writeTestFile(t, cli, edCLI)
+	writeTestFile(t, conf, "unix {\n  startup-config "+cli+"\n}\n")
+	backups := filepath.Join(dir, "backups")
+	args := []string{"-mode", "ed", "-vpp-config", conf, "-wireguard-store", "", "-backup-dir", backups}
+	if err := runNATMode(append(args, "-check")); err != nil {
+		t.Fatal(err)
+	}
+	if readFile(t, local) != multiExitEI {
+		t.Fatal("-check changed the file")
+	}
+	if err := runNATMode(args); err != nil {
+		t.Fatal(err)
+	}
+	if readFile(t, local) != multiExitED || readFile(t, cli) != edCLI {
+		t.Fatal(readFile(t, local))
+	}
+	saved := filepath.Join(backups, strings.ReplaceAll(strings.TrimPrefix(local, "/"), "/", "_")+".nat-mode.bak")
+	if readFile(t, saved) != multiExitEI {
+		t.Fatal("no copy of the old file")
+	}
+	if _, err := os.Stat(filepath.Join(backups, strings.ReplaceAll(strings.TrimPrefix(cli, "/"), "/", "_")+".nat-mode.bak")); err == nil {
+		t.Fatal("an unchanged file was copied")
+	}
+	// Back to EI gives the original; the CLI file is the installer's, already for EI.
+	writeTestFile(t, cli, "nat44 ei plugin enable sessions 65536 users 4096 user-sessions 16384\nexec "+local+"\n")
+	if err := runNATMode([]string{"-mode", "ei", "-cli-file", cli, "-wireguard-store", ""}); err != nil {
+		t.Fatal(err)
+	}
+	if readFile(t, local) != multiExitEI {
+		t.Fatal(readFile(t, local))
+	}
+	// A refusal changes nothing.
+	bad := strings.Replace(multiExitEI, "add address 192.168.20.3 tenant-vrf", "add address 192.168.20.9 tenant-vrf", 1)
+	writeTestFile(t, local, bad)
+	if err := runNATMode([]string{"-mode", "ed", "-cli-file", cli, "-wireguard-store", ""}); err == nil || !strings.Contains(err.Error(), "192.168.20.9") {
+		t.Fatal(err)
+	}
+	if readFile(t, local) != bad {
+		t.Fatal("a refused rewrite changed the file")
+	}
+	if err := runNATMode([]string{"-mode", "x"}); err == nil {
+		t.Fatal("mode x accepted")
 	}
 }

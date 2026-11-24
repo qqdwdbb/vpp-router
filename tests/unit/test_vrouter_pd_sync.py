@@ -96,7 +96,8 @@ m.main()
             config = dict(vpp_socket=str(sock), state_file='/run/pd-test/state.json',
                           lan_interface='loop200', wan_interface='wan100', prefix_group='wan-pd',
                           withdraw_seconds=5, ipsec_config=str(pool), dhcp_lease_file=str(root/'leases'),
-                          ipsec_pool_routes=True)
+                          ipsec_pool_routes=True, host_interface='vpp-host',
+                          ipsec_host_gateway='fd42::1')
             snapshot = {'network': '2001:db8:1::', 'default': True, 'fail': False, 'gateway': 'fe80::1'}
             commands = []
             def cli(command):
@@ -113,7 +114,7 @@ m.main()
                 return ''
             def path(value):
                 return root/'state.json' if str(value) == config['state_file'] else Path(value)
-            with patch.object(m, 'Path', side_effect=path):
+            with patch.object(m, 'Path', side_effect=path), patch.object(m.subprocess, 'run') as execute:
                 publisher = m.Publisher(config, cli)
                 self.assertIsNone(publisher.sync(0)['pool_prefix'])
                 self.assertEqual(publisher.sync(6)['pool_prefix'], '2001:db8:1::/64')
@@ -122,13 +123,20 @@ m.main()
                 self.assertNotIn('10.62.20.0/24,2001:db8:1::100-2001:db8:1::200', pool.read_text())
                 self.assertIn('ip route add 2001:db8:1::100/120 via fe80::1 wan100', commands)
                 self.assertIn('ip route add 2001:db8:1::200/128 via fe80::1 wan100', commands)
+                host_route = ['ip', '-6', 'route', 'replace', '2001:db8:1::100/120',
+                              'via', 'fd42::1', 'dev', 'vpp-host', 'metric', '100']
+                self.assertIn(host_route, [c.args[0] for c in execute.call_args_list])
+                self.assertEqual(publisher.status['ipsec_host_routes']['2001:db8:1::100/120'],
+                                 ['fd42::1', 'vpp-host'])
                 route_count = len([c for c in commands if c.startswith('ip route')])
                 stamp = pool.stat().st_mtime_ns
                 publisher.sync(7)
+                self.assertEqual([c.args[0] for c in execute.call_args_list].count(host_route), 1)
                 self.assertEqual(pool.stat().st_mtime_ns, stamp)
                 self.assertEqual(len([c for c in commands if c.startswith('ip route')]), route_count)
                 restarted = m.Publisher(config, cli)
                 self.assertEqual(restarted.sync(8)['pool_prefix'], '2001:db8:1::/64')
+                self.assertEqual([c.args[0] for c in execute.call_args_list].count(host_route), 2)
                 self.assertEqual(pool.stat().st_mtime_ns, stamp)
                 snapshot['gateway'] = 'fe80::2'
                 restarted.sync(8.5)
@@ -141,6 +149,9 @@ m.main()
                 self.assertEqual(pool.stat().st_mtime_ns, stamp)
                 snapshot.update(fail=False, default=False)
                 self.assertIsNone(restarted.sync(10)['pool_prefix'])
+                self.assertEqual(restarted.status['ipsec_host_routes'], {})
+                self.assertIn(host_route[:3]+['del']+host_route[4:],
+                              [c.args[0] for c in execute.call_args_list])
                 self.assertNotIn('2001:db8', pool.read_text())
                 self.assertIn('ip route del 2001:db8:1::100/120 via fe80::2 wan100', commands)
                 self.assertIn('ip6 nd loop200 prefix 2001:db8:1::/64 10 0', commands)
@@ -151,6 +162,8 @@ m.main()
                 restarted.sync(17)
                 self.assertIn('ip6 nd loop200 prefix 2001:db8:2::/64 10 0 no-autoconfig', commands)
                 self.assertEqual(restarted.sync(23)['pool_prefix'], '2001:db8:2::/64')
+                self.assertIn('2001:db8:2::100/120', restarted.status['ipsec_host_routes'])
+                self.assertNotIn('2001:db8:1::100/120', restarted.status['ipsec_host_routes'])
                 self.assertIn('rightauth=eap-mschapv2', pool.read_text())
                 replacement = root / 'replacement.sock'
                 replacement.touch()

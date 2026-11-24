@@ -1,5 +1,5 @@
 // vpp-firewall controls what a VPP router lets in from its WAN: IPv4 port forwards and ports
-// open to VPP itself (NAT44-EI static and identity mappings), ping, and a stateful IPv6 inbound
+// open to VPP itself (NAT44 static and identity mappings), ping, and a stateful IPv6 inbound
 // firewall (acl plugin). VPP keeps none of it across a restart, so this puts it back.
 package main
 

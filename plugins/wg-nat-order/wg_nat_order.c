@@ -30,7 +30,9 @@ VLIB_REGISTER_NODE (wg_nat_order_node) = {
 VNET_FEATURE_INIT (wg_nat_order_anchor, static) = {
   .arc_name = "ip4-output",
   .node_name = "wg-nat-order-anchor",
-  .runs_after = VNET_FEATURES ("nat44-ei-in2out-output", "nat-ei-context-exit", "tcp-mss-clamping-ip4-out"),
+  .runs_after = VNET_FEATURES ("nat44-ei-in2out-output", "nat-ei-context-exit",
+				"nat-pre-in2out-output", "nat44-in2out-output-worker-handoff",
+				"nat44-ed-in2out-output", "tcp-mss-clamping-ip4-out"),
   .runs_before = VNET_FEATURES ("wg4-output-tun"),
 };
 

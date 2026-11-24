@@ -472,6 +472,11 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual(find(links, ['10.61.30.0/24']), (['n1-lan'], ['10.61.30.2', '10.62.10.1']))
         self.assertEqual(find(links, ['10.61.30.0/24', 'fd00::/64']), (['n1-lan', 'v6lan'], ['10.61.30.2', '10.62.10.1', 'fd00::2']))
         self.assertEqual(find(links, ['172.16.0.0/24']), ([], []))
+        # Privacy and deprecated addresses change when the interface is made again.
+        tap = lan_link('vpp-host', ('global', '10.61.30.2'), ('global', 'fd00::66:1bff:fee1:fa4c'))
+        tap['addr_info'] += [{'scope': 'global', 'local': 'fd00::52fc:d6d3:1a0d:ead', 'temporary': True, 'dynamic': True},
+                             {'scope': 'global', 'local': 'fd00::dead', 'deprecated': True}]
+        self.assertEqual(find([tap], ['10.61.30.0/24', 'fd00::/64']), (['vpp-host'], ['10.61.30.2', 'fd00::66:1bff:fee1:fa4c']))
 
     def test_vpp_hijack_entries_need_linux_on_the_client_network(self):
         entries = installer().vpp_hijack_entries

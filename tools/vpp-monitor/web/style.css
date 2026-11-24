@@ -102,6 +102,14 @@ input[type=search] { font: inherit; color: var(--ink); background: var(--page); 
 .login button:disabled { opacity: .6; cursor: default; }
 .login .note { margin-top: 10px; min-height: 1.4em; }
 .logout { margin-left: auto; align-self: center; }
+#logout { align-self: center; }
+.password-dialog { width: min(420px, calc(100vw - 32px)); }
+.link-button { display: block; margin: 6px auto 0; padding: 0; border: 0; background: none; color: var(--ink-2); text-decoration: underline; cursor: pointer; }
+.login .link-button { width: auto; padding: 0; background: none; color: var(--ink-2); }
+.help-dialog { width: min(560px, calc(100vw - 32px)); }
+.help-dialog .note { margin: 12px 0 8px; }
+.help-dialog pre { margin: 0; padding: 10px; overflow-x: auto; white-space: pre; font-size: 12px; color: var(--ink); background: var(--page); border: 1px solid var(--border); border-radius: 6px; }
+.help-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
 .main-nav { margin-left: 8px; align-self: center; }
 .main-nav a { padding: 4px 10px; border-radius: 6px; color: var(--ink-2); text-decoration: none; }
 .main-nav a:hover { background: var(--wash); }

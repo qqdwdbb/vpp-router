@@ -34,7 +34,7 @@ func testAuth(t *testing.T) (*Auth, *time.Time) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	a, err := NewAuth(credentials)
+	a, err := NewAuth(credentials, path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -215,6 +215,67 @@ func TestLoginFlow(t *testing.T) {
 	}
 	if w := request(h, "GET", "/api/status", "", cookie.Value, ""); w.Code != http.StatusUnauthorized {
 		t.Fatalf("after logout = %d", w.Code)
+	}
+}
+
+func TestPasswordChange(t *testing.T) {
+	a, _ := testAuth(t)
+	h := wrapped(a)
+	login := func(password string) string {
+		w := request(h, "POST", "/api/login", `{"user":"admin","password":"`+password+`"}`, "", "")
+		if w.Code != http.StatusNoContent {
+			return ""
+		}
+		return w.Result().Cookies()[0].Value
+	}
+	mine, other := login("correct horse"), login("correct horse")
+	if mine == "" || other == "" {
+		t.Fatal("login failed")
+	}
+	if w := request(h, "POST", "/api/password", `{"current":"correct horse","password":"new one here"}`, "", ""); w.Code != http.StatusUnauthorized {
+		t.Fatalf("without a session = %d", w.Code)
+	}
+	if w := request(h, "POST", "/api/password", `{"current":"wrong","password":"new one here"}`, mine, ""); w.Code != http.StatusForbidden {
+		t.Fatalf("wrong current = %d %s", w.Code, w.Body)
+	}
+	if w := request(h, "POST", "/api/password", `{"current":"correct horse","password":"short"}`, mine, ""); w.Code != http.StatusBadRequest {
+		t.Fatalf("short = %d %s", w.Code, w.Body)
+	}
+	if w := request(h, "POST", "/api/password", `{"current":"correct horse","password":"new one here"}`, mine, ""); w.Code != http.StatusNoContent {
+		t.Fatalf("change = %d %s", w.Code, w.Body)
+	}
+	if !a.Valid(mine) || a.Valid(other) {
+		t.Fatal("the changing session must stay and the others end")
+	}
+	if login("correct horse") != "" || login("new one here") == "" {
+		t.Fatal("the new password is not the one in use")
+	}
+	stored, err := LoadCredentials(a.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fresh, err := NewAuth(stored, a.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := fresh.check("admin", "new one here"); err != nil || !ok {
+		t.Fatalf("the file does not hold the new password: %v %v", ok, err)
+	}
+}
+
+func TestWrongCurrentPasswordCountsAsAFailure(t *testing.T) {
+	a, _ := testAuth(t)
+	token, err := a.Login("admin", "correct horse", "1.2.3.4")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < failureLimit; i++ {
+		if err := a.ChangePassword(token, "guess", "new one here", "1.2.3.4"); !errors.Is(err, errBadLogin) {
+			t.Fatalf("attempt %d: %v", i, err)
+		}
+	}
+	if err := a.ChangePassword(token, "correct horse", "new one here", "1.2.3.4"); !errors.Is(err, errLocked) {
+		t.Fatalf("after %d wrong guesses: %v", failureLimit, err)
 	}
 }
 

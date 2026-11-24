@@ -265,6 +265,15 @@ func LoadGateFile(path string) (*GateFile, error) {
 	if err := g.validateHijack(); err != nil {
 		return nil, err
 	}
+	if value, present := doc["hijack_vpp_enabled"]; present {
+		enabled, ok := value.(bool)
+		if !ok {
+			return nil, fmt.Errorf("hijack_vpp_enabled must be a boolean")
+		}
+		if !enabled {
+			g.HijackVPP = nil
+		}
+	}
 	_, routes, err := linkedJSON(doc, "domain_routes_file")
 	if err != nil {
 		return nil, err
@@ -1218,7 +1227,7 @@ func DomainRoutesFromFile(path string, cfg *Config) ([]Rule, error) {
 	}
 	cfg.FakeIPPools = pools
 	cfg.IPRangePrefixes = ipRangePrefixes
-	ttl := 604800
+	ttl := 0 // Unset means preserve the upstream DNS TTL.
 	if v, ok := doc["fakeip_ttl"]; ok {
 		n, err := asInt(v)
 		if err != nil || n < 1 || n > 2147483647 {

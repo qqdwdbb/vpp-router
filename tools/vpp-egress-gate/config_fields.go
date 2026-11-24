@@ -14,7 +14,7 @@ import (
 // should not cost DNS.
 
 // A single file may hold what a split configuration keeps in three, so one list covers them.
-var knownFields = fieldSet("route_config", "domain_routes_file", "lease_file", "upstream", "listen", "hijack_dns", "hijack_interfaces", "hijack_vpp",
+var knownFields = fieldSet("route_config", "domain_routes_file", "lease_file", "upstream", "listen", "hijack_dns", "hijack_interfaces", "hijack_vpp", "hijack_vpp_enabled",
 	"routes", "lan_prefixes", "lan_interfaces", "interval_seconds", "monitor_resync_seconds", "max_routes", "idle_seconds", "fib_audit_seconds", "vpp_socket",
 	"api_socket", "vpp_service", "state_file", "state_socket", "lock_files", "exclude_prefixes", "dns_upstream_policy", "overlap_policy", "fakeip_ttl")
 

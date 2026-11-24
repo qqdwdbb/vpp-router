@@ -554,6 +554,9 @@ func (c *Controller) DNSUpstreamRoute(q Question) (*Upstream, uint32) {
 
 func (c *Controller) AnswerTTL(q Question) *uint32 {
 	cfg, rules := c.loaded()
+	if cfg.FakeIPTTL == 0 {
+		return nil
+	}
 	rule := c.dnsRule(cfg, rules, q)
 	if rule != nil {
 		family := queryFamily(q)

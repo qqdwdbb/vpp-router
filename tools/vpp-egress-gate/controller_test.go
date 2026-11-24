@@ -735,7 +735,7 @@ func TestFakeIPPoolsInstallOnceAndAnswersWriteNoRoutes(t *testing.T) {
 			t.Fatalf("upstream %+v", up)
 		}
 		ttl := h.controller.AnswerTTL(q)
-		if ttl == nil || *ttl != 604800 {
+		if ttl != nil {
 			t.Fatalf("ttl %+v", ttl)
 		}
 		for i := 0; i < 3; i++ {
@@ -978,5 +978,40 @@ func TestSamePrefixQueriesWaitForSuccessfulAdd(t *testing.T) {
 	}
 	if h.backend.BatchCount() != 2 {
 		t.Fatalf("batches %d", h.backend.BatchCount())
+	}
+}
+
+func TestFakeIPTTLOverrideIsExplicitAndCanBeRemoved(t *testing.T) {
+	h := newHarness(t)
+	path := h.fakeIP(t, true)
+	var doc map[string]any
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatal(err)
+	}
+	for _, ttl := range []int{300, 0} {
+		if ttl == 0 {
+			delete(doc, "fakeip_ttl")
+		} else {
+			doc["fakeip_ttl"] = ttl
+		}
+		writeJSON(t, path, doc)
+		h.restart(t)
+		for _, kind := range []uint16{1, 28} {
+			got := h.controller.AnswerTTL(Question{"www.example.com", kind, 1})
+			if ttl == 0 {
+				if got != nil {
+					t.Fatalf("default override = %v", *got)
+				}
+			} else if got == nil || *got != uint32(ttl) {
+				t.Fatalf("override = %v", got)
+			}
+			if got := h.controller.AnswerTTL(Question{"real.example.com", kind, 1}); got != nil {
+				t.Fatal("real DNS answer got Fake-IP override")
+			}
+		}
 	}
 }

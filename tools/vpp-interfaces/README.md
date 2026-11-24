@@ -51,7 +51,7 @@ sudo systemctl enable --now vpp-interfaces
 | `create bridge-domain 编号`、`create loopback interface ... instance N` | 新建桥域，可选同时建一个 loopback 作为 BVI |
 | `set interface l2 bridge 接口 桥 [bvi]`、`set interface l2 tag-rewrite 接口 pop 1` | 加入、移出、换桥 |
 | `set interface state 接口 up/down`、`set interface mtu packet N 接口` | 状态、MTU |
-| `nat44 ei add interface address 接口`、`set interface nat44 ei out 接口 output-feature` | 出口（NAT）：从这个口出去的流量转换成它自己的地址 |
+| `nat44 ei add interface address 接口`、`set interface nat44 ei out 接口 output-feature`（NAT44-ED 为 `nat44 add interface address 接口`、`set interface nat44 out 接口 output-feature`） | 出口（NAT）：从这个口出去的流量转换成它自己的地址 |
 
 - 文件里提到的接口和物理口才能修改。WireGuard、Gate 的 TAP 等由其他程序创建的接口只显示。
 - 新的行插在这个接口已有的行后面（也在它所在桥的 `create bridge-domain` 后面），文件里没有这个接口时加在末尾。
@@ -64,10 +64,10 @@ sudo systemctl enable --now vpp-interfaces
 
 ## 出口（NAT）
 
-“设为出口”给接口加上安装器给 WAN 写的那种 NAT：NAT44-EI 作为输出特性，地址池是接口自己的地址，DHCP 换了地址也跟着变。文件里还没有 `nat44 ei plugin enable` 时，连同安装器用的会话数和超时一起加上（插件这时才启用）。新的两行放在启用插件那行之后。
+“设为出口”给接口加上安装器给 WAN 写的那种 NAT：NAT44 作为输出特性，地址池是接口自己的地址，DHCP 换了地址也跟着变。命令按 VPP 加载的插件写成 NAT44-EI 或 NAT44-ED 的（模式在系统页切换）；文件里已有的 NAT 命令和 VPP 运行的插件不一致时拒绝。文件里还没有启用插件的行（`nat44 ei plugin enable` 或 `nat44 plugin enable`）时，连同安装器用的会话数和超时一起加上（插件这时才启用）。新的两行放在启用插件那行之后。
 
 - 只做地址转换，不改路由；流量要走这个口，还要在路由页把它选为默认出口或规则的出口。
-- 要先有 IPv4 地址（静态或 DHCP）。loopback、网桥的网关、网桥里的二层口不能做出口。用 `set interface nat44 ei in ... out ...` 写的 NAT 不在面板里改。
+- 要先有 IPv4 地址（静态或 DHCP）。loopback、网桥的网关、网桥里的二层口不能做出口。用 `set interface nat44 [ei] in ... out ...` 写的 NAT 不在面板里改。
 - 取消时只删这两行，插件保持启用。文件里还有引用这个接口的其他 NAT 命令（静态映射、identity mapping，比如 IPsec 的 500、4500 端口）时拒绝，要先手动删掉。
 - 是出口的接口不能加入网桥，子接口不能删除，要先取消。
 - 只管 IPv4。IPv6 的 NAT66 不在这里。

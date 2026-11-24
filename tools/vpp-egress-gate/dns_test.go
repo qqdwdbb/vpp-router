@@ -131,10 +131,10 @@ func TestFakeIPTTLOverridePreservesOPT(t *testing.T) {
 	binary.BigEndian.PutUint16(answer[10:], 1)
 	opt := []byte{0, 0, 41, 4, 208, 0, 0, 0x80, 0, 0, 0}
 	answer = append(answer, opt...)
-	ttl := uint32(604800)
+	ttl := uint32(30)
 	changed := StripHTTPSH3(answer, &ttl)
 	got, err := Decode(changed)
-	if err != nil || len(got.Records) != 1 || got.Records[0].TTL != 604800 {
+	if err != nil || len(got.Records) != 1 || got.Records[0].TTL != 30 {
 		t.Fatalf("got %+v, %v", got, err)
 	}
 	if !bytesHasSuffix(changed, opt) || len(changed) != len(answer) {
@@ -498,16 +498,16 @@ func TestStripHTTPSH3KeepsADWhenHTTPSUnchanged(t *testing.T) {
 	}
 }
 
-func TestStripHTTPSH3TTLRewriteClearsAD(t *testing.T) {
+func TestStripHTTPSH3TTLShorteningKeepsAD(t *testing.T) {
 	answer := withAD(replyPacket(60))
-	ttl := uint32(604800)
+	ttl := uint32(30)
 	changed := StripHTTPSH3(answer, &ttl)
 	got, err := Decode(changed)
-	if err != nil || len(got.Records) != 1 || got.Records[0].TTL != 604800 {
+	if err != nil || len(got.Records) != 1 || got.Records[0].TTL != 30 {
 		t.Fatalf("got %+v, %v", got, err)
 	}
-	if binary.BigEndian.Uint16(changed[2:])&dnsFlagAD != 0 {
-		t.Fatal("TTL extension kept AD")
+	if binary.BigEndian.Uint16(changed[2:])&dnsFlagAD == 0 {
+		t.Fatal("TTL shortening cleared AD")
 	}
 }
 
@@ -554,4 +554,36 @@ func rpNames(pkt []byte) (string, string, error) {
 		return mbox, txt, nil
 	}
 	return "", "", fmt.Errorf("no RP record")
+}
+
+func TestFakeIPTTLCapNeverExtendsRecords(t *testing.T) {
+	for _, rr := range []struct {
+		kind uint16
+		data []byte
+	}{
+		{1, []byte{192, 0, 2, 1}},
+		{28, make([]byte, 16)},
+		{5, []byte{0xc0, 0x0c}},
+	} {
+		for _, limit := range []uint32{30, 60, 600, 604800} {
+			answer := withAD(packet(rr.kind, rr.data))
+			got := StripHTTPSH3(answer, &limit)
+			decoded, err := Decode(got)
+			want := uint32(60)
+			if limit < want {
+				want = limit
+			}
+			if err != nil || len(decoded.Records) != 1 || decoded.Records[0].TTL != want {
+				t.Fatalf("type %d limit %d: %+v, %v", rr.kind, limit, decoded, err)
+			}
+			if limit >= 60 && string(got) != string(answer) {
+				t.Fatal("unchanged TTL rewrote response")
+			}
+		}
+	}
+	zero := replyPacket(0)
+	limit := uint32(300)
+	if string(StripHTTPSH3(zero, &limit)) != string(zero) {
+		t.Fatal("extended zero TTL")
+	}
 }

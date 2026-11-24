@@ -57,6 +57,8 @@ class Publisher:
         self.pool_gateway = saved.get('ipsec_gateway')
         self.pool_interface = saved.get('ipsec_interface')
         self.host_address = saved.get('host_address')
+        self.host_pool_routes = saved.get('ipsec_host_routes', {})
+        self.host_pool_installed = False
         self.ipsec_addresses = None
         self.nat66 = None
         self.pools = runpy.run_path(_shared_tool('ipsec/ipsec-prefix-sync.py')) if config.get('ipsec_config') else None
@@ -73,6 +75,30 @@ class Publisher:
 
     def command(self, prefix, value):
         self.cli(f"ip6 nd {self.config['lan_interface']} prefix {prefix} {value}")
+
+    def sync_host_pool_routes(self, prefixes):
+        gateway = self.config.get('ipsec_host_gateway')
+        if not gateway:
+            return
+        gateway = str(ip.IPv6Address(gateway))
+        interface = self.config.get('host_interface', '')
+        if not re.fullmatch(r'[A-Za-z0-9_.-]{1,15}', interface):
+            raise ValueError('Invalid host interface')
+        desired = {prefix: [gateway, interface] for prefix in prefixes}
+        # Override a Linux connected LAN /64 for proxy replies to VPN clients.
+        # Reapply after process restart even when the saved plan is unchanged.
+        for prefix, path in desired.items():
+            if not self.host_pool_installed or self.host_pool_routes.get(prefix) != path:
+                subprocess.run(['ip', '-6', 'route', 'replace', prefix, 'via', path[0],
+                                'dev', path[1], 'metric', '100'],
+                               check=True, capture_output=True, timeout=10)
+        for prefix, path in self.host_pool_routes.items():
+            if desired.get(prefix) != path:
+                subprocess.run(['ip', '-6', 'route', 'del', prefix, 'via', path[0],
+                                'dev', path[1], 'metric', '100'],
+                               check=True, capture_output=True, timeout=10)
+        self.host_pool_routes = desired
+        self.host_pool_installed = True
 
     def withdrawal_lifetime(self, no_autoconfig=False):
         """Return a finite deprecated lifetime for a withdrawing prefix.
@@ -184,6 +210,7 @@ class Publisher:
                 # the WAN SPD instead of attempting LAN neighbour discovery.
                 routes = sorted({str(prefix) for first, last in ranges
                                  for prefix in ip.summarize_address_range(first, last)})
+                self.sync_host_pool_routes(routes)
                 next_hop = str(ip.IPv6Address(gateway[1])) if gateway else None
                 interface = self.config['wan_interface']
                 old_path = (self.pool_gateway, self.pool_interface)
@@ -214,6 +241,8 @@ class Publisher:
         if self.config.get('ipsec_pool_routes'):
             status.update(ipsec_routes=self.pool_routes, ipsec_gateway=self.pool_gateway,
                           ipsec_interface=self.pool_interface)
+        if self.config.get('ipsec_host_gateway'):
+            status['ipsec_host_routes'] = self.host_pool_routes
         # Volatile state changes only; lease polling never writes /var/lib.
         encoded = json.dumps(status, sort_keys=True)
         if self.status != json.loads(encoded):

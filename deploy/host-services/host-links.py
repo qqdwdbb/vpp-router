@@ -39,8 +39,14 @@ def main():
                 raise ValueError('unsupported interface sysctl')
             run('sysctl', '-qw', f'net.ipv{6 if key in ("accept_ra","autoconf") else 4}.conf.{interface}.{key}={int(value)}')
     for route in config.get('routes', []):
-        run('ip', '-6' if ':' in route['prefix'] else '-4', 'route', 'replace',
-            route['prefix'], 'via', route['via'], 'dev', name(route['interface']))
+        command = ['ip', '-6' if ':' in route['prefix'] else '-4', 'route', 'replace',
+                   route['prefix'], 'via', route['via'], 'dev', name(route['interface'])]
+        if 'metric' in route:
+            metric = route['metric']
+            if type(metric) is not int or not 0 <= metric <= 0xffffffff:
+                raise ValueError('invalid route metric')
+            command += ['metric', metric]
+        run(*command)
     if config.get('wg_proxy_nft'):
         run('nft', '-f', config['wg_proxy_nft'])
     for policy in config.get('nft_files', []):

@@ -93,7 +93,7 @@ sudo python3 install.py --binary dist/vpp-egress-gate-linux-arm64 --dry-run
 发到这些接口的 53 端口查询（TCP 和 UDP）会被重定向到 Gate，客户端不用改设置。`listen` 列出接口的所有全局地址，因为重定向的目标是内核选的入接口地址。这些地址是生成时的快照，变化后要手动更新 `listen`。同时生成 `hijack_vpp`（比如 `[{"interface": "loop0", "via": ["10.61.30.2"], "sources": ["10.61.30.0/24"]}]`）：VPP 用 ACL 和 ABF 把这些客户端发往任意地址的 53 端口查询先送到 Linux，再由上面的规则交给 Gate，所以手动设置了公网 DNS 的客户端也会经过 Gate。这一项是可选的：脚本先说明作用和限制（客户端自选的 DNS 不再起作用、DoH/DoT 不受影响、LAN 客户端的每个包多一次 ACL 匹配），再询问，回车即开启；不开启时不写 `hijack_vpp`，发到本机的查询仍然经过 Gate。回包的来源地址由 conntrack 还原。这需要两个条件，不满足时 Gate 照常运行，`install.py` 和日志（`DNS sent elsewhere is not going through Gate`）会提示，这时只有发给 Linux 的查询经过 Gate：
 
 - VPP 加载了 `acl`、`abf` 插件。
-- NAT44 在 WAN 上用 `output-feature`。写 `set interface nat44 ei in LAN out WAN` 时，NAT 排在 ABF 之前，源地址已被改写，ACL 匹配不到客户端，VPP 也不能调整这个顺序。要改的话，把启动 CLI 里这一行换成 `set interface nat44 ei out WAN output-feature`，重启 VPP。
+- NAT44 在 WAN 上用 `output-feature`。写 `set interface nat44 ei in LAN out WAN`（NAT44-ED 为 `set interface nat44 in LAN out WAN`）时，NAT 排在 ABF 之前，源地址已被改写，ACL 匹配不到客户端，VPP 也不能调整这个顺序。要改的话，把启动 CLI 里这一行换成 `set interface nat44 ei out WAN output-feature`（NAT44-ED 为 `set interface nat44 out WAN output-feature`），重启 VPP。
 
 DoH、DoT 不会被劫持。
 
@@ -414,6 +414,7 @@ example.net
 | `hijack_dns` | 布尔值，不写时 `false`；生成的配置可能写 `true`，见第 1 节 | 启用指定 Linux 接口上的客户端 TCP/UDP 53 重定向 |
 | `hijack_interfaces` | 字符串或字符串数组 | 开启劫持时必填，例如 `["br-mgmt"]`；所有 `listen` 须使用同一端口 |
 | `hijack_vpp` | 对象数组，可省略 | 需要 `hijack_dns`。每项有 `interface`（VPP 入接口）、`via`（该接口网段上的 Linux 地址，每个地址族一个）、`sources`（客户端网段），让 VPP 把这些客户端的 53 端口查询送到 Linux。Linux 自己的地址不受影响 |
+| `hijack_vpp_enabled` | 布尔值，不写时 `true` | 关闭时保留 `hijack_vpp` 配置但撤销 VPP DNS 劫持；Linux 上的 DNS 重定向仍由 `hijack_dns` 控制。可在面板“路由 → DNS 劫持”切换 |
 
 若启用 DNS 劫持，确认已使用的 nftables 规则不会与 Gate 重复重定向；它不劫持 DoH / DoT。
 
@@ -472,8 +473,10 @@ example.net
 不同 DNS 别名同时出现时必须指定相同上游。只配置 IPv4 出口且首个匹配规则无 IPv6
 出口时，AAAA 返回 NODATA，不查询上游；NODATA 与提交失败时的 SERVFAIL 不同。
 
-`routes` 所在 JSON 顶层还支持 `fakeip_ttl`（默认 `604800`，范围
-1–2147483647 秒），覆盖 Fake-IP 应答的 A / AAAA / CNAME TTL。该 TTL 不控制真实地址路由租约。
+默认保留 Fake-IP 上游应答的原始 TTL。`routes` 所在 JSON 顶层可显式设置
+`fakeip_ttl`（1–2147483647 秒），作为 Fake-IP 应答的 A / AAAA / CNAME TTL 上限。
+每条记录取上游 TTL 与该配置值的较小值，只缩短，不延长。
+该 TTL 不控制真实地址路由租约或 Fake-IP 地址池路由。
 规则文件顶层可设置 `overlap_policy`、`dns_upstream_policy`，会覆盖运行参数文件中的值；
 含 `fakeip_range` 或 `fake_dns` 的配置自动采用 `first` / `first`。
 同一地址池可供多个域名规则复用，但池路由和 DNS 上游必须一致；不同策略的重叠池会被拒绝。

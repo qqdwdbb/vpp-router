@@ -7,8 +7,10 @@ import (
 	"strings"
 )
 
-// In the CLI file VPP runs at startup only two lines are changed: NAT44-EI's plugin enable
-// line (table sizes) and its timeout line. Everything else is kept as it is.
+// In the CLI file VPP runs at startup only NAT44's lines are changed: the plugin enable line
+// (table sizes) and the timeout line, or, when the NAT mode changes, every NAT44 command (see
+// natmode.go). Everything else is kept as it is. The file is written for NAT44-EI or NAT44-ED,
+// whichever plugin the startup file enables.
 
 // keyword accepts VPP's abbreviations of a command word, such as "int" for "interface".
 func keyword(word, full string) bool {
@@ -36,14 +38,23 @@ func cliFields(line string) []string {
 }
 
 func isNATEnable(f []string) bool {
-	return hasWords(f, "nat44", "ei", "plugin", "enable")
+	return hasWords(f, "nat44", "ei", "plugin", "enable") || hasWords(f, "nat44", "plugin", "enable")
 }
 
 func isNATTimeout(f []string) bool {
-	return hasWords(f, "set", "nat44", "ei", "timeout")
+	return hasWords(f, "set", "nat44", "ei", "timeout") || hasWords(f, "set", "nat", "timeout")
 }
 
-// natSize is NAT44-EI's table sizes, per thread except user-sessions.
+// enableMode is the plugin an enable line is for.
+func enableMode(f []string) natMode {
+	if len(f) > 1 && f[1] == "ei" {
+		return natEI
+	}
+	return natED
+}
+
+// natSize is the NAT44 table sizes, per thread except user-sessions. NAT44-ED has sessions
+// only; Users and UserSessions are 0 for it.
 type natSize struct {
 	Sessions     uint32 `json:"sessions"`
 	Users        uint32 `json:"users"`
@@ -92,25 +103,39 @@ func (f *cliFile) find(match func([]string) bool) []int {
 	return found
 }
 
+// natMode is the plugin the enable line is for, empty when the file does not enable NAT44.
+func (f *cliFile) natMode() natMode {
+	found := f.find(isNATEnable)
+	if len(found) == 0 {
+		return ""
+	}
+	return enableMode(cliFields(f.lines[found[0]]))
+}
+
 // natSize reads the enable line; ok is false when there is none.
 func (f *cliFile) natSize() (natSize, bool) {
 	found := f.find(isNATEnable)
 	if len(found) == 0 {
 		return natSize{}, false
 	}
-	size := defaultSize
 	fields := cliFields(f.lines[found[0]])
-	for i := 4; i+1 < len(fields); i++ {
+	mode := enableMode(fields)
+	size := defaultSize
+	start := 4
+	if mode == natED {
+		size, start = natSize{Sessions: defaultSize.Sessions}, 3
+	}
+	for i := start; i+1 < len(fields); i++ {
 		n, err := strconv.ParseUint(fields[i+1], 10, 32)
 		if err != nil {
 			continue
 		}
-		switch fields[i] {
-		case "sessions":
+		switch {
+		case fields[i] == "sessions":
 			size.Sessions = uint32(n)
-		case "users":
+		case fields[i] == "users" && mode == natEI:
 			size.Users = uint32(n)
-		case "user-sessions":
+		case fields[i] == "user-sessions" && mode == natEI:
 			size.UserSessions = uint32(n)
 		default:
 			continue
@@ -124,7 +149,11 @@ func (f *cliFile) timeouts() natTimeouts {
 	t := defaultTimeouts
 	for _, i := range f.find(isNATTimeout) {
 		fields := cliFields(f.lines[i])
-		for j := 4; j < len(fields); j++ {
+		start := 4 // set nat44 ei timeout
+		if fields[1] == "nat" {
+			start = 3 // set nat timeout
+		}
+		for j := start; j < len(fields); j++ {
 			if fields[j] == "reset" {
 				t = defaultTimeouts
 				continue
@@ -156,7 +185,8 @@ func (f *cliFile) timeouts() natTimeouts {
 
 var leadingSpace = regexp.MustCompile(`^\s*`)
 
-// setNATSize rewrites the three sizes on the enable line, keeping its other options.
+// setNATSize rewrites the sizes on the enable line, keeping its other options: the three of
+// NAT44-EI, or NAT44-ED's sessions.
 func (f *cliFile) setNATSize(size natSize) bool {
 	found := f.find(isNATEnable)
 	if len(found) == 0 {
@@ -166,8 +196,12 @@ func (f *cliFile) setNATSize(size natSize) bool {
 	fields := cliFields(line)
 	out := []string{"nat44", "ei", "plugin", "enable"}
 	values := map[string]uint32{"sessions": size.Sessions, "users": size.Users, "user-sessions": size.UserSessions}
+	keys := []string{"sessions", "users", "user-sessions"}
+	if enableMode(fields) == natED {
+		out, values, keys = []string{"nat44", "plugin", "enable"}, map[string]uint32{"sessions": size.Sessions}, []string{"sessions"}
+	}
 	written := map[string]bool{}
-	for i := 4; i < len(fields); i++ {
+	for i := len(out); i < len(fields); i++ {
 		if v, ok := values[fields[i]]; ok && i+1 < len(fields) {
 			if !written[fields[i]] {
 				out = append(out, fields[i], strconv.FormatUint(uint64(v), 10))
@@ -178,7 +212,7 @@ func (f *cliFile) setNATSize(size natSize) bool {
 		}
 		out = append(out, fields[i])
 	}
-	for _, key := range []string{"sessions", "users", "user-sessions"} {
+	for _, key := range keys {
 		if !written[key] && (key != "user-sessions" || values[key] != 0) {
 			out = append(out, key, strconv.FormatUint(uint64(values[key]), 10))
 		}
@@ -187,8 +221,12 @@ func (f *cliFile) setNATSize(size natSize) bool {
 	return true
 }
 
-func timeoutCommand(t natTimeouts) string {
-	return "set nat44 ei timeout udp " + strconv.FormatUint(uint64(t.UDP), 10) +
+func timeoutCommand(mode natMode, t natTimeouts) string {
+	prefix := "set nat44 ei timeout"
+	if mode == natED {
+		prefix = "set nat timeout"
+	}
+	return prefix + " udp " + strconv.FormatUint(uint64(t.UDP), 10) +
 		" tcp-established " + strconv.FormatUint(uint64(t.TCPEstablished), 10) +
 		" tcp-transitory " + strconv.FormatUint(uint64(t.TCPTransitory), 10) +
 		" icmp " + strconv.FormatUint(uint64(t.ICMP), 10)
@@ -202,7 +240,7 @@ func (f *cliFile) setTimeouts(t natTimeouts) bool {
 		return false
 	}
 	found := f.find(isNATTimeout)
-	command := timeoutCommand(t)
+	command := timeoutCommand(enableMode(cliFields(f.lines[enable[0]])), t)
 	if len(found) == 0 {
 		at := enable[0] + 1
 		f.lines = slices.Insert(f.lines, at, leadingSpace.FindString(f.lines[enable[0]])+command)

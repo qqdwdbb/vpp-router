@@ -29,7 +29,7 @@ type Options struct {
 	ConfigDir string
 	Names     string
 	APISocket string
-	// NATInterface is the NAT44-EI outside interface on which a configuration's listening
+	// NATInterface is the NAT44 (EI or ED) outside interface on which a configuration's listening
 	// port is opened, where VPP would otherwise drop handshakes.
 	NATInterface string
 	// ExitsFile is where the started configurations usable as exits are published.

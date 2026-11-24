@@ -56,16 +56,20 @@ RULE_FILE = '# One domain per line. This exit takes effect once the file has con
 
 
 def lan_interfaces(links, lans):
-    """The Linux interfaces on a client network, and every global address they have. A
-    redirect sends a query to an address of the interface it came in on, and which one
-    is up to the kernel, so Gate must listen on all of them."""
+    """The Linux interfaces on a client network, and every lasting global address they have.
+    A redirect sends a query to an address of the interface it came in on, and which one
+    is up to the kernel, so Gate must listen on all of them. Temporary (privacy) and
+    deprecated IPv6 addresses are left out: the kernel replaces them, and a new one each
+    time the interface is made again (the management TAP at every VPP restart), so a
+    configuration naming one stops Gate from binding and sends redirects nowhere."""
     networks = [ipaddress.ip_network(n) for n in lans]
     names, addresses = [], []
     for link in links:
         name = link.get('ifname', '')
         if link.get('link_type') == 'loopback' or OWN_DEVICE.match(name) or 'UP' not in link.get('flags', []):
             continue
-        found = [a['local'] for a in link.get('addr_info', []) if a.get('scope') == 'global' and a.get('local')]
+        found = [a['local'] for a in link.get('addr_info', [])
+                 if a.get('scope') == 'global' and a.get('local') and not a.get('temporary') and not a.get('deprecated')]
         if any(ipaddress.ip_address(a).version == n.version and ipaddress.ip_address(a) in n for a in found for n in networks):
             names.append(name)
             addresses += found
@@ -551,7 +555,7 @@ def generate_config(args):
             notes.append(f'VPP 没有加载 abf 插件，所以{elsewhere}；请加载 abf 和 acl 插件，然后重启 VPP 和 Gate')
         elif any(nat_on_ip4_input(vpp_read('show', 'interface', 'features', e['interface'])) for e in entries):
             notes.append(f'LAN 接口上的 NAT 排在 ABF 之前，所以{elsewhere}；请把 NAT 改成 WAN 上的 output-feature'
-                         f'（set interface nat44 ei out WAN output-feature），然后重启 VPP 和 Gate')
+                         f'（set interface nat44 ei out WAN output-feature，NAT44-ED 为 set interface nat44 out WAN output-feature），然后重启 VPP 和 Gate')
         else:
             notes.append('LAN 客户端的 DNS 查询都会经过 Gate，不管发给哪个地址')
     elif hijack:

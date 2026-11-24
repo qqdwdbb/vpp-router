@@ -399,7 +399,7 @@ func usedPorts(cfg *Config, st *vppState, in *iface) map[[2]int]string {
 	return used
 }
 
-// natExit requires an interface NAT44-EI translates for: a mapping on any other never takes
+// natExit requires an interface NAT44 translates for: a mapping on any other never takes
 // the interface's address ("External address must be allocated").
 func natExit(st *vppState, in *iface) error {
 	if !slices.Contains(st.NATOutside, in.Index) {
@@ -408,7 +408,7 @@ func natExit(st *vppState, in *iface) error {
 	return nil
 }
 
-// checkLocalFree requires each inside address and port to be forwarded once: NAT44-EI keys a
+// checkLocalFree requires each inside address and port to be forwarded once: NAT44 keys a
 // static mapping by it too, and refuses a second one, or leaves it unresolved for good when
 // the interface has no address yet.
 func checkLocalFree(cfg *Config, st *vppState, protos []uint8, local netip.Addr, first, count int) error {
@@ -426,7 +426,7 @@ func checkLocalFree(cfg *Config, st *vppState, protos []uint8, local netip.Addr,
 		n, _ := portRange(f.ExternalPort, f.LastPort, rangeLimit)
 		for _, proto := range fprotos {
 			for i := 0; i < n; i++ {
-				taken[inside{proto, f.InternalPort + i}] = fmt.Sprintf("%s:%d（%s）已经有转发（外部端口 %d），NAT44-EI 一个内部地址和端口只能转发一次",
+				taken[inside{proto, f.InternalPort + i}] = fmt.Sprintf("%s:%d（%s）已经有转发（外部端口 %d），NAT44 一个内部地址和端口只能转发一次",
 					local, f.InternalPort+i, protoName(proto), f.ExternalPort+i)
 			}
 		}
@@ -436,7 +436,7 @@ func checkLocalFree(cfg *Config, st *vppState, protos []uint8, local netip.Addr,
 		if _, seen := taken[key]; seen || m.Identity || m.Tag == natTag || m.LocalIP != local {
 			continue
 		}
-		taken[key] = fmt.Sprintf("%s:%d（%s）已经有其他程序添加的转发（外部端口 %d），NAT44-EI 一个内部地址和端口只能转发一次",
+		taken[key] = fmt.Sprintf("%s:%d（%s）已经有其他程序添加的转发（外部端口 %d），NAT44 一个内部地址和端口只能转发一次",
 			local, m.LocalPort, protoName(m.Proto), m.ExternalPort)
 	}
 	for _, proto := range protos {
@@ -471,7 +471,7 @@ func (s *Service) AddForward(f Forward, user string) (*State, error) {
 	}
 	return s.change(user, fmt.Sprintf("端口转发 %s %d → %s:%d", f.Protocol, f.ExternalPort, f.InternalIP, f.InternalPort), func(cfg *Config, st *vppState) error {
 		if !st.NAT {
-			return errors.New("VPP 没有启用 NAT44-EI，不能做端口转发")
+			return errors.New("VPP 没有启用 NAT44，不能做端口转发")
 		}
 		if len(f.Sources) > 0 && !st.ACL {
 			return errors.New("来源限制需要启用 ACL 插件")
@@ -560,7 +560,7 @@ func lastAddr(p netip.Prefix) netip.Addr {
 func (s *Service) AddPort(p Port, user string) (*State, error) {
 	return s.change(user, fmt.Sprintf("本机端口 %s %d", p.Protocol, p.Port), func(cfg *Config, st *vppState) error {
 		if !st.NAT {
-			return errors.New("VPP 没有启用 NAT44-EI；没有 NAT 时 WAN 上的端口本来就不被拦")
+			return errors.New("VPP 没有启用 NAT44；没有 NAT 时 WAN 上的端口本来就不被拦")
 		}
 		var err error
 		if p.Name, err = cleanName(p.Name); err != nil {

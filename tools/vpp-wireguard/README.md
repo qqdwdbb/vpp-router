@@ -20,7 +20,7 @@ sudo systemctl enable --now vpp-wireguard
 | `--config-dir` | `/etc/vpp/wireguard` | 配置目录（权限 700）：`wireguard.json` 和 `names.json` |
 | `--names` | `--config-dir` 下的 `names.json` | 节点名字，面板的 `--vpn-names` 要指向同一个文件 |
 | `--api-socket` | `/run/vpp/api.sock` | VPP API socket |
-| `--nat-interface` | 无 | NAT44-EI 的外网接口，启动新配置时放行监听端口，否则 VPP 会丢弃发给隧道的 UDP |
+| `--nat-interface` | 无 | NAT44 的外网接口，启动新配置时放行监听端口（按 VPP 运行的插件写 `nat44 ei add identity mapping` 或 NAT44-ED 的 `nat44 add identity mapping`），否则 VPP 会丢弃发给隧道的 UDP |
 | `--exits-file` | `/run/vpp-wireguard/exits.json` | 已启动且声明了下一跳的配置，`gate-admin` 据此提供可选出口 |
 | `--vpp-unit` | 无 | 配置 VPP 的 systemd 单元，它变成 active 后立即恢复隧道。不设置时等 VPP socket 存在满 30 秒 |
 | `--gate-config` | `/etc/vpp/egress-gate.json` | DNS Gate 入口配置；WireGuard DNS 只使用其中的具体监听地址和 `hijack_interfaces` |
@@ -38,7 +38,7 @@ sudo systemctl enable --now vpp-wireguard
 
 **作为规则出口**：添加配置时填“出口下一跳”，每个地址族一个，必须落在某个节点的 AllowedIPs 内。配置启动后，它就出现在路由页的出口列表里，停止后消失。已经选用它的规则不受影响，出口不在时那部分流量被丢弃。局域网流量要经这条隧道出去，通常还需要 NAT，写在接口附加命令里。
 
-**接口附加命令**：属于这个接口的 VPP 命令，接口 up 后执行，停止前撤销，比如接口上的 NAT、ABF 挂载和经它的路由。每行一条，只能是 VPP CLI，不能用 `exec` 和 `unix`。任何一条失败，整个启动撤销。
+**接口附加命令**：属于这个接口的 VPP 命令，接口 up 后执行，停止前撤销，比如接口上的 NAT、ABF 挂载和经它的路由。每行一条，只能是 VPP CLI，不能用 `exec` 和 `unix`。任何一条失败，整个启动撤销。其中的 NAT44 命令可以按 NAT44-EI（`nat44 ei …`、`set interface nat44 ei …`）或 NAT44-ED（不带 `ei`）任一种写，执行时换成 VPP 运行的插件的写法，保存的文本不变，所以在系统页切换 NAT 模式不用改这里。在 NAT44-ED 下，多出口用的 `nat44 ei context`、`output-chain`、`pool receive` 不执行，有 context 的配置里池地址的 `tenant-vrf` 去掉，因为 ED 自己按出口选它的地址（规则见 vpp-system 的 README）。另一种插件没有对应写法的照原样执行，系统页因此拒绝切换。
 
 **恢复**：程序只看 VPP socket 的文件信息来发现 VPP 重启，平时不访问 VPP。恢复失败每 5 秒重试，原因显示在页面上。
 

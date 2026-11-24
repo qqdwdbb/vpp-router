@@ -31,6 +31,18 @@ func TestHijackVPPConfiguration(t *testing.T) {
 	if len(g.HijackVPP) != 1 || g.HijackVPP[0].Interface != "loop200" || len(g.HijackVPP[0].Via) != 2 {
 		t.Fatalf("%+v", g.HijackVPP)
 	}
+	for _, enabled := range []bool{false, true} {
+		g, err := load(map[string]any{"hijack_vpp": []any{good}, "hijack_vpp_enabled": enabled})
+		if err != nil || (len(g.HijackVPP) > 0) != enabled {
+			t.Fatalf("enabled %v: gate %+v, error %v", enabled, g, err)
+		}
+		if !g.HijackDNS {
+			t.Fatal("VPP switch changed Linux DNS interception")
+		}
+	}
+	if _, err := load(map[string]any{"hijack_vpp_enabled": "false"}); err == nil {
+		t.Fatal("accepted a non-boolean VPP DNS switch")
+	}
 	for name, tc := range map[string]struct {
 		doc  map[string]any
 		want string

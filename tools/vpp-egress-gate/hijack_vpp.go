@@ -454,7 +454,7 @@ func newVPPHijackKeeper(cfg *Config, g *GateFile, backend Backend) *vppHijackKee
 				features, err := backend.CLI("show interface features " + entry.Interface)
 				if err == nil && natRunsBeforeABF(features) {
 					problems = append(problems, fmt.Sprintf("NAT on %s runs before ABF, so IPv4 clients are not intercepted; "+
-						"use NAT as an output feature on the WAN (set interface nat44 ei out WAN output-feature)", entry.Interface))
+						"use NAT as an output feature on the WAN (set interface nat44 ei out WAN output-feature, or for NAT44-ED set interface nat44 out WAN output-feature)", entry.Interface))
 				}
 			}
 			return problems

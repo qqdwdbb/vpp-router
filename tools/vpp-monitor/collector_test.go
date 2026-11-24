@@ -354,7 +354,7 @@ func TestHandler(t *testing.T) {
 		url, body string
 		code      int
 	}{
-		{"/", "VPP 监控", 200},
+		{"/", "VPP 控制面板", 200},
 		{"/uPlot.iife.min.js", "uPlot", 200},
 		{"/login.html", "登录", 200},
 		{"/style.css", ":root", 200},
@@ -364,8 +364,8 @@ func TestHandler(t *testing.T) {
 		{"/lib.js", "export function fetchJSON", 200},
 		{"/pages/routes.js", "export function show", 200},
 		{"/pages/vpn.js", "export function show", 200},
-		{"/routes", "VPP 监控", 200},
-		{"/vpn", "VPP 监控", 200},
+		{"/routes", "VPP 控制面板", 200},
+		{"/vpn", "VPP 控制面板", 200},
 		{"/api/vpn", `"wireguard"`, 200},
 		{"/api/status", `"name":"eth0"`, 200},
 		{"/api/series?range=60&key=if/eth0/rx_bps", `"step":1`, 200},

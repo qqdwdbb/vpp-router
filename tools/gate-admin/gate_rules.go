@@ -217,14 +217,15 @@ type AdminRoutes struct {
 
 // AdminState is what the panel shows.
 type AdminState struct {
-	Groups           []AdminGroup  `json:"groups"`
-	Exits            []AdminExit   `json:"exits"`
-	Default          AdminDefault  `json:"default"`
-	Files            []AdminFile   `json:"files"`
-	Routes           *AdminRoutes  `json:"routes"` // nil while Gate cannot be asked
-	Pending          *AdminPending `json:"pending"`
-	SecondsRemaining float64       `json:"seconds_remaining"`
-	Last             *AdminResult  `json:"last"`
+	VPPDNSHijack     AdminVPPDNSHijack `json:"vpp_dns_hijack"`
+	Groups           []AdminGroup      `json:"groups"`
+	Exits            []AdminExit       `json:"exits"`
+	Default          AdminDefault      `json:"default"`
+	Files            []AdminFile       `json:"files"`
+	Routes           *AdminRoutes      `json:"routes"` // nil while Gate cannot be asked
+	Pending          *AdminPending     `json:"pending"`
+	SecondsRemaining float64           `json:"seconds_remaining"`
+	Last             *AdminResult      `json:"last"`
 }
 
 // stringList accepts the original single-string form as well as the multi-select array form
@@ -1269,6 +1270,7 @@ func (a *Admin) State() (*AdminState, error) {
 	}
 	state := &AdminState{Groups: []AdminGroup{}, Exits: []AdminExit{}, Files: []AdminFile{}, Pending: a.pending, Last: a.last}
 	if entry, err := readJSONObject(a.opts.Config); err == nil {
+		state.VPPDNSHijack = vppDNSHijackState(entry)
 		if upstream, ok := entry["upstream"].([]any); ok {
 			state.Default.DNS = dnsTextOf(upstream)
 		}
@@ -2495,6 +2497,19 @@ func (a *Admin) Handler() http.Handler {
 	mux.HandleFunc("GET /gate/state", func(w http.ResponseWriter, r *http.Request) {
 		state, err := a.State()
 		reply(w, state, err)
+	})
+	mux.HandleFunc("POST /gate/dns-hijack", func(w http.ResponseWriter, r *http.Request) {
+		var request struct {
+			Enabled *bool `json:"enabled"`
+		}
+		if decode(w, r, &request) {
+			if request.Enabled == nil {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			state, err := a.SetVPPDNSHijack(*request.Enabled, user(r))
+			reply(w, state, err)
+		}
 	})
 	mux.HandleFunc("GET /gate/file", func(w http.ResponseWriter, r *http.Request) {
 		result, err := a.FileDomains(r.URL.Query().Get("path"), r.URL.Query().Get("q"))

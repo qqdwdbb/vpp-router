@@ -1,0 +1,34 @@
+nat44-ed: keep one outside port per inside endpoint on every worker
+
+ED first tries the inside port as the outside port, so one inside
+address:port keeps one outside port for every destination
+(endpoint-independent mapping, as Linux masquerading does). With workers
+the port space is split per worker (port_per_thread); an inside port
+outside the range of the worker that owns the inside address got a random
+port for each new destination instead, which made about half of all
+sockets behave as symmetric NAT with two workers.
+
+Fold such a port into the worker's range (port % port_per_thread) instead,
+so the same inside port always asks for the same outside port. A taken
+port still falls back to random attempts. Verified on 2 workers: inside
+ports 700, 20000 and 50000 keep one outside port to four peers on both
+workers (before: random per peer when out of range).
+
+--- a/src/plugins/nat/nat44-ed/nat44_ed_in2out.c
++++ b/src/plugins/nat/nat44-ed/nat44_ed_in2out.c
+@@ -106,9 +106,12 @@
+   if (port < port_thread_offset ||
+       port >= port_thread_offset + port_per_thread)
+     {
+-      /* need to pick a different port, suggested port doesn't fit in
+-       * this thread's port range */
+-      port_offset = snat_random_port (0, port_per_thread - 1);
++      /* The suggested (inside) port is outside this thread's range. Fold
++       * it into the range instead of picking a random port, so one inside
++       * endpoint keeps one outside port for every destination
++       * (endpoint-independent mapping) whichever thread owns its address.
++       * A collision still falls back to random ports below. */
++      port_offset = port % port_per_thread;
+       port = port_thread_offset + port_offset;
+     }
+   u16 attempts = ED_PORT_ALLOC_ATTEMPTS;

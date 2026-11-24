@@ -127,7 +127,7 @@ function bridgeText(iface) {
   return iface.bridge ? `网桥 ${iface.bridge}` : '—';
 }
 
-/* An exit translates what leaves by it to its own address (NAT44-EI as an output feature),
+/* An exit translates what leaves by it to its own address (NAT44-EI or NAT44-ED as an output feature),
    as the installer does for its WAN, so any uplink can be one without hand-written NAT. */
 function natButton(iface, locked) {
   if (iface.nat) {

@@ -60,7 +60,7 @@ type IPv6Rule struct {
 
 // Config is /etc/vpp/firewall.json.
 type Config struct {
-	// WANInterfaces overrides the WAN: by default, the interfaces NAT44-EI translates for.
+	// WANInterfaces overrides the WAN: by default, the interfaces NAT44 translates for.
 	WANInterfaces []string      `json:"wan_interfaces,omitempty"`
 	BlockPing     bool          `json:"block_ping"`
 	IPv6Firewall  bool          `json:"ipv6_firewall"`

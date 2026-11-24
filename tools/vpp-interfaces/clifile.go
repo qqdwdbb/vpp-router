@@ -28,9 +28,9 @@ const (
 	lineSLAAC               // ip6 nd address autoconfig IF [default-route]
 	lineDHCP6               // dhcp6 client IF
 	lineGateway             // ip route add 0.0.0.0/0|::/0 via GW IF
-	lineNATEnable           // nat44 ei plugin enable ...
-	lineNATAddress          // nat44 ei add interface address IF
-	lineNATOutput           // set interface nat44 ei out IF output-feature
+	lineNATEnable           // nat44 ei plugin enable ... | nat44 plugin enable ...
+	lineNATAddress          // nat44 [ei] add interface address IF
+	lineNATOutput           // set interface nat44 [ei] out IF output-feature
 	lineCreate              // create tap|vxlan tunnel|gre tunnel|ipip tunnel|host-interface, see device
 )
 
@@ -51,6 +51,7 @@ type cliLine struct {
 	host   string       // lineDHCP4
 	via    netip.Addr   // lineGateway
 	device string       // lineCreate: tap, vxlan, gre, ipip or af_packet
+	nat    natMode      // lineNATEnable, lineNATAddress, lineNATOutput: which NAT44 plugin's command
 	words  []string     // lineOther, to find the interfaces it refers to
 }
 
@@ -172,11 +173,17 @@ func parseLine(text string) *cliLine {
 			line.kind, line.device, line.iface = lineCreate, "af_packet", "host-"+name
 		}
 	case len(f) >= 4 && f[0] == "nat44" && f[1] == "ei" && keyword(f[2], "plugin") && f[3] == "enable":
-		line.kind = lineNATEnable
+		line.kind, line.nat = lineNATEnable, natEI
+	case len(f) >= 3 && f[0] == "nat44" && keyword(f[1], "plugin") && f[2] == "enable":
+		line.kind, line.nat = lineNATEnable, natED
 	case len(f) == 6 && f[0] == "nat44" && f[1] == "ei" && f[2] == "add" && keyword(f[3], "interface") && keyword(f[4], "address"):
-		line.kind, line.iface = lineNATAddress, f[5]
+		line.kind, line.iface, line.nat = lineNATAddress, f[5], natEI
+	case len(f) == 5 && f[0] == "nat44" && f[1] == "add" && keyword(f[2], "interface") && keyword(f[3], "address"):
+		line.kind, line.iface, line.nat = lineNATAddress, f[4], natED
 	case len(f) == 7 && words(f, "set", "interface", "nat44", "ei", "out") && f[6] == "output-feature":
-		line.kind, line.iface = lineNATOutput, f[5]
+		line.kind, line.iface, line.nat = lineNATOutput, f[5], natEI
+	case len(f) == 6 && words(f, "set", "interface", "nat44", "out") && f[5] == "output-feature":
+		line.kind, line.iface, line.nat = lineNATOutput, f[4], natED
 	}
 	return line
 }
@@ -424,25 +431,62 @@ func dhcp6Command(iface string, disable bool) string {
 	return "dhcp6 client " + iface
 }
 
-// The NAT an exit gets, as the installer writes it: translate what leaves by the interface to
-// its own address, whatever that is at the time, DHCP included.
+// natMode is which NAT44 plugin VPP runs: NAT44-EI (nat44_ei_plugin.so) or NAT44-ED
+// (nat_plugin.so). Their commands differ only by the "ei" word, apart from the enable and
+// timeout lines.
+type natMode string
+
 const (
-	natEnableCommand  = "nat44 ei plugin enable sessions 65536 users 4096 user-sessions 16384"
-	natTimeoutCommand = "set nat44 ei timeout tcp-established 1800 tcp-transitory 120"
+	natEI natMode = "ei"
+	natED natMode = "ed"
 )
 
-func natAddressCommand(iface string, del bool) string {
-	if del {
-		return "nat44 ei add interface address " + iface + " del"
+func (m natMode) String() string {
+	if m == natED {
+		return "NAT44-ED"
 	}
-	return "nat44 ei add interface address " + iface
+	return "NAT44-EI"
 }
 
-func natOutputCommand(iface string, del bool) string {
-	if del {
-		return "set interface nat44 ei out " + iface + " output-feature del"
+// word is the command word after "nat44" (and after "set interface nat44"): "ei " or nothing.
+func (m natMode) word() string {
+	if m == natED {
+		return ""
 	}
-	return "set interface nat44 ei out " + iface + " output-feature"
+	return "ei "
+}
+
+// The NAT an exit gets, as the installer writes it: translate what leaves by the interface to
+// its own address, whatever that is at the time, DHCP included. The TCP timeouts are the
+// installer's too.
+func natEnableCommand(m natMode) string {
+	if m == natED {
+		return "nat44 plugin enable sessions 65536"
+	}
+	return "nat44 ei plugin enable sessions 65536 users 4096 user-sessions 16384"
+}
+
+func natDisableCommand(m natMode) string { return "nat44 " + m.word() + "plugin disable" }
+
+func natTimeoutCommand(m natMode) string {
+	if m == natED {
+		return "set nat timeout tcp-established 1800 tcp-transitory 120"
+	}
+	return "set nat44 ei timeout tcp-established 1800 tcp-transitory 120"
+}
+
+func natAddressCommand(m natMode, iface string, del bool) string {
+	if del {
+		return "nat44 " + m.word() + "add interface address " + iface + " del"
+	}
+	return "nat44 " + m.word() + "add interface address " + iface
+}
+
+func natOutputCommand(m natMode, iface string, del bool) string {
+	if del {
+		return "set interface nat44 " + m.word() + "out " + iface + " output-feature del"
+	}
+	return "set interface nat44 " + m.word() + "out " + iface + " output-feature"
 }
 
 func gatewayCommand(iface string, via netip.Addr, del bool) string {

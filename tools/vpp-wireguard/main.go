@@ -234,7 +234,7 @@ func run(args []string) error {
 	fs.StringVar(&opts.ConfigDir, "config-dir", defaultConfigDir, "WireGuard configurations and peer names")
 	fs.StringVar(&opts.Names, "names", "", "JSON file naming peers, the panel's --vpn-names; defaults to names.json in -config-dir")
 	fs.StringVar(&opts.APISocket, "api-socket", "/run/vpp/api.sock", "VPP API socket")
-	fs.StringVar(&opts.NATInterface, "nat-interface", "", "NAT44-EI outside interface on which listening ports of new configurations are opened")
+	fs.StringVar(&opts.NATInterface, "nat-interface", "", "NAT44 outside interface on which listening ports of new configurations are opened")
 	fs.StringVar(&opts.ExitsFile, "exits-file", "/run/vpp-wireguard/exits.json", "where started configurations usable as exits are published, for gate-admin")
 	fs.StringVar(&opts.VPPUnit, "vpp-unit", "", "systemd unit that configures VPP; configurations are restored once it is active. Without it, 30 seconds after VPP's socket appears")
 	fs.StringVar(&opts.GateConfig, "gate-config", "/etc/vpp/egress-gate.json", "DNS Gate entry configuration used by WireGuard DNS forwarding")

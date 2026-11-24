@@ -174,7 +174,7 @@ $('maint-reboot').onclick = () => {
 function renderLogSources() {
   const select = $('log-unit');
   const v = page.units;
-  const options = [['', '全部']];
+  const options = [['', 'syslog']];
   for (const u of v.units.filter(u => u.related)) options.push([u.name, u.name.replace(/\.service$/, '')]);
   options.push(['kernel', '内核']);
   if (v.vpp_unit) options.push(['vpp:logging', 'VPP 内部日志（show logging）']);

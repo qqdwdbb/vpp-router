@@ -1,0 +1,276 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="1240" viewBox="0 0 1440 1240" role="img" aria-labelledby="title desc">
+<title id="title">VPP 软路由的逻辑拓扑：Gate 解析 DNS，按目的域名和 IP 决定路由</title>
+<desc id="desc">示例网络：局域网 10.61.30.0/24 经 VPP 软路由上网。Gate 在 Linux 上接收局域网的 DNS 查询，命中规则时先经 Binary API 在 VPP 写入目的地址路由，确认后才返回应答，客户端随后的连接走 WireGuard 隧道、sing-box 代理或 Linux 上的 OpenVPN，其余流量经 NAT44 从光猫上网。</desc>
+<defs>
+<marker id="mg" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M1 1 8 5 1 9" fill="none" stroke="#6b788d" stroke-width="1.6"/></marker>
+<marker id="mb" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M1 1 8 5 1 9" fill="none" stroke="#3b6fd8" stroke-width="1.6"/></marker>
+<marker id="mp" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M1 1 8 5 1 9" fill="none" stroke="#8a5cc9" stroke-width="1.6"/></marker>
+<marker id="mt" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M1 1 8 5 1 9" fill="none" stroke="#138a7e" stroke-width="1.6"/></marker>
+<marker id="mh" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M1 1 8 5 1 9" fill="none" stroke="#2f9e6e" stroke-width="1.6"/></marker>
+<marker id="mo" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M1 1 8 5 1 9" fill="none" stroke="#e07b1a" stroke-width="1.8"/></marker>
+<style>
+text{font-family:-apple-system,BlinkMacSystemFont,'PingFang SC','Microsoft YaHei','Noto Sans CJK SC',sans-serif;fill:#253149}
+.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,'Liberation Mono',monospace}
+.m{fill:#6b788d}.b{font-weight:600}
+.box{fill:#fff;stroke:#d5dde9}
+.lg{fill:none;stroke:#6b788d;stroke-width:2;marker-end:url(#mg)}
+.lb{fill:none;stroke:#3b6fd8;stroke-width:2.2;marker-end:url(#mb)}
+.lp{fill:none;stroke:#8a5cc9;stroke-width:2.2;marker-end:url(#mp)}
+.lt{fill:none;stroke:#138a7e;stroke-width:2.2;marker-end:url(#mt)}
+.lh{fill:none;stroke:#2f9e6e;stroke-width:2.2;marker-start:url(#mh);marker-end:url(#mh)}
+.l1{fill:none;stroke:#2f9e6e;stroke-width:2.2;marker-end:url(#mh)}
+.lo{fill:none;stroke:#e07b1a;stroke-width:2.4;stroke-dasharray:7 4;marker-end:url(#mo)}
+.badge{fill:#e07b1a}.bt{fill:#fff;font-size:12px;font-weight:700}
+.port{fill:#33415c}
+.pill{fill:#fff;stroke-width:1.6}
+</style>
+</defs>
+<rect width="1440" height="1240" rx="16" fill="#fff"/>
+
+<!-- ============ header ============ -->
+<text x="40" y="44" font-size="12" class="m b" letter-spacing="2">VPP SOFTWARE ROUTER · 逻辑拓扑</text>
+<text x="40" y="84" font-size="28" class="b">Gate 解析 DNS，按目的域名和 IP 决定路由</text>
+<text x="40" y="114" font-size="14" class="m">路由器里 VPP 和 Linux 的接口、路由和 Gate。port0 和 port0.100 是同一个网口的不打标签部分和 VLAN 100，接线见物理拓扑。地址均为示例。</text>
+<text x="40" y="138" font-size="14" class="m">示例分流：example.org 走 VPP 里的 WireGuard，example.net 走 sing-box 代理，corp.example 走 Linux 上的 OpenVPN（VPP 不支持的协议），其余直接上网。</text>
+
+<g transform="translate(0,20)">
+<!-- ============ LAN ============ -->
+<rect x="24" y="150" width="292" height="430" rx="14" fill="#f7f9fc" stroke="#e1e7ef"/>
+<text x="42" y="178" font-size="15" class="b">局域网</text>
+<text x="100" y="178" font-size="13" class="mono m">10.61.30.0/24</text>
+
+<rect x="42" y="200" width="176" height="60" rx="10" class="box"/>
+<path d="M56 216h22v15H56zM52 235h30" fill="none" stroke="#6b788d" stroke-width="1.5"/>
+<text x="94" y="225" font-size="15" class="b">笔记本</text>
+<text x="94" y="246" font-size="12" class="mono m">10.61.30.101</text>
+<rect x="42" y="276" width="176" height="60" rx="10" class="box"/>
+<path d="M60 290h12v26H60z" fill="none" stroke="#6b788d" stroke-width="1.5"/>
+<text x="94" y="301" font-size="15" class="b">手机</text>
+<text x="94" y="322" font-size="12" class="mono m">10.61.30.102</text>
+<rect x="42" y="352" width="176" height="60" rx="10" class="box"/>
+<path d="M53 367h30v18H53zM62 391h12" fill="none" stroke="#6b788d" stroke-width="1.5"/>
+<text x="94" y="377" font-size="15" class="b">电视</text>
+<text x="94" y="398" font-size="12" class="mono m">10.61.30.103</text>
+
+<path d="M218 230H284M218 306H284M218 382H284M284 230V382" fill="none" stroke="#9aa6b8" stroke-width="2"/>
+<path d="M284 330H330" stroke="#9aa6b8" stroke-width="2"/>
+
+<text x="42" y="486" font-size="12" class="m">经交换机接到路由器 port0，</text>
+<text x="42" y="506" font-size="12" class="m">不打标签的帧进入网桥 bd1。</text>
+<text x="42" y="552" font-size="12" class="m">网关和 DNS 都是 10.61.30.1，</text>
+<text x="42" y="570" font-size="12" class="m">手动设了 8.8.8.8 的也会经过 Gate。</text>
+
+<!-- ============ router frame ============ -->
+<rect x="340" y="140" width="770" height="868" rx="16" fill="none" stroke="#b9c3d3" stroke-width="1.5" stroke-dasharray="6 5"/>
+<text x="358" y="165" font-size="13" class="b">VPP 软路由</text>
+<text x="436" y="165" font-size="12" class="m">单网口开发板（比如 RK3588），跑 Linux</text>
+
+<!-- VPP section -->
+<rect x="356" y="180" width="738" height="340" rx="14" fill="#f3f6fe" stroke="#d6e0f8"/>
+<text x="374" y="206" font-size="15" class="b" style="fill:#3b6fd8">VPP 数据面</text>
+<text x="458" y="206" font-size="12" class="m">网卡由 DPDK 驱动，转发不经过 Linux 内核</text>
+
+<rect x="330" y="310" width="20" height="40" rx="3" class="port"/>
+<text x="340" y="302" font-size="11" class="mono b" text-anchor="middle">port0</text>
+<path d="M350 330H372" class="lg"/>
+
+<rect x="374" y="272" width="164" height="116" rx="10" class="box"/>
+<text x="390" y="298" font-size="15" class="b">bd1 网桥</text>
+<text x="390" y="322" font-size="12" class="mono">loop0</text>
+<text x="390" y="340" font-size="12" class="mono">10.61.30.1/24</text>
+<text x="390" y="364" font-size="12" class="m">成员：port0 不打标签</text>
+<text x="390" y="380" font-size="12" class="m">ABF：53 端口送 Linux</text>
+<path d="M538 330H554" class="lg"/>
+
+<!-- FIB table -->
+<rect x="556" y="240" width="400" height="230" rx="10" class="box" style="stroke:#c9d5ee"/>
+<text x="572" y="262" font-size="14" class="b">FIB 路由表</text>
+<text x="940" y="262" font-size="12" class="m" text-anchor="end">彩色行由 Gate 写入</text>
+<path d="M566 272H946" stroke="#e7ecf4"/>
+<g font-size="12">
+<text x="578" y="292" class="mono">0.0.0.0/0</text><text x="712" y="292" class="mono">port0.100 via 192.168.1.1</text><text x="948" y="292" class="m" text-anchor="end">默认</text>
+<text x="578" y="322" class="mono">10.61.30.0/24</text><text x="712" y="322" class="mono">loop0</text><text x="948" y="322" class="m" text-anchor="end">局域网</text>
+<rect x="566" y="336" width="382" height="30" rx="6" fill="#e9f0fd"/>
+<text x="578" y="356" class="mono b" style="fill:#2856b8">203.0.113.10/32</text><text x="712" y="356" class="mono" style="fill:#2856b8">wg1 via 10.62.30.1</text><text x="940" y="356" text-anchor="end" style="fill:#2856b8">example.org</text>
+<rect x="566" y="370" width="382" height="30" rx="6" fill="#e6f4f1"/>
+<text x="578" y="390" class="mono b" style="fill:#0f6e64">198.51.100.33/32</text><text x="712" y="390" class="mono" style="fill:#0f6e64">tap-tun0</text><text x="940" y="390" text-anchor="end" style="fill:#0f6e64">corp.example</text>
+<rect x="566" y="404" width="382" height="30" rx="6" fill="#f2ecfa"/>
+<text x="578" y="424" class="mono b" style="fill:#6c43a8">198.18.0.0/15</text><text x="712" y="424" class="mono" style="fill:#6c43a8">gate-tproxy</text><text x="940" y="424" text-anchor="end" style="fill:#6c43a8">Fake-IP 池</text>
+</g>
+<text x="572" y="458" font-size="11" class="m">最长前缀匹配：命中 /32 的走对应出口，其余走默认路由</text>
+
+<!-- VPP egress interfaces -->
+<rect x="976" y="258" width="114" height="54" rx="10" class="box"/>
+<text x="988" y="280" font-size="14" class="b mono">port0.100</text>
+<text x="988" y="300" font-size="11" class="mono m">192.168.1.2/24</text>
+<path d="M956 287H974" class="lg"/>
+<rect x="1100" y="265" width="20" height="40" rx="3" class="port"/>
+<path d="M1090 285H1098" class="lg"/>
+<path d="M1120 285H1158" class="lg"/>
+<text x="1110" y="256" font-size="11" class="mono b" text-anchor="middle">port0.100</text>
+<rect x="976" y="326" width="114" height="54" rx="10" class="box" style="stroke:#3b6fd8;stroke-width:1.6"/>
+<text x="988" y="348" font-size="14" class="b mono" style="fill:#2856b8">wg1</text>
+<text x="988" y="368" font-size="11" class="mono m">10.62.30.2/24</text>
+<path d="M956 351H974" class="lb"/>
+<path d="M1033 326V314" class="lb"/>
+<text x="976" y="400" font-size="11" class="m">WireGuard 加密后</text>
+<text x="976" y="416" font-size="11" class="m">经 port0.100 发出</text>
+
+<!-- links from FIB / bridge down to the TAPs -->
+<path d="M426 388V502" class="l1"/>
+<path d="M462 502V390" class="l1"/>
+<text x="414" y="452" font-size="12" text-anchor="end" style="fill:#2f9e6e">查询</text>
+<text x="474" y="452" font-size="12" style="fill:#2f9e6e">应答</text>
+<path d="M830 470V502" class="lp"/>
+<path d="M930 470V486H996V502" class="lt"/>
+
+<!-- Linux section -->
+<rect x="356" y="546" width="738" height="446" rx="14" fill="#f4f9f7" stroke="#d3e6de"/>
+<text x="374" y="572" font-size="15" class="b" style="fill:#2f9e6e">Linux</text>
+<text x="476" y="572" font-size="12" class="m">lan0</text>
+<text x="508" y="572" font-size="12" class="mono">10.61.30.2</text>
+
+<!-- TAP pills on the VPP / Linux boundary -->
+<rect x="390" y="506" width="108" height="28" rx="14" class="pill" style="stroke:#2f9e6e"/>
+<text x="444" y="525" font-size="12" class="mono b" text-anchor="middle" style="fill:#2f9e6e">vpp-host</text>
+<rect x="772" y="506" width="116" height="28" rx="14" class="pill" style="stroke:#8a5cc9"/>
+<text x="830" y="525" font-size="12" class="mono b" text-anchor="middle" style="fill:#6c43a8">gate-tproxy</text>
+<rect x="948" y="506" width="96" height="28" rx="14" class="pill" style="stroke:#138a7e"/>
+<text x="996" y="525" font-size="12" class="mono b" text-anchor="middle" style="fill:#0f6e64">tap-tun0</text>
+<path d="M426 534V594" class="l1"/>
+<path d="M462 594V536" class="l1"/>
+<path d="M830 534V594" class="lp"/>
+<path d="M996 534V594" class="lt"/>
+
+<!-- Gate -->
+<rect x="376" y="596" width="368" height="262" rx="12" fill="#fff8f0" stroke="#e9a463" stroke-width="2"/>
+<text x="394" y="626" font-size="20" class="b" style="fill:#c4620c">Gate</text>
+<text x="450" y="626" font-size="12" class="mono m">vpp-egress-gate</text>
+<text x="394" y="650" font-size="12" class="m">监听</text>
+<text x="422" y="650" font-size="12" class="mono">10.61.30.2:1053</text>
+<text x="534" y="650" font-size="12" class="m">，lan0 的 53 端口重定向到这里</text>
+<path d="M392 664H728" stroke="#f1d8bf"/>
+<text x="394" y="688" font-size="13" class="b">分流规则</text><text x="456" y="688" font-size="12" class="m">按目的域名或目的 IP / 网段</text>
+<g font-size="12">
+<rect x="394" y="701" width="10" height="10" rx="2" fill="#3b6fd8"/>
+<text x="412" y="711" class="mono">example.org</text><text x="524" y="711" class="m">→ VPP 隧道</text><text x="604" y="711" class="mono">wg1 via 10.62.30.1</text>
+<rect x="394" y="727" width="10" height="10" rx="2" fill="#138a7e"/>
+<text x="412" y="737" class="mono">corp.example</text><text x="524" y="737" class="m">→ Linux 出口</text><text x="604" y="737" class="mono">tap-tun0 → tun0</text>
+<rect x="394" y="753" width="10" height="10" rx="2" fill="#8a5cc9"/>
+<text x="412" y="763" class="mono">example.net</text><text x="524" y="763" class="m">→ 代理</text><text x="604" y="763" class="mono">gate-tproxy</text>
+<rect x="394" y="779" width="10" height="10" rx="2" fill="#9aa6b8"/>
+<text x="412" y="789" class="m">其他域名</text><text x="524" y="789" class="m">→ 只转发应答，走默认路由</text>
+</g>
+<path d="M392 804H728" stroke="#f1d8bf"/>
+<text x="394" y="826" font-size="12" class="m">按 IP / 网段的规则直接写入路由表，不经过 DNS；</text>
+<text x="394" y="846" font-size="12" class="m">域名路由闲置过期后撤掉；VPP 重启后自动重新下发。</text>
+
+<!-- Gate -> VPP FIB via Binary API -->
+<path d="M664 596V474" class="lo"/>
+<text x="674" y="494" font-size="12" class="b" style="fill:#c4620c">Binary API</text>
+
+<!-- Linux exits -->
+<rect x="762" y="596" width="140" height="110" rx="10" class="box" style="stroke:#8a5cc9;stroke-width:1.6"/>
+<text x="776" y="622" font-size="15" class="b">sing-box</text>
+<text x="776" y="646" font-size="12" class="m">透明代理</text>
+<text x="776" y="668" font-size="11" class="mono m">TPROXY :2082</text>
+<text x="776" y="688" font-size="11" class="mono m">Fake-IP DNS :5354</text>
+<rect x="916" y="596" width="162" height="110" rx="10" class="box" style="stroke:#138a7e;stroke-width:1.6"/>
+<text x="930" y="622" font-size="15" class="b mono">tun0</text>
+<text x="972" y="622" font-size="12" class="m">OpenVPN 客户端</text>
+<text x="930" y="646" font-size="12" class="m">连公司网络</text>
+<text x="930" y="668" font-size="11" class="mono m">masquerade</text>
+<text x="930" y="688" font-size="11" class="m">VPP 不支持的协议走这里</text>
+<text x="762" y="732" font-size="12" class="m">两者自己的出站连接经 lan0 回到 VPP，</text>
+<text x="762" y="750" font-size="12" class="m">再由 port0.100 发往代理和 OpenVPN 服务器。</text>
+<text x="762" y="776" font-size="12" class="m">每个 Linux 出口一个持久 TAP，由 Gate 创建，</text>
+<text x="762" y="794" font-size="12" class="m">VPP 重启时 Linux 这端不受影响。</text>
+
+<!-- other Linux services -->
+<rect x="376" y="884" width="176" height="84" rx="10" class="box"/>
+<text x="392" y="910" font-size="15" class="b">dnsmasq</text>
+<text x="392" y="932" font-size="12" class="m">LAN DHCP</text>
+<text x="392" y="952" font-size="11" class="mono m">10.61.30.100–200</text>
+<rect x="568" y="884" width="176" height="84" rx="10" class="box"/>
+<text x="584" y="910" font-size="15" class="b">管理面板</text>
+<text x="584" y="932" font-size="12" class="m">配置、监控，也走 Binary API</text>
+<text x="584" y="952" font-size="11" class="mono m">https://10.61.30.2:9480</text>
+<rect x="762" y="884" width="316" height="84" rx="10" class="box"/>
+<text x="778" y="910" font-size="15" class="b">strongSwan</text>
+<text x="868" y="910" font-size="12" class="m">（可选）</text>
+<text x="778" y="932" font-size="12" class="m">IPsec 服务器的 IKE 协商，</text>
+<text x="778" y="952" font-size="12" class="m">ESP 加解密仍在 VPP 里</text>
+
+<!-- ============ upstream / internet ============ -->
+<rect x="1160" y="240" width="256" height="72" rx="12" class="box"/>
+<text x="1178" y="268" font-size="15" class="b">光猫</text>
+<text x="1216" y="268" font-size="12" class="m">路由模式，PPPoE 拨号</text>
+<text x="1178" y="292" font-size="12" class="mono m">192.168.1.1</text>
+<path d="M1288 312V346" class="lg"/>
+
+<rect x="1160" y="348" width="256" height="644" rx="14" fill="#f7f9fc" stroke="#e1e7ef"/>
+<circle cx="1190" cy="378" r="11" fill="none" stroke="#6b788d" stroke-width="1.4"/><ellipse cx="1190" cy="378" rx="4.5" ry="11" fill="none" stroke="#6b788d"/><path d="M1179 378h22" stroke="#6b788d"/>
+<text x="1210" y="383" font-size="15" class="b">互联网</text>
+
+<rect x="1176" y="404" width="224" height="70" rx="10" class="box"/>
+<text x="1192" y="430" font-size="14" class="b">上游 DNS</text>
+<text x="1192" y="452" font-size="12" class="m">Gate 转发查询，在面板路由页设置</text>
+
+<rect x="1176" y="490" width="224" height="92" rx="10" class="box" style="stroke:#3b6fd8;stroke-width:1.6"/>
+<text x="1192" y="516" font-size="14" class="b">VPS</text>
+<text x="1228" y="516" font-size="12" class="m">WireGuard 对端</text>
+<text x="1192" y="538" font-size="12" class="mono m">10.62.30.1</text>
+<text x="1192" y="560" font-size="12" class="m">example.org 从这里出去</text>
+
+<rect x="1176" y="598" width="224" height="92" rx="10" class="box" style="stroke:#8a5cc9;stroke-width:1.6"/>
+<text x="1192" y="624" font-size="14" class="b">代理服务器</text>
+<text x="1192" y="646" font-size="12" class="m">sing-box 的上游</text>
+<text x="1192" y="668" font-size="12" class="m">example.net 从这里出去</text>
+
+<rect x="1176" y="706" width="224" height="92" rx="10" class="box" style="stroke:#138a7e;stroke-width:1.6"/>
+<text x="1192" y="732" font-size="14" class="b">公司 OpenVPN 服务器</text>
+<text x="1192" y="754" font-size="12" class="m">Linux tun0 的对端</text>
+<text x="1192" y="776" font-size="12" class="m">corp.example 在这后面</text>
+
+<rect x="1176" y="814" width="224" height="92" rx="10" class="box"/>
+<text x="1192" y="840" font-size="14" class="b">其他网站</text>
+<text x="1192" y="862" font-size="12" class="m">默认路由直连，</text>
+<text x="1192" y="884" font-size="12" class="m">源地址经 NAT44 换成 port0.100 的</text>
+
+<text x="1176" y="940" font-size="11" class="m">隧道和代理的报文都封装后</text>
+<text x="1176" y="958" font-size="11" class="m">经 port0.100 和光猫发出</text>
+
+<!-- ============ DNS steps on the diagram ============ -->
+<g><circle cx="234" cy="214" r="11" class="badge"/><text x="234" y="218" class="bt" text-anchor="middle">1</text></g>
+<g><circle cx="426" cy="420" r="11" class="badge"/><text x="426" y="424" class="bt" text-anchor="middle">1</text></g>
+<g><circle cx="744" cy="596" r="11" class="badge"/><text x="744" y="600" class="bt" text-anchor="middle">2</text></g>
+<g><circle cx="664" cy="546" r="11" class="badge"/><text x="664" y="550" class="bt" text-anchor="middle">3</text></g>
+<g><circle cx="462" cy="420" r="11" class="badge"/><text x="462" y="424" class="bt" text-anchor="middle">4</text></g>
+<g><circle cx="556" cy="351" r="11" class="badge"/><text x="556" y="355" class="bt" text-anchor="middle">5</text></g>
+
+<!-- ============ footer ============ -->
+<text x="40" y="1046" font-size="13" class="b">示例：笔记本打开 example.org</text>
+<g font-size="13">
+<circle cx="52" cy="1072" r="10" class="badge"/><text x="52" y="1076" class="bt" text-anchor="middle">1</text>
+<text x="72" y="1077">笔记本向 10.61.30.1 查询 example.org。查询经 bd1 和 vpp-host 到达 lan0，被重定向给 Gate；发往 8.8.8.8 等公网 DNS 的由 ABF 送来。</text>
+<circle cx="52" cy="1098" r="10" class="badge"/><text x="52" y="1102" class="bt" text-anchor="middle">2</text>
+<text x="72" y="1103">Gate 向上游解析，得到 203.0.113.10，命中规则 example.org → wg1。</text>
+<circle cx="52" cy="1124" r="10" class="badge"/><text x="52" y="1128" class="bt" text-anchor="middle">3</text>
+<text x="72" y="1129">Gate 经 Binary API 写入 203.0.113.10/32 via 10.62.30.1 wg1，确认生效；写入失败就返回 SERVFAIL，不放出应答。</text>
+<circle cx="52" cy="1150" r="10" class="badge"/><text x="52" y="1154" class="bt" text-anchor="middle">4</text>
+<text x="72" y="1155">路由生效后，Gate 才把应答发回笔记本。</text>
+<circle cx="52" cy="1176" r="10" class="badge"/><text x="52" y="1180" class="bt" text-anchor="middle">5</text>
+<text x="72" y="1181">笔记本连接 203.0.113.10，第一个包就命中这条 /32，经 wg1 加密后从 port0.100 发往 VPS。example.net 解析成 Fake-IP，地址池路由启动时已装好。</text>
+</g>
+
+<g font-size="12">
+<path d="M1130 1042H1166" class="lb"/><text x="1176" y="1046">VPP 隧道（wg1）</text>
+<path d="M1130 1066H1166" class="lp"/><text x="1176" y="1070">代理（gate-tproxy）</text>
+<path d="M1130 1090H1166" class="lt"/><text x="1176" y="1094">Linux 出口（tap-tun0）</text>
+<path d="M1130 1114H1166" class="lg"/><text x="1176" y="1118">默认路由、LAN</text>
+<path d="M1130 1138H1166" class="l1"/><text x="1176" y="1142">vpp-host：Linux 局域网口的流量</text>
+<path d="M1130 1162H1166" class="lo"/><text x="1176" y="1166">Gate 经 Binary API 写路由</text>
+<rect x="1128" y="1176" width="40" height="18" rx="9" fill="#fff" stroke="#6b788d" stroke-width="1.4"/><text x="1176" y="1190">TAP：VPP 与 Linux 之间的虚拟网线</text>
+</g>
+</g>
+</svg>

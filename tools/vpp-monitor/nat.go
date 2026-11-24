@@ -14,14 +14,18 @@ import (
 	"go.fd.io/govpp/binapi/interface_types"
 	"go.fd.io/govpp/binapi/ip"
 	"go.fd.io/govpp/binapi/ip_types"
+	"go.fd.io/govpp/binapi/nat44_ed"
 	"go.fd.io/govpp/binapi/nat44_ei"
+	"go.fd.io/govpp/binapi/nat_types"
 	"go.fd.io/govpp/core"
 )
 
 // Connections per exit come from the NAT sessions: every exit uses NAT, a session already
-// counts its traffic, and reading it adds nothing to forwarding. The external address needs
-// patches/vpp/0012, without which VPP reports it as zero and it is left blank. IPv6 is left
-// out: its translation is 1:1 and keeps no per-connection state worth counting.
+// counts its traffic, and reading it adds nothing to forwarding. VPP runs NAT44-EI or
+// NAT44-ED. An EI session is one inside address and port, and its external address is the
+// first destination; it needs patches/vpp/0012, without which VPP reports it as zero and it is
+// left blank. An ED session is one connection, with its own destination. IPv6 is left out: its
+// translation is 1:1 and keeps no per-connection state worth counting.
 //
 // Individual NAT sessions are not in the stats segment, only behind VPP's binary API, whose
 // handlers normally run with the workers held at a barrier. So nothing here runs unless a
@@ -107,6 +111,7 @@ func endpointAddress(text string) netip.Addr {
 
 // natAPI is the part of VPP's API the sessions view needs.
 type natAPI interface {
+	mode() string // "ei" or "ed"
 	exits() (*natLocal, error)
 	users() ([]natUser, error)
 	sessions(natUser) ([]natSession, error)
@@ -153,6 +158,7 @@ type NATExitRow struct {
 // NATReport is one reading of the sessions, busiest first.
 type NATReport struct {
 	Available     bool            `json:"available"`
+	Mode          string          `json:"mode"` // ei or ed
 	Reason        string          `json:"reason"`
 	Time          int64           `json:"time"`
 	RatesReady    bool            `json:"rates_ready"`
@@ -256,7 +262,7 @@ func (s *NATService) read(now time.Time) *NATReport {
 		}
 		return users[i].Address < users[j].Address
 	})
-	report := &NATReport{Available: true, Time: now.Unix(), Users: make([]NATUserRow, 0, len(users))}
+	report := &NATReport{Available: true, Mode: s.api.mode(), Time: now.Unix(), Users: make([]NATUserRow, 0, len(users))}
 	dt := now.Sub(s.lastRead).Seconds()
 	report.RatesReady = !s.lastRead.IsZero() && dt > 0
 	current := make(map[natKey]natCounters)
@@ -409,12 +415,20 @@ func protocolName(protocol uint16) string {
 	return fmt.Sprintf("%d", protocol)
 }
 
-// vppNAT reads NAT44-EI sessions over VPP's API socket.
+// vppNAT reads NAT44 sessions over VPP's API socket, from the plugin VPP has loaded.
 type vppNAT struct {
 	conn   *core.Connection
 	ch     api.Channel
+	ed     bool
 	names  map[uint32]string
 	labels *InterfaceLabels
+}
+
+func (v *vppNAT) mode() string {
+	if v.ed {
+		return "ed"
+	}
+	return "ei"
 }
 
 func dialVPPNAT(socket string, labels *InterfaceLabels) (natAPI, error) {
@@ -428,14 +442,22 @@ func dialVPPNAT(socket string, labels *InterfaceLabels) (natAPI, error) {
 		return nil, err
 	}
 	ch.SetReplyTimeout(3 * time.Second)
-	if err := ch.CheckCompatiblity(&nat44_ei.Nat44EiUserDump{}, &nat44_ei.Nat44EiUserDetails{},
-		&nat44_ei.Nat44EiUserSessionV2Dump{}, &nat44_ei.Nat44EiUserSessionV2Details{},
-		&vppif.SwInterfaceDump{}, &vppif.SwInterfaceDetails{}, &ip.IPAddressDump{}, &ip.IPAddressDetails{}); err != nil {
+	// Only the loaded plugin's messages are in VPP's table.
+	ed := ch.CheckCompatiblity(&nat44_ed.Nat44UserDump{}, &nat44_ed.Nat44UserDetails{},
+		&nat44_ed.Nat44UserSessionV3Dump{}, &nat44_ed.Nat44UserSessionV3Details{}) == nil
+	if !ed {
+		err = ch.CheckCompatiblity(&nat44_ei.Nat44EiUserDump{}, &nat44_ei.Nat44EiUserDetails{},
+			&nat44_ei.Nat44EiUserSessionV2Dump{}, &nat44_ei.Nat44EiUserSessionV2Details{})
+	}
+	if err == nil {
+		err = ch.CheckCompatiblity(&vppif.SwInterfaceDump{}, &vppif.SwInterfaceDetails{}, &ip.IPAddressDump{}, &ip.IPAddressDetails{})
+	}
+	if err != nil {
 		ch.Close()
 		conn.Disconnect()
-		return nil, fmt.Errorf("this VPP has no compatible NAT44-EI API: %w", err)
+		return nil, fmt.Errorf("this VPP has no compatible NAT44-EI or NAT44-ED API: %w", err)
 	}
-	return &vppNAT{conn: conn, ch: ch, labels: labels}, nil
+	return &vppNAT{conn: conn, ch: ch, ed: ed, labels: labels}, nil
 }
 
 func (v *vppNAT) close() {
@@ -485,6 +507,20 @@ func (v *vppNAT) exits() (*natLocal, error) {
 
 func (v *vppNAT) users() ([]natUser, error) {
 	var users []natUser
+	if v.ed {
+		request := v.ch.SendMultiRequest(&nat44_ed.Nat44UserDump{})
+		for {
+			var reply nat44_ed.Nat44UserDetails
+			stop, err := request.ReceiveReply(&reply)
+			if err != nil {
+				return nil, err
+			}
+			if stop {
+				return users, nil
+			}
+			users = append(users, natUser{Address: reply.IPAddress.String(), VRF: reply.VrfID, Dynamic: reply.Nsessions, Static: reply.Nstaticsessions})
+		}
+	}
 	request := v.ch.SendMultiRequest(&nat44_ei.Nat44EiUserDump{})
 	for {
 		var reply nat44_ei.Nat44EiUserDetails
@@ -505,6 +541,32 @@ func (v *vppNAT) sessions(user natUser) ([]natSession, error) {
 		return nil, err
 	}
 	var sessions []natSession
+	if v.ed {
+		request := v.ch.SendMultiRequest(&nat44_ed.Nat44UserSessionV3Dump{IPAddress: address, VrfID: user.VRF})
+		for {
+			var reply nat44_ed.Nat44UserSessionV3Details
+			stop, err := request.ReceiveReply(&reply)
+			if err != nil {
+				return nil, err
+			}
+			if stop {
+				return sessions, nil
+			}
+			if reply.IsTimedOut {
+				continue
+			}
+			sessions = append(sessions, natSession{
+				Protocol: reply.Protocol,
+				Inside:   fmt.Sprintf("%s:%d", reply.InsideIPAddress, reply.InsidePort),
+				Outside:  fmt.Sprintf("%s:%d", reply.OutsideIPAddress, reply.OutsidePort),
+				External: externalAddress(reply.Protocol, reply.ExtHostAddress.String(), reply.ExtHostPort),
+				Static:   reply.Flags&nat_types.NAT_IS_STATIC != 0,
+				Idle:     float64(reply.TimeSinceLastHeard),
+				Bytes:    reply.TotalBytes,
+				Packets:  uint64(reply.TotalPkts),
+			})
+		}
+	}
 	request := v.ch.SendMultiRequest(&nat44_ei.Nat44EiUserSessionV2Dump{IPAddress: address, VrfID: user.VRF})
 	for {
 		var reply nat44_ei.Nat44EiUserSessionV2Details

@@ -6,6 +6,7 @@ import (
 	"compress/gzip"
 	"context"
 	"io"
+	"maps"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -279,6 +280,54 @@ func TestParseServer(t *testing.T) {
 	}
 	if _, err := parseServer("dns.google"); err == nil {
 		t.Error("a name was accepted")
+	}
+}
+
+func TestParseRoutedLinux(t *testing.T) {
+	routed := map[string]bool{}
+	parseRoutedLinux(`default via 10.61.30.1 dev vpp-host proto static
+10.61.30.0/24 dev vpp-host proto kernel scope link src 10.61.30.2
+10.8.0.0/24 dev wg0 table 100 proto static
+10.61.31.0/24 dev eth0 proto kernel scope link src 10.61.31.3 linkdown
+local 127.0.0.0/8 dev lo table local proto kernel scope host src 127.0.0.1
+broadcast 10.61.30.255 dev vpp-host table local proto kernel scope link src 10.61.30.2
+`, routed)
+	parseRoutedLinux(`::1 dev lo proto kernel metric 256 pref medium
+fe80::/64 dev gre0 proto kernel metric 256 pref medium
+fe80::/64 dev vpp-host proto kernel metric 256 pref medium
+default proto ra metric 1024 expires 1790sec pref medium nexthop via fe80::1 dev tap0 weight 1 nexthop via fe80::2 dev tap1 weight 1
+unreachable 2001:db8::/48 dev lo proto static metric 1024 pref medium
+anycast fe80:: dev nebula table local proto kernel metric 0 pref medium
+local 2001:db8::1 dev vpp-host table local proto kernel metric 0 pref medium
+multicast ff00::/8 dev sg table local proto kernel metric 256 pref medium
+`, routed)
+	got := slices.Sorted(maps.Keys(routed))
+	if want := []string{"lo", "tap0", "tap1", "vpp-host", "wg0"}; !slices.Equal(got, want) {
+		t.Errorf("%v", got)
+	}
+}
+
+func TestParseRoutedVPP(t *testing.T) {
+	text := `local0 (dn):
+lan0 (up):
+  L2 bridge bd-id 1 idx 1 shg 0
+loop0 (up):
+  L2 bridge bd-id 1 idx 1 shg 0 bvi
+  L3 10.61.30.1/24
+  L3 2001:db8:1::1/64
+loop10 (dn):
+  L3 10.0.10.1/24
+wan0 (up):
+wan0.100 (up):
+  L3 192.168.1.2/24
+tap0 (up):
+  L3 fe80::1/64
+wg0 (up):
+  unnumbered, use loop0
+  L3 10.61.30.1/24
+`
+	if got := parseRoutedVPP(text); !slices.Equal(got, []string{"loop0", "wan0.100", "wg0"}) {
+		t.Errorf("%v", got)
 	}
 }
 

@@ -1,6 +1,26 @@
 # VPP software router
 
-基于 [VPP](https://fd.io) 和 DPDK 的软路由：VPP/DPDK 补丁、树外插件、从源码安装的脚本、网页管理面板、按域名和设备的策略路由，以及配套的测试和压测工具。基于 VPP 26.06、DPDK 26.03。
+基于 [VPP](https://fd.io) 和 DPDK 的软路由：VPP/DPDK 补丁、树外插件、从源码安装的脚本、网页管理面板、按域名和目的网段的策略路由，以及配套的测试和压测工具。基于 VPP 26.06、DPDK 26.03。
+
+## 工作原理
+
+一句话概括：VPP 负责转发，Linux 上的服务负责编排，Gate 解析 DNS，按目的域名和目的 IP 决定路由。下面以单网口开发板的单臂部署为例，地址均为示例。
+
+### 物理拓扑
+
+![物理拓扑](docs/network-physical.svg)
+
+路由器只有一个网口 `port0`，接到支持 VLAN 的交换机的 trunk 口：局域网的帧不打标签，WAN 的帧带 VLAN 100 标签，光猫接在交换机 VLAN 100 的 access 口上。有两个以上网口的设备可以 WAN、LAN 各接一个口，不用 VLAN。
+
+### 逻辑拓扑
+
+![逻辑拓扑](docs/network-logical.svg)
+
+`port0` 不打标签的部分加入 VPP 的网桥 `bd1`，局域网 `10.61.30.0/24` 的网关是 `loop0` 的 `10.61.30.1`；子接口 `port0.100` 是 WAN，经光猫上网；另有一条 WireGuard 隧道 `wg1` 连到 VPS。Linux 通过 TAP 接到 VPP：`vpp-host` 是 Linux 在局域网上的接口（`lan0`，`10.61.30.2`），上面运行 Gate、dnsmasq 和管理面板；`gate-tproxy` 和 `tap-tun0` 把流量交给 Linux 上的 sing-box 和 OpenVPN 隧道 `tun0`，VPP 不支持的协议就这样接进来。转发都在 VPP 里完成，只有选了 Linux 出口的流量才进入 Linux。
+
+### Gate：按目的域名和 IP 决定路由
+
+VPP 只能按目的地址选出口，不认识域名。Gate 的规则有两种：按目的 IP 或网段的规则不依赖 DNS，Gate 直接写进 VPP 的路由表；按域名的规则要靠 Gate 自己解析 DNS。局域网的 DNS 查询都交给 Gate（手动设成公网 DNS 的查询由 ABF 送来）。Gate 向上游解析后，如果域名命中规则，先通过 Binary API 把解析出的地址写进 VPP 的路由表，确认生效后才把应答发回客户端；写入失败就返回 SERVFAIL。所以客户端拿到地址时，路由已经就绪，连接的第一个包就会走 `wg1`、代理或 `tun0`，没命中规则的走默认路由出 `port0.100`，路由写入失败的客户端因为无法解析IP直接无法访问。走代理的域名用 Fake-IP，地址池 `198.18.0.0/15` 的路由在启动时就已装好。VPP 重启后，Gate 会重新下发全部路由。
 
 ## 开发背景
 
@@ -68,7 +88,7 @@ VPP 在用户态轮询网卡，一次处理一批包（向量处理），按节�
 
 **策略路由**（`tools/vpp-egress-gate`，简称 Gate）
 - 按域名分流：Gate 转发 DNS 查询，应答命中规则时，先通过 VPP API 下发目的地址路由，路由生效后才把应答发给客户端；失败时返回 SERVFAIL，不会出现"解析到了但流量走错出口"。
-- 按设备或网段分流，出口可以是 VPP 里的隧道，也可以是 Linux 上的程序（经持久 TAP 连接，比如透明代理、sing-box）。
+- 按目的网段分流，出口可以是 VPP 里的隧道，也可以是 Linux 上的程序（经持久 TAP 连接，比如透明代理、sing-box）。
 - 支持 Fake-IP；可选用 ACL/ABF 拦截客户端发往公网 DNS 的查询，手动设置了 DNS 的设备也会经过 Gate。
 - VPP 和 Gate 谁先启动都可以，VPP 重启后路由自动重新下发。
 

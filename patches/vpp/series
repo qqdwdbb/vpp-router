@@ -30,3 +30,7 @@
 0030-dpdk-mlx4-rx-interrupts.patch
 0031-dpdk-name-ports-of-multi-port-device.patch
 0032-dpdk-rx-mode-of-stopped-port.patch
+0033-nat44-ed-fold-inside-port-into-worker-range.patch
+0034-nat44-ed-pool-address-of-egress-interface.patch
+0035-vnet-feature-missing-nodes-debug-log.patch
+0036-nat44-ed-own-icmp-from-pool-address.patch

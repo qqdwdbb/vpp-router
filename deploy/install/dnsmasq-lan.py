@@ -496,6 +496,9 @@ def do_set(args):
     if not hosts.exists():
         write_atomic(hosts, '# 静态分配，一行一条，格式同 dhcp-host（不写 dhcp-host=），比如\n'
                             '# 02:00:00:00:10:01,10.61.30.20,nas\n')
+    # dnsmasq reloads this file after dropping root privileges.
+    hosts.chmod(0o644)
+    hosts.parent.chmod((hosts.parent.stat().st_mode & 0o7777) | 0o001)
     error = dnsmasq_test(conf)
     if error:
         raise ValueError(f'{conf} 未通过 dnsmasq --test：{error}')

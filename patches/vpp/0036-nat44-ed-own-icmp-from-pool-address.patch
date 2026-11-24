@@ -1,0 +1,55 @@
+nat44-ed: do not translate ICMP that VPP sends from a pool address
+
+With the output feature, ED translated everything leaving an outside
+interface, VPP's own packets included. A ping of the router's outside
+address passed to ip4-local (ED lets ICMP to an interface address through
+when there is no session), but the echo reply then went through
+in2out-output with no session, got a new session and, with 0033, an
+identifier folded into the worker's range: the peer dropped the reply. A
+test router dropped most pings of its exits' addresses that way. ICMP
+errors VPP raises from those addresses were translated the same way.
+
+Leave ICMP whose source is a pool address untranslated, as patch 0025
+does for NAT44-EI. Only ICMP: VPP's own TCP and UDP from a pool address
+keep getting sessions, which their replies need to get back in, since ED
+drops TCP and UDP to an interface address that has no session. Verified
+on the test router with three exits (WAN, a bridged loopback and a
+WireGuard tunnel): pings of each exit's address from its far side and
+VPP's own pings out of each exit all answered.
+
+--- a/src/plugins/nat/nat44-ed/nat44_ed_in2out.c
++++ b/src/plugins/nat/nat44-ed/nat44_ed_in2out.c
+@@ -737,6 +737,17 @@
+ }
+ 
+ static_always_inline int
++nat44_ed_is_pool_address (snat_main_t *sm, ip4_address_t addr)
++{
++  snat_address_t *ap;
++
++  vec_foreach (ap, sm->addresses)
++    if (ap->addr.as_u32 == addr.as_u32)
++      return 1;
++  return 0;
++}
++
++static_always_inline int
+ nat44_ed_not_translate_output_feature (snat_main_t *sm, vlib_buffer_t *b,
+ 				       ip4_header_t *ip, u16 src_port,
+ 				       u16 dst_port, u32 thread_index,
+@@ -762,6 +773,15 @@
+       return 1;
+     }
+ 
++  /* Sent by VPP itself from a pool address, such as the reply to a ping of
++   * the router or an ICMP error it raises: no inside host has that source,
++   * so it needs no translation, which would give it a new identifier that
++   * the peer drops. Only ICMP: VPP's own TCP and UDP from a pool address
++   * get sessions, which their replies need to get back in. */
++  if (ip->protocol == IP_PROTOCOL_ICMP &&
++      nat44_ed_is_pool_address (sm, ip->src_address))
++    return 1;
++
+   /* dst NAT check */
+   if (is_multi_worker &&
+       PREDICT_TRUE (!pool_is_free_index (

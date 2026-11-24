@@ -47,24 +47,36 @@ func derive(password string, salt []byte, iterations int) ([]byte, error) {
 
 // SetPassword writes the credentials file atomically, readable only by its owner.
 func SetPassword(path, user, password string) error {
-	if user == "" {
-		return errors.New("the user name is empty")
-	}
-	if len(password) < minPassword {
-		return fmt.Errorf("the password must be at least %d characters", minPassword)
-	}
-	salt := make([]byte, 16)
-	if _, err := rand.Read(salt); err != nil {
-		return err
-	}
-	hash, err := derive(password, salt, hashIterations)
+	credentials, err := newCredentials(user, password)
 	if err != nil {
 		return err
 	}
-	data, err := json.Marshal(Credentials{
+	return writeCredentials(path, credentials)
+}
+
+func newCredentials(user, password string) (*Credentials, error) {
+	if user == "" {
+		return nil, errors.New("the user name is empty")
+	}
+	if len(password) < minPassword {
+		return nil, fmt.Errorf("the password must be at least %d characters", minPassword)
+	}
+	salt := make([]byte, 16)
+	if _, err := rand.Read(salt); err != nil {
+		return nil, err
+	}
+	hash, err := derive(password, salt, hashIterations)
+	if err != nil {
+		return nil, err
+	}
+	return &Credentials{
 		User: user, Iterations: hashIterations,
 		Salt: base64.StdEncoding.EncodeToString(salt), Hash: base64.StdEncoding.EncodeToString(hash),
-	})
+	}, nil
+}
+
+func writeCredentials(path string, credentials *Credentials) error {
+	data, err := json.Marshal(credentials)
 	if err != nil {
 		return err
 	}
@@ -117,17 +129,18 @@ type failureRecord struct {
 
 // Auth decides who may use the panel. Sessions live in memory: restarting logs everyone out.
 type Auth struct {
+	path    string // the credentials file, rewritten when the password changes in the panel
+	now     func() time.Time
+	hashing chan struct{} // one password check at a time, they are slow on purpose
+
+	mu          sync.Mutex
 	credentials Credentials
 	salt, hash  []byte
-	now         func() time.Time
-	hashing     chan struct{} // one password check at a time, they are slow on purpose
-
-	mu       sync.Mutex
-	sessions map[[sha256.Size]byte]time.Time
-	failures map[string]*failureRecord
+	sessions    map[[sha256.Size]byte]time.Time
+	failures    map[string]*failureRecord
 }
 
-func NewAuth(credentials *Credentials) (*Auth, error) {
+func NewAuth(credentials *Credentials, path string) (*Auth, error) {
 	salt, err := base64.StdEncoding.DecodeString(credentials.Salt)
 	if err != nil {
 		return nil, fmt.Errorf("salt: %w", err)
@@ -137,7 +150,7 @@ func NewAuth(credentials *Credentials) (*Auth, error) {
 		return nil, fmt.Errorf("hash: %w", err)
 	}
 	return &Auth{
-		credentials: *credentials, salt: salt, hash: hash, now: time.Now,
+		path: path, credentials: *credentials, salt: salt, hash: hash, now: time.Now,
 		hashing:  make(chan struct{}, 1),
 		sessions: make(map[[sha256.Size]byte]time.Time),
 		failures: make(map[string]*failureRecord),
@@ -162,13 +175,11 @@ func (a *Auth) Login(user, password, address string) (string, error) {
 		return "", errBusy
 	}
 	// The hash runs for an unknown user too, so timing does not reveal which names exist.
-	derived, err := derive(password, a.salt, a.credentials.Iterations)
+	ok, err := a.check(user, password)
 	if err != nil {
 		return "", err
 	}
-	userOK := subtle.ConstantTimeCompare([]byte(user), []byte(a.credentials.User)) == 1
-	hashOK := subtle.ConstantTimeCompare(derived, a.hash) == 1
-	if !userOK || !hashOK {
+	if !ok {
 		a.recordFailure(address)
 		return "", errBadLogin
 	}
@@ -183,6 +194,75 @@ func (a *Auth) Login(user, password, address string) (string, error) {
 	encoded := base64.RawURLEncoding.EncodeToString(token)
 	a.sessions[sha256.Sum256([]byte(encoded))] = a.now().Add(sessionIdle)
 	return encoded, nil
+}
+
+// check compares a user and password with the stored ones. The caller holds a.hashing.
+func (a *Auth) check(user, password string) (bool, error) {
+	a.mu.Lock()
+	stored, salt, hash := a.credentials, a.salt, a.hash
+	a.mu.Unlock()
+	derived, err := derive(password, salt, stored.Iterations)
+	if err != nil {
+		return false, err
+	}
+	userOK := subtle.ConstantTimeCompare([]byte(user), []byte(stored.User)) == 1
+	hashOK := subtle.ConstantTimeCompare(derived, hash) == 1
+	return userOK && hashOK, nil
+}
+
+// User is the administrator's name.
+func (a *Auth) User() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.credentials.User
+}
+
+var errShortPassword = fmt.Errorf("新密码至少 %d 个字符", minPassword)
+
+// ChangePassword replaces the password after checking the current one, writes the
+// credentials file and ends every session except the one that made the change.
+func (a *Auth) ChangePassword(token, current, next, address string) error {
+	if len(next) < minPassword {
+		return errShortPassword
+	}
+	if a.lockedOut(address) {
+		return errLocked
+	}
+	select {
+	case a.hashing <- struct{}{}:
+		defer func() { <-a.hashing }()
+	default:
+		return errBusy
+	}
+	user := a.User()
+	ok, err := a.check(user, current)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		a.recordFailure(address)
+		return errBadLogin
+	}
+	credentials, err := newCredentials(user, next)
+	if err != nil {
+		return err
+	}
+	salt, _ := base64.StdEncoding.DecodeString(credentials.Salt)
+	hash, _ := base64.StdEncoding.DecodeString(credentials.Hash)
+	if err := writeCredentials(a.path, credentials); err != nil {
+		return err
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.credentials, a.salt, a.hash = *credentials, salt, hash
+	delete(a.failures, address)
+	keep := sha256.Sum256([]byte(token))
+	for key := range a.sessions {
+		if key != keep {
+			delete(a.sessions, key)
+		}
+	}
+	return nil
 }
 
 func (a *Auth) lockedOut(address string) bool {
@@ -309,7 +389,7 @@ func (a *Auth) handleLogin(w http.ResponseWriter, r *http.Request) {
 	token, err := a.Login(request.User, request.Password, address)
 	switch {
 	case err == nil:
-		log.Printf("audit: login by %s from %s", a.credentials.User, address)
+		log.Printf("audit: login by %s from %s", a.User(), address)
 		a.setCookie(w, token, int(sessionIdle/time.Second))
 		w.WriteHeader(http.StatusNoContent)
 	case errors.Is(err, errLocked), errors.Is(err, errBusy):
@@ -323,6 +403,47 @@ func (a *Auth) handleLogin(w http.ResponseWriter, r *http.Request) {
 		log.Printf("login error: %v", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 	}
+}
+
+func (a *Auth) handlePassword(w http.ResponseWriter, r *http.Request, token string) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST only", http.StatusMethodNotAllowed)
+		return
+	}
+	var request struct {
+		Current  string `json:"current"`
+		Password string `json:"password"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxLoginRequest)).Decode(&request); err != nil {
+		writeError(w, http.StatusBadRequest, "请求格式错误")
+		return
+	}
+	address := remoteAddress(r)
+	err := a.ChangePassword(token, request.Current, request.Password, address)
+	switch {
+	case err == nil:
+		log.Printf("audit: password changed by %s from %s", a.User(), address)
+		w.WriteHeader(http.StatusNoContent)
+	case errors.Is(err, errShortPassword):
+		writeError(w, http.StatusBadRequest, err.Error())
+	case errors.Is(err, errLocked), errors.Is(err, errBusy):
+		log.Printf("audit: password change refused from %s: %v", address, err)
+		w.Header().Set("Retry-After", "60")
+		writeError(w, http.StatusTooManyRequests, "尝试次数过多，请稍后再试")
+	case errors.Is(err, errBadLogin):
+		// Not 401: the page would take that as a lost session and go to the login.
+		log.Printf("audit: password change with a wrong current password from %s", address)
+		writeError(w, http.StatusForbidden, "当前密码错误")
+	default:
+		log.Printf("password change error: %v", err)
+		writeError(w, http.StatusInternalServerError, "保存失败："+err.Error())
+	}
+}
+
+func writeError(w http.ResponseWriter, status int, message string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(map[string]string{"error": message})
 }
 
 // Wrap puts next behind the login, and adds the headers every response needs.
@@ -361,6 +482,10 @@ func (a *Auth) Wrap(next http.Handler) http.Handler {
 		}
 		cookie, err := r.Cookie(sessionCookie)
 		if err == nil && a.Valid(cookie.Value) {
+			if r.URL.Path == "/api/password" {
+				a.handlePassword(w, r, cookie.Value)
+				return
+			}
 			next.ServeHTTP(w, r)
 			return
 		}

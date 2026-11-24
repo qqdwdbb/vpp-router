@@ -3,19 +3,34 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>VPP 监控登录</title>
+<title>VPP 控制面板登录</title>
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
 <main class="login">
   <form id="form" class="card">
-    <h1>VPP 监控</h1>
+    <h1>VPP 控制面板</h1>
     <label>用户名 <input id="user" name="username" autocomplete="username" required autofocus></label>
     <label>密码 <input id="password" name="password" type="password" autocomplete="current-password" required></label>
     <button id="submit">登录</button>
     <p class="note" id="message" role="status"></p>
+    <button type="button" class="link-button" id="help-open" hidden>忘记密码？</button>
   </form>
 </main>
+<dialog id="help" class="help-dialog" aria-labelledby="help-title">
+  <div class="dialog-head">
+    <h2 id="help-title">忘记密码？</h2>
+    <form method="dialog"><button class="close">关闭</button></form>
+  </div>
+  <p class="note">请在面板所在主机上运行下面的命令设置新密码（输入时不显示，回车结束），然后重启面板：</p>
+  <pre id="help-command">read -rs PW; printf '%s\n' "$PW" | sudo vpp-monitor --set-password; unset PW
+sudo systemctl restart vpp-monitor</pre>
+  <p class="note">命令会把用户名设为 admin，要用别的名字时加 <code>--user 名字</code>。</p>
+  <div class="help-actions">
+    <button type="button" class="close" id="help-copy">复制命令</button>
+    <form method="dialog"><button class="close strong">知道了</button></form>
+  </div>
+</dialog>
 <script src="login.js"></script>
 </body>
 </html>

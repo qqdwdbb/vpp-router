@@ -19,6 +19,8 @@ import (
 	"go.fd.io/govpp/binapi/ip"
 	"go.fd.io/govpp/binapi/ip_types"
 	"go.fd.io/govpp/binapi/l2"
+	"go.fd.io/govpp/binapi/nat44_ed"
+	"go.fd.io/govpp/binapi/nat44_ei"
 	"go.fd.io/govpp/binapi/vlib"
 	"go.fd.io/govpp/core"
 )
@@ -48,6 +50,8 @@ type liveInterface struct {
 type liveState struct {
 	Interfaces []*liveInterface
 	Bridges    map[uint32]bool
+	// NAT is the NAT44 plugin VPP has loaded, empty for none.
+	NAT natMode
 }
 
 func (s *liveState) find(name string) *liveInterface {
@@ -210,6 +214,13 @@ func (s *realSystem) read() (*liveState, error) {
 				}
 			}
 		}
+	}
+	// Only the loaded plugins' messages are in VPP's table.
+	switch {
+	case ch.CheckCompatiblity((*nat44_ed.Nat44ShowRunningConfig)(nil), (*nat44_ed.Nat44ShowRunningConfigReply)(nil)) == nil:
+		state.NAT = natED
+	case ch.CheckCompatiblity((*nat44_ei.Nat44EiShowRunningConfig)(nil), (*nat44_ei.Nat44EiShowRunningConfigReply)(nil)) == nil:
+		state.NAT = natEI
 	}
 	// Leases only add a detail, so VPP without the DHCP plugin is no error.
 	if ch.CheckCompatiblity((*dhcp.DHCPClientDump)(nil), (*dhcp.DHCPClientDetails)(nil)) == nil {

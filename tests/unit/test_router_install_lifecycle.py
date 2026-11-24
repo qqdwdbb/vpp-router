@@ -192,6 +192,55 @@ gen_router_vpp
                      'set interface l2 bridge tap0 1', 'set interface ip address wan0.100 10.61.10.2/24'):
             self.assertIn(line, result.stdout)
 
+    def test_nat_mode_picks_the_plugin_and_its_commands(self):
+        body = '''
+SEL=(0); LAN=(); N_KIND=(afp); N_IF=(eth0); V_NAME=(host-eth0); N_PCI=(0000:01:00.0)
+WAN_NIC=0; SINGLE=1; WAN_VLAN=100; LAN_VLAN=1
+LAN_CIDR=10.61.30.1/24; HOST_CIDR=; WAN_MODE=dhcp; IPV6_PD=0
+IPSEC=1; IPSEC_TAP_ID=2082; IPSEC_NS=vpp-ipsec
+WORKERS=0; MEM_MB=4096; CPUS=1; UIO=vfio-pci
+stable_mac(){ echo 02:00:00:00:00:01; }
+date(){ echo 2026-11-24T00:00:00Z; }
+NAT_MODE=@MODE@
+gen_startup
+gen_router_vpp
+'''
+        names = ['nat44', 'gen_ipsec_vpp', 'gen_startup', 'gen_router_vpp']
+        ed = self.run_shell(names, body.replace('@MODE@', 'ed'))
+        self.assertEqual(ed.returncode, 0, ed.stderr)
+        self.assertIn('plugin nat_plugin.so { enable }', ed.stdout)
+        self.assertNotIn('nat44_ei_plugin.so', ed.stdout)
+        for line in ('nat44 plugin enable sessions 65536', 'set nat timeout tcp-established 1800 tcp-transitory 120',
+                     'nat44 add interface address host-eth0.100', 'set interface nat44 out host-eth0.100 output-feature',
+                     'nat44 add identity mapping external host-eth0.100 udp 4500'):
+            self.assertIn(line + '\n', ed.stdout)
+        self.assertNotIn('nat44 ei', ed.stdout)
+        ei = self.run_shell(names, body.replace('@MODE@', 'ei'))
+        self.assertEqual(ei.returncode, 0, ei.stderr)
+        self.assertIn('plugin nat44_ei_plugin.so { enable }', ei.stdout)
+        self.assertNotIn('nat_plugin.so', ei.stdout)
+        for line in ('nat44 ei plugin enable sessions 65536 users 4096 user-sessions 16384',
+                     'set nat44 ei timeout tcp-established 1800 tcp-transitory 120',
+                     'set interface nat44 ei out host-eth0.100 output-feature',
+                     'nat44 ei add identity mapping external host-eth0.100 udp 500'):
+            self.assertIn(line + '\n', ei.stdout)
+
+    def test_nat_mode_defaults_to_the_installed_plugin(self):
+        body = '''
+ask(){ printf -v "$1" '%s' "$3"; }
+mkdir -p "$CONF"
+@CONF@
+ask_nat_mode
+echo "mode=$NAT_MODE"
+'''
+        for conf, mode in (('', 'ei'),
+                           ("printf 'plugins {\\n  plugin nat44_ei_plugin.so { enable }\\n}\\n' >\"$STARTUP\"", 'ei'),
+                           ("printf 'plugins {\\n  plugin nat_plugin.so { enable }\\n}\\n' >\"$STARTUP\"", 'ed')):
+            with self.subTest(mode=mode, conf=conf):
+                result = self.run_shell(['ask_nat_mode'], body.replace('@CONF@', conf))
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn('mode=' + mode, result.stdout)
+
     def test_ipv6_pd_configuration_uses_selected_wan(self):
         body = '''
 SEL=(0); LAN=(); N_KIND=(afp); N_IF=(eth0); V_NAME=(host-eth0)
@@ -257,7 +306,7 @@ LAN_ULA=fd12:3456:789a::/64; IPV6_PD=0; gen_router_vpp
         out = alone.stdout
         self.assertIn('set interface ip address loop0 fd12:3456:789a::1/64', out)
         # VPP does not advertise an address's prefix by itself.
-        self.assertIn('ip6 nd loop0 prefix fd12:3456:789a::/64 86400 14400', out)
+        self.assertIn('ip6 nd loop0 prefix fd12:3456:789a::/64 infinite', out)
         self.assertLess(out.index('enable ip6 interface loop0'), out.index('set interface ip address loop0 fd12'))
         self.assertIn('ip6 nd loop0 ra-interval 10 7', out)
         self.assertNotIn('dhcp6 pd client', out)
@@ -267,7 +316,7 @@ LAN_ULA=fd12:3456:789a::/64; IPV6_PD=0; gen_router_vpp
         self.assertEqual(both.stdout.count('enable ip6 interface loop0'), 1)
         self.assertEqual(both.stdout.count('ip6 nd loop0 ra-interval'), 1)
         self.assertIn('set ip6 address loop0 prefix group wan-pd ::1/64', both.stdout)
-        self.assertIn('ip6 nd loop0 prefix fd12:3456:789a::/64 86400 14400', both.stdout)
+        self.assertIn('ip6 nd loop0 prefix fd12:3456:789a::/64 infinite', both.stdout)
         none = self.run_shell(['gen_router_vpp'], body.replace('LAN_ULA=fd12:3456:789a::/64', 'LAN_ULA='))
         self.assertNotIn('fd12', none.stdout)
         self.assertNotIn('ip6', none.stdout)

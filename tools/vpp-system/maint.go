@@ -637,21 +637,27 @@ var interfacePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.:/@-]{0,63}$`
 
 func (m *Maint) Sources(ctx context.Context) *TestSources {
 	src := &TestSources{Linux: []string{}, VPP: []string{}}
+	routed := m.linuxRouted(ctx)
 	if list, err := net.Interfaces(); err == nil {
 		for _, i := range list {
-			src.Linux = append(src.Linux, i.Name)
+			// Routes to the host's own addresses sit on lo; a test cannot leave through it.
+			if i.Flags&net.FlagLoopback == 0 && (routed == nil || routed[i.Name]) {
+				src.Linux = append(src.Linux, i.Name)
+			}
 		}
 	}
 	if v, err := m.s.dial(); err != nil {
 		src.VPPError = "VPP 没有应答"
 	} else {
-		text, err := v.CLI("show interface")
-		v.Close()
-		if err != nil {
-			src.VPPError = err.Error()
-		} else {
+		text, err := v.CLI("show interface address")
+		if err == nil {
+			src.VPP = parseRoutedVPP(text)
+		} else if text, err = v.CLI("show interface"); err == nil {
 			src.VPP = parseInterfaceNames(text)
+		} else {
+			src.VPPError = err.Error()
 		}
+		v.Close()
 	}
 	traceroute, tracepath := traceTools()
 	src.Traceroute = traceroute
@@ -660,6 +666,81 @@ func (m *Maint) Sources(ctx context.Context) *TestSources {
 	}
 	src.TraceInterface = traceroute == "traceroute"
 	return src
+}
+
+// linuxRouted is the set of Linux devices some route leaves through, or nil when
+// the routes cannot be read (then every device is offered).
+func (m *Maint) linuxRouted(ctx context.Context) map[string]bool {
+	routed := map[string]bool{}
+	for _, family := range []string{"-4", "-6"} {
+		out, err := m.run(ctx, "ip", "-o", family, "route", "show", "table", "all")
+		if err != nil {
+			return nil
+		}
+		parseRoutedLinux(string(out), routed)
+	}
+	return routed
+}
+
+// parseRoutedLinux adds the devices of `ip -o route show table all` lines that
+// can carry a test: unicast routes outside the local table, not on a link that
+// is down, not just the link-local fe80::/64 every IPv6 device has.
+func parseRoutedLinux(text string, routed map[string]bool) {
+	for _, line := range strings.Split(text, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 3 {
+			continue
+		}
+		switch fields[0] {
+		case "local", "broadcast", "multicast", "anycast", "unreachable", "blackhole", "prohibit", "throw", "nat":
+			continue
+		}
+		if strings.HasPrefix(fields[0], "fe80:") || slices.Contains(fields, "linkdown") {
+			continue
+		}
+		// A multipath route names a device per next hop.
+		devs := []string{}
+		for i := 1; i < len(fields)-1; i++ {
+			if fields[i] == "table" && fields[i+1] == "local" {
+				devs = nil
+				break
+			}
+			if fields[i] == "dev" {
+				devs = append(devs, fields[i+1])
+			}
+		}
+		for _, dev := range devs {
+			routed[dev] = true
+		}
+	}
+}
+
+// parseRoutedVPP reads `show interface address`: the interfaces that are up and
+// have an L3 address (their own, or an unnumbered one's), so VPP has a route
+// through them and a source address for ping. Bridge members and interfaces
+// without an address cannot send a test.
+func parseRoutedVPP(text string) []string {
+	names := []string{}
+	name, up, added := "", false, false
+	for _, line := range strings.Split(text, "\n") {
+		if line == "" {
+			continue
+		}
+		if line[0] != ' ' && line[0] != '\t' {
+			fields := strings.Fields(line)
+			name, up, added = fields[0], len(fields) > 1 && strings.HasPrefix(fields[1], "(up)"), false
+			if name == "local0" {
+				name = ""
+			}
+			continue
+		}
+		fields := strings.Fields(line)
+		if name != "" && up && !added && len(fields) >= 2 && fields[0] == "L3" && !strings.HasPrefix(fields[1], "fe80:") {
+			names = append(names, name)
+			added = true
+		}
+	}
+	return names
 }
 
 // parseInterfaceNames reads the names from `show interface`, skipping local0.

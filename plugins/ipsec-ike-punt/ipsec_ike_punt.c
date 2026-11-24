@@ -121,12 +121,15 @@ VLIB_CLI_COMMAND (cleartext_command, static) = {
   .function = ipsec_cleartext_enable,
 };
 
-/* Protect VPN return traffic before output NAT can translate it again. */
+/* Protect VPN return traffic before output NAT can translate it again.
+ * NAT44-EI or NAT44-ED, whichever plugin VPP loads. */
 VNET_FEATURE_INIT (ipsec_output_order, static) = {
   .arc_name = "ip4-output",
   .node_name = "ipsec-cleartext-input",
   .runs_after = VNET_FEATURES ("ipsec4-output-feature"),
-  .runs_before = VNET_FEATURES ("nat-ei-context-enter", "nat44-ei-in2out-output", "acl-plugin-out-ip4-fa"),
+  .runs_before = VNET_FEATURES ("nat-ei-context-enter", "nat44-ei-in2out-output",
+				"nat-pre-in2out-output", "nat44-in2out-output-worker-handoff",
+				"nat44-ed-in2out-output", "acl-plugin-out-ip4-fa"),
 };
 
 /* Let SPD protection consume private IPv6 cleartext before WAN anti-leak ACLs. */
@@ -137,14 +140,16 @@ VNET_FEATURE_INIT (ipsec6_output_order, static) = {
   .runs_before = VNET_FEATURES ("acl-plugin-out-ip6-fa"),
 };
 
-/* EI out2in jumps to ip4-lookup and skips the rest of ip4-unicast, including
- * mss-clamp-in. Clamp SYN-ACK before NAT consumes the arc. This feature is an
- * ordering constraint; it is not enabled as a packet node on LAN. */
+/* EI and ED out2in jump to ip4-lookup and skip the rest of ip4-unicast,
+ * including mss-clamp-in. Clamp SYN-ACK before NAT consumes the arc. This
+ * feature is an ordering constraint; it is not enabled as a packet node on LAN. */
 VNET_FEATURE_INIT (ipsec_input_order, static) = {
   .arc_name = "ip4-unicast",
   .node_name = "ipsec-cleartext-input",
   .runs_after = VNET_FEATURES ("ipsec4-input-feature", "tcp-mss-clamping-ip4-in"),
-  .runs_before = VNET_FEATURES ("nat44-ei-out2in", "nat44-ei-out2in-worker-handoff"),
+  .runs_before = VNET_FEATURES ("nat44-ei-out2in", "nat44-ei-out2in-worker-handoff",
+				"nat-pre-out2in", "nat44-out2in-worker-handoff",
+				"nat44-ed-out2in"),
 };
 
 /* NAT66 can leave the ip6-unicast arc before a policy-based UDP/4500 ESP
@@ -193,15 +198,20 @@ VNET_FEATURE_INIT (ipsec_pmtu_save_dst_feat, static) = {
   .node_name = "ipsec-pmtu-save-dst",
   .runs_after = VNET_FEATURES ("tcp-mss-clamping-ip4-in", "ipsec4-input-feature"),
   .runs_before = VNET_FEATURES ("nat44-ei-out2in", "nat44-ei-out2in-worker-handoff",
-				"nat44-ei-classify", "nat44-ei-handoff-classify"),
+				"nat44-ei-classify", "nat44-ei-handoff-classify",
+				"nat-pre-out2in", "nat44-out2in-worker-handoff",
+				"nat44-ed-out2in", "nat44-ed-classify", "nat44-handoff-classify"),
 };
 
-/* Only EI out2in rewrites the destination that ICMP must quote, so save it
- * only on interfaces where one of these features runs. Follow them as NAT
- * interfaces come and go instead of costing every packet on every interface. */
+/* Only NAT out2in (EI or ED) rewrites the destination that ICMP must quote, so
+ * save it only on interfaces where one of these features runs. Follow them as
+ * NAT interfaces come and go instead of costing every packet on every
+ * interface. A name the loaded plugins do not have is never enabled. */
 static const char *const pmtu_out2in_features[] = {
   "nat44-ei-out2in", "nat44-ei-out2in-worker-handoff",
   "nat44-ei-classify", "nat44-ei-handoff-classify",
+  "nat-pre-out2in", "nat44-out2in-worker-handoff",
+  "nat44-ed-out2in", "nat44-ed-classify", "nat44-handoff-classify",
 };
 static u8 pmtu_save_dst_on;
 
@@ -486,9 +496,10 @@ ipsec_nat_key (ip4_address_t addr, u16 port, u32 fib_index, u8 proto)
 }
 
 /* After out2in the quoted dest is the VPN inside address. Linux updates
- * PMTU on the quoted dest, so restore the outside 5-tuple from the EI
- * in2out session before ip4-icmp-error. Resolved at ICMP time because
- * this plugin loads before nat44_ei. */
+ * PMTU on the quoted dest, so restore the outside 5-tuple: the one
+ * ipsec-pmtu-save-dst saved before out2in (EI or ED), else the EI in2out
+ * session's. Without nat44_ei (NAT44-ED) only the saved one is there.
+ * Resolved at ICMP time because this plugin loads before nat44_ei. */
 static int
 ipsec_reverse_nat44_quoted (vlib_buffer_t *b)
 {

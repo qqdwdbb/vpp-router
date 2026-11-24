@@ -18,6 +18,14 @@ type fakeNAT struct {
 	dumped   []string
 	usersErr error
 	closed   int
+	ed       bool
+}
+
+func (f *fakeNAT) mode() string {
+	if f.ed {
+		return "ed"
+	}
+	return "ei"
 }
 
 func (f *fakeNAT) exits() (*natLocal, error) {
@@ -73,6 +81,27 @@ func TestNATRatesComeFromTwoReadings(t *testing.T) {
 	}
 	if second.Bps != 2000 || second.Users[0].Bps != 2000 || second.Users[0].Pps != 10 {
 		t.Fatalf("totals = %+v", second)
+	}
+}
+
+func TestNATEDSessionsPerDestination(t *testing.T) {
+	// NAT44-ED reuses one outside port for several destinations: each is its own session.
+	to := func(external string, bytes uint64) natSession {
+		return natSession{Protocol: 17, Inside: "10.0.0.1:5000", Outside: "1.1.1.1:5000", External: external, Bytes: bytes, Packets: bytes / 100}
+	}
+	f := &fakeNAT{ed: true,
+		list:   []natUser{{Address: "10.0.0.1", Dynamic: 2}},
+		byUser: map[string][]natSession{"10.0.0.1": {to("8.8.8.8:53", 1000), to("9.9.9.9:53", 1000)}},
+	}
+	s, now := natService(f)
+	if first := s.Report(); first.Mode != "ed" || len(first.Sessions) != 2 {
+		t.Fatalf("%+v", first)
+	}
+	f.byUser["10.0.0.1"] = []natSession{to("8.8.8.8:53", 1000+1250), to("9.9.9.9:53", 1000)}
+	*now = now.Add(5 * time.Second)
+	second := s.Report()
+	if second.Sessions[0].External != "8.8.8.8:53" || second.Sessions[0].Bps != 2000 || second.Sessions[1].Bps != 0 || second.Exits[0].Sessions != 2 {
+		t.Fatalf("%+v", second)
 	}
 }
 

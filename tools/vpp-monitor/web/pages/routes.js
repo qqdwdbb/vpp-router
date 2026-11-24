@@ -298,6 +298,12 @@ async function saveExit() {
 }
 
 function render() {
+  const hijack = routes.state.vpp_dns_hijack;
+  $('routes-dns-hijack').checked = !!hijack?.enabled;
+  $('routes-dns-hijack').disabled = !hijack?.available || !!routes.state.pending || routes.busy;
+  $('routes-dns-hijack-status').textContent = hijack?.available
+    ? (hijack.enabled ? '已开启' : '已关闭')
+    : '尚未配置 VPP DNS 劫持的接口、来源网段或 Linux DNS 重定向。';
   if (!routes.state) return;
   $('routes-edit-save').disabled = routes.busy || !!routes.state.pending;
   renderPending();
@@ -686,6 +692,11 @@ async function applyFile() {
 }
 
 export function start() {
+  $('routes-dns-hijack').onchange = async () => {
+    const enabled = $('routes-dns-hijack').checked;
+    await apply('dns-hijack', { enabled }, `${enabled ? '开启' : '关闭'} VPP 侧 DNS 劫持。`);
+    render();
+  };
   $('rule-keywords').oninput = () => { fitKeywords(); renderAddRule(); };
   $('routes-edit-save').onclick = saveEdit;
   $('routes-edit-dns').oninput = () => { if (routes.edit) routes.edit.dnsTyped = true; };

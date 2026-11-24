@@ -3,14 +3,14 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>VPP 监控</title>
+<title>VPP 控制面板</title>
 <link rel="stylesheet" href="uPlot.min.css">
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
 <main>
   <header>
-    <h1>VPP 监控</h1>
+    <h1>VPP 控制面板</h1>
     <div class="state" id="state" data-state="down" role="status"><i aria-hidden="true">✕</i><b>连接中</b> <span></span></div>
     <nav class="segmented main-nav" aria-label="页面">
       <a id="nav-overview" href="/">总览</a>
@@ -23,7 +23,8 @@
       <a id="nav-system" href="/system">系统</a>
       <a id="nav-maint" href="/maint">维护</a>
     </nav>
-    <button id="logout" class="close logout">退出</button>
+    <button id="password-open" class="close logout">修改密码</button>
+    <button id="logout" class="close">退出</button>
   </header>
 
   <div id="page-overview">
@@ -67,7 +68,7 @@
     </div>
     <div class="card">
       <h2>VPP 运行记录</h2>
-      <p class="note counter-note">每次启动一行，最多保留 20 次。监控没运行期间的多次重启只会记为一次。运行时长包含停机的时间。</p>
+      <p class="note counter-note">每次启动一行，最多保留 20 次。面板没运行期间的多次重启只会记为一次。运行时长包含停机的时间。</p>
       <div class="scroll"><table id="vpp-runs"><thead><tr><th>序号</th><th>启动时间</th><th>运行时长</th><th>类型</th></tr></thead><tbody></tbody></table></div>
       <p class="note" id="vpp-runs-empty" hidden>还没有记录。</p>
     </div>
@@ -253,7 +254,7 @@
       </section>
       <section class="card route-card">
         <h2>路由器本机端口</h2>
-        <p class="note section-help">开放 WAN 上给 VPP 自己的端口（NAT44-EI identity mapping），比如手动建的 WireGuard 监听端口。WireGuard 配置、IPsec 已经开放的端口标为“其他程序”，在各自的页面管理。开了 IPv6 防火墙时，这些端口也在 WAN 的 IPv6 地址上放行。</p>
+        <p class="note section-help">开放 WAN 上给 VPP 自己的端口（NAT44 identity mapping），比如手动建的 WireGuard 监听端口。WireGuard 配置、IPsec 已经开放的端口标为“其他程序”，在各自的页面管理。开了 IPv6 防火墙时，这些端口也在 WAN 的 IPv6 地址上放行。</p>
         <div class="scroll"><table id="fw-ports"><thead><tr><th class="text">名称</th><th class="text">协议</th><th class="text">接口</th><th>端口</th><th class="text">来源</th><th>操作</th></tr></thead><tbody></tbody></table></div>
         <p class="note" id="fw-ports-empty" hidden>WAN 上没有开放给路由器本机的端口。</p>
         <div class="form-row">
@@ -343,8 +344,15 @@
         <p class="note" id="sys-governors-empty" hidden>这台机器没有 cpufreq（虚拟机或固定频率），不能设置调速器。</p>
       </section>
       <section class="card route-card">
-        <h2>NAT44-EI</h2>
+        <h2>NAT44</h2>
         <p class="note section-help" id="nat-help"></p>
+        <h3>模式</h3>
+        <p class="note section-help">EI（端点无关）：一个内网地址和端口连所有目的地都用同一个外部端口，任何外部主机都能发进来（全锥形），游戏和 P2P 最容易连通；每条连接独占一个外部端口。ED（端点相关）：尽量保留内网端口，同一个外部端口可以复用给不同的目的地，只放行回应已有连接的包（端口受限锥形）；运营商限制可用端口数时能容纳多得多的连接，吞吐略低（约 5%）。端口转发两种模式都可以用。切换时改写启动文件和 <code id="nat-mode-files"></code> 里的 NAT 命令，要重启 VPP，所有连接重建，60 秒内不确认就恢复。</p>
+        <div class="form-row">
+          <span id="nat-mode-now"></span>
+          <button id="nat-mode-switch" class="close strong"></button>
+        </div>
+        <p class="note" id="nat-mode-problem" hidden></p>
         <h3>会话超时（秒）</h3>
         <p class="note section-help">连接多久没有包就回收它的会话。TCP 已建立的连接默认 7440 秒，太长时空闲连接长期占着会话表；太短时长时间不说话的连接（SSH、推送）会被断开。修改立即生效，写入 <code id="nat-cli-file"></code>。</p>
         <div class="form-row">
@@ -356,11 +364,11 @@
           <button id="nat-timeouts-default" class="close">填入 VPP 默认值</button>
         </div>
         <h3>会话表</h3>
-        <p class="note section-help">会话数和用户数是每个线程的上限（主线程和每个 worker 各一份），每个用户的会话数是一个局域网地址最多同时占用的会话。表满时新连接被丢弃。表越大占用 VPP 主堆内存越多，内存不够时插件启用失败，VPP 会自动恢复旧值。要重启 VPP，60 秒内不确认就恢复。</p>
+        <p class="note section-help" id="nat-size-help"></p>
         <div class="form-row">
           <label>会话数 <input id="nat-size-sessions" type="number" min="1024" max="16777216"></label>
-          <label>用户数 <input id="nat-size-users" type="number" min="1" max="1048576"></label>
-          <label>每个用户的会话数 <input id="nat-user-sessions" type="number" min="1"></label>
+          <label id="nat-size-users-label">用户数 <input id="nat-size-users" type="number" min="1" max="1048576"></label>
+          <label id="nat-user-sessions-label">每个用户的会话数 <input id="nat-user-sessions" type="number" min="1"></label>
           <button id="nat-size-apply" class="close strong">应用并重启 VPP</button>
         </div>
       </section>
@@ -499,6 +507,12 @@
       </div>
       <p class="note" id="routes-message" role="status"></p>
       <p class="note" id="routes-last"></p>
+      <section class="card route-card">
+        <h2>DNS 劫持</h2>
+        <label><input id="routes-dns-hijack" type="checkbox"> 启用 VPP 侧 DNS 劫持</label>
+        <p class="note section-help">将已配置接口和来源网段发往任意 DNS 服务器的 TCP/UDP 53 查询送到 Gate。关闭后客户端可使用自己设置的 DNS；DoH 和 DoT 不受此开关影响。重新开启时保留原有接口和网段配置。</p>
+        <p class="note" id="routes-dns-hijack-status"></p>
+      </section>
       <section class="card route-card">
         <div class="dialog-head">
           <h2>规则与优先级</h2>
@@ -924,9 +938,24 @@
     </div>
     <div class="scroll"><table id="nat-sessions"><thead><tr><th>出口</th><th>协议</th><th class="text">客户端</th><th class="text">外部地址</th><th class="text">转换后</th><th>速率</th><th>pps</th><th>累计流量</th><th>累计包</th><th>空闲</th></tr></thead><tbody></tbody></table></div>
     <p class="note" id="nat-empty" hidden>没有匹配的连接。</p>
-    <p class="note nat-foot">每 5 秒刷新，按速率排序，最多显示 300 条。数据来自 IPv4 NAT 表，速率是收发双向合计，外部地址是这个连接的第一个目的地；同一个内网端口连多个目的地时只显示第一个。IPv6 是 1:1 转换，不统计。</p>
+    <p class="note nat-foot">每 5 秒刷新，按速率排序，最多显示 300 条。数据来自 IPv4 NAT 表，速率是收发双向合计。<span id="nat-external-note"></span>IPv6 是 1:1 转换，不统计。</p>
     <p class="note nat-foot" id="nat-no-external" hidden>这个 VPP 没有返回外部地址（需要仓库里的 0012 补丁），所以不显示这一列。</p>
   </div>
+</dialog>
+
+<dialog id="password-dialog" class="password-dialog" aria-labelledby="password-title">
+  <div class="dialog-head">
+    <h2 id="password-title">修改面板密码</h2>
+    <form method="dialog"><button class="close">关闭</button></form>
+  </div>
+  <form id="password-form" class="wg-form">
+    <label>当前密码 <input id="password-current" type="password" autocomplete="current-password" required></label>
+    <label>新密码 <input id="password-new" type="password" autocomplete="new-password" minlength="8" required></label>
+    <label>确认新密码 <input id="password-confirm" type="password" autocomplete="new-password" minlength="8" required></label>
+    <p class="note">至少 8 个字符。修改后其他浏览器的登录会退出，当前页面保持登录。</p>
+    <p class="note error" id="password-error" role="alert"></p>
+    <button id="password-submit" class="close strong">保存</button>
+  </form>
 </dialog>
 
 <script src="uPlot.iife.min.js"></script>

@@ -60,6 +60,7 @@ DISTRO_MASKED=$STATE/distro-vpp-masked
 DNS_SERVICE=vpp-router-dnsmasq
 PD_SERVICE=vpp-router-pd-sync
 IPV6_PD=0
+NAT_MODE=ei
 # LAN 的固定 IPv6 ULA 网段（/64），空表示不用；重装时沿用 router.vpp 里的，不会变
 LAN_ULA=
 # LAN 的 dnsmasq 配置：生成和就地更新 $CONF/dnsmasq.conf，导入系统 dnsmasq 的配置
@@ -1078,6 +1079,41 @@ ipsec_wan_name() {
 
 # IPsec 服务器（VPP 侧）。strongSwan 的 charon 在命名空间 $IPSEC_NS 里协商 IKE，用 kernel-vpp 后端
 # 把 SA 和策略下发给 VPP；VPP 把 IKE 报文转进命名空间，ESP 自己加解密
+# NAT44 有两个插件。重新运行时默认沿用 $STARTUP 加载的那个，面板系统页上切换过的不会被改回去
+# 启动文件加载的 NAT44 插件：ei、ed，都没有时为空
+startup_nat_mode() {
+	[ -r "$1" ] || return 0
+	if grep -Eq '^[[:space:]]*plugin[[:space:]]+nat_plugin\.so[[:space:]]*\{[[:space:]]*enable' "$1"; then
+		echo ed
+	elif grep -Eq '^[[:space:]]*plugin[[:space:]]+nat44_ei_plugin\.so[[:space:]]*\{[[:space:]]*enable' "$1"; then
+		echo ei
+	fi
+}
+
+ask_nat_mode() {
+	local reply def=1
+	NAT_MODE=ei
+	[ "$(startup_nat_mode "$STARTUP")" = ed ] && def=2
+	echo
+	info "NAT44 模式"
+	note "EI（默认）：一个内网地址和端口连所有目的地都用同一个外部端口，任何外部主机都能发进来（全锥形），"
+	note "            游戏和 P2P 最容易连通；每条连接独占一个外部端口。"
+	note "ED：尽量保留内网端口，同一个外部端口复用给不同的目的地，只放行回应已有连接的包（端口受限锥形）；"
+	note "    运营商限制可用端口数时能容纳多得多的连接，吞吐略低（约 5%）。"
+	note "以后可以在面板的系统页切换。"
+	while :; do
+		ask reply "1) EI  2) ED" "$def"
+		case $reply in 1|2) break ;; esac
+	done
+	[ "$reply" = 2 ] && NAT_MODE=ed
+	return 0
+}
+
+# NAT44 命令的开头：NAT44-ED 的命令没有 ei
+nat44() {
+	if [ "${NAT_MODE:-ei}" = ed ]; then echo nat44; else echo nat44 ei; fi
+}
+
 ask_ipsec() {
 	local def=n wan
 	IPSEC=0
@@ -1376,7 +1412,7 @@ summary() {
 		note "WAN      ${N_IF[WAN_NIC]} (${N_PCI[WAN_NIC]})"
 		for i in "${LAN[@]}"; do note "LAN      ${N_IF[i]} (${N_PCI[i]})"; done
 	fi
-	note "WAN 地址 $([ "$WAN_MODE" = dhcp ] && echo DHCP || echo "$WAN_CIDR 网关 $WAN_GW")，NAT44-EI"
+	note "WAN 地址 $([ "$WAN_MODE" = dhcp ] && echo DHCP || echo "$WAN_CIDR 网关 $WAN_GW")，$([ "${NAT_MODE:-ei}" = ed ] && echo NAT44-ED || echo NAT44-EI)"
 	note "LAN 网关 $LAN_CIDR"
 	[ "$IPV6_PD" = 1 ] && note "IPv6     WAN DHCPv6-PD，LAN RA/SLAAC"
 	[ -n "$LAN_ULA" ] && note "IPv6     LAN 固定 ULA $LAN_ULA（RA/SLAAC）"
@@ -2000,7 +2036,7 @@ record_orig() {
 }
 
 gen_startup() {
-	local plugins rxq i q a enabled=(tap ping nat44_ei dhcp acl abf mss_clamp wireguard vxlan gre af_packet) has_pci=0 has_plat=0 heap extras=${EXTRA_PLUGINS:-}
+	local plugins rxq i q a enabled=(tap ping "$([ "${NAT_MODE:-ei}" = ed ] && echo nat || echo nat44_ei)" dhcp acl abf mss_clamp wireguard vxlan gre af_packet) has_pci=0 has_plat=0 heap extras=${EXTRA_PLUGINS:-}
 	for i in ${extras//,/ }; do enabled+=("$i"); done
 	plugins=$LIBDIR/vpp_plugins
 	for i in "${SEL[@]}"; do
@@ -2204,22 +2240,33 @@ gen_router_vpp() {
 	fi
 	if [ -n "${LAN_ULA:-}" ]; then
 		echo
-		echo "# IPv6：LAN 的固定 ULA 网段，RA 里宣告（VPP 不会自动宣告接口地址的网段）"
+		echo "# IPv6：LAN 的固定 ULA 网段，RA 里宣告（VPP 不会自动宣告接口地址的网段）。"
+		echo "# 用 infinite：VPP 把写明的有限 lifetime 从配置时起倒数，不会每次 RA 重新宣告，"
+		echo "# 写 86400 14400 时 VPP 启动 4 小时后网段被废弃，24 小时后以 valid 0 宣告"
 		if [ "${IPV6_PD:-0}" != 1 ]; then
 			echo "enable ip6 interface loop0"
 			echo "ip6 nd loop0 ra-interval 10 7"
 		fi
 		echo "set interface ip address loop0 ${LAN_ULA%/64}1/64"
-		echo "ip6 nd loop0 prefix $LAN_ULA 86400 14400"
+		echo "ip6 nd loop0 prefix $LAN_ULA infinite"
 	fi
 	echo
-	echo "# NAT44-EI：只翻译从 WAN 发出的流量"
-	echo "nat44 ei plugin enable sessions 65536 users 4096 user-sessions 16384"
+	if [ "${NAT_MODE:-ei}" = ed ]; then
+		echo "# NAT44-ED：只翻译从 WAN 发出的流量"
+		echo "nat44 plugin enable sessions 65536"
+	else
+		echo "# NAT44-EI：只翻译从 WAN 发出的流量"
+		echo "nat44 ei plugin enable sessions 65536 users 4096 user-sessions 16384"
+	fi
 	# 和 RK3588 开发板一样缩短 TCP 会话的回收时间（VPP 默认已建立 7440 秒、握手和关闭中 240 秒），
 	# 空闲连接不会长期占着会话表；UDP 300 秒、ICMP 60 秒保持 VPP 默认
-	echo "set nat44 ei timeout tcp-established 1800 tcp-transitory 120"
-	echo "nat44 ei add interface address $wan"
-	echo "set interface nat44 ei out $wan output-feature"
+	if [ "${NAT_MODE:-ei}" = ed ]; then
+		echo "set nat timeout tcp-established 1800 tcp-transitory 120"
+	else
+		echo "set nat44 ei timeout tcp-established 1800 tcp-transitory 120"
+	fi
+	echo "$(nat44) add interface address $wan"
+	echo "set interface $(nat44) out $wan output-feature"
 	[ "$IPSEC" = 1 ] && gen_ipsec_vpp "$wan"
 	return 0
 }
@@ -2244,8 +2291,8 @@ gen_ipsec_vpp() {
 	echo "ip punt redirect rx $wan via 10.63.40.2 $tap"
 	echo "ip6 punt redirect rx $wan via fd42:1111:2222:40::2 $tap"
 	echo "# IKE 端口不做 NAT，charon 的回包保持 WAN 地址和端口"
-	echo "nat44 ei add identity mapping external $wan udp 500"
-	echo "nat44 ei add identity mapping external $wan udp 4500"
+	echo "$(nat44) add identity mapping external $wan udp 500"
+	echo "$(nat44) add identity mapping external $wan udp 4500"
 	echo "# 解密后的流量以 $tap 为接收接口再走路由和 NAT，不被当成从 WAN 进来的"
 	echo "ipsec cleartext ingress $tap"
 }
@@ -2656,6 +2703,10 @@ Description=VPP router (VPP $VPP_TAG, DPDK $DPDK_VERSION)
 After=systemd-modules-load.service
 Wants=network-pre.target
 Before=network-pre.target
+# RestartSec=5 使默认的 10 秒 5 次永远达不到；配置错误时每次重启都会重新绑定网卡、加载模块，
+# 5 分钟内失败 10 次后停在 failed，修好后 systemctl reset-failed 再启动
+StartLimitIntervalSec=300
+StartLimitBurst=10
 
 [Service]
 Type=simple
@@ -2804,7 +2855,7 @@ EOF
 	if [ -n "${PLAT:-}" ] && [ -n "${PLAT_MAX_WORKERS:-}" ]; then max_workers=" --max-workers $PLAT_MAX_WORKERS"; fi
 	cat >"$UNIT_DIR/vpp-system.service" <<EOF
 [Unit]
-Description=VPP system settings and maintenance: threads, DPDK cards, RX modes and placement, NAT44-EI, CPU governors, services, logs, network tests, backup
+Description=VPP system settings and maintenance: threads, DPDK cards, RX modes and placement, NAT44, CPU governors, services, logs, network tests, backup
 # 改线程、加网卡和改 NAT 会话表时重启 VPP 并等待确认，所以不随 VPP 停止；VPP 重启后由它恢复收包设置
 # 加的网卡写进 router.env 的 NICS（vpp-router-ctl prep 绑定），原驱动记入 nics.orig（--restore 交还）
 
@@ -3034,6 +3085,52 @@ stop_system_dnsmasq() {
 	systemctl stop dnsmasq.service 2>/dev/null || warn "停止系统 dnsmasq 失败"
 }
 
+# 能离线改写 NAT44 命令的 vpp-system（面板系统页切换用的同一套规则）。旧版本没有这个子命令，
+# 带着它运行会启动服务，所以先在程序里找子命令的用法说明
+nat_mode_tool() {
+	local bin=$PREFIX/bin/vpp-system
+	[ -x "$bin" ] && grep -aqF 'vpp-system nat-mode' "$bin" && echo "$bin"
+	return 0
+}
+
+# router.vpp 用 exec 执行的文件里有没有 NAT44 命令
+exec_files_have_nat() {
+	local f
+	for f in $(grep -E '^exec[[:space:]]' "$CONF/router.vpp" 2>/dev/null | awk '{print $2}'); do
+		[ -r "$f" ] && grep -Eq '^[[:space:]]*(nat44[[:space:]]|set[[:space:]]+(int[a-z]*[[:space:]]+)?nat44[[:space:]]|set[[:space:]]+nat[[:space:]])' "$f" && return 0
+	done
+	return 1
+}
+
+# NAT 模式变了时 router.vpp 按新模式重新生成，但它 exec 的文件保留，里面的 NAT44 命令由 vpp-system
+# 改写，WireGuard 配置的附加命令由 vpp-wireguard 执行时换写法。先检查能不能改写（多出口的地址池须是
+# 出口自己的地址等，和系统页的规则相同），不能时保持原来的模式
+check_nat_mode_change() {
+	local old=$1 tool out
+	[ -n "$old" ] && [ "$old" != "${NAT_MODE:-ei}" ] || return 0
+	tool=$(nat_mode_tool)
+	if [ -n "$tool" ]; then
+		out=$("$tool" nat-mode -mode "$NAT_MODE" -vpp-config "$STARTUP" -wireguard-store "$CONF/wireguard/wireguard.json" -check 2>&1) && return 0
+		warn "不能把 router.vpp 执行的文件改成 $([ "$NAT_MODE" = ed ] && echo NAT44-ED || echo NAT44-EI) 的写法："
+		printf '%s\n' "$out" | sed 's/^/    /' >&2
+	elif exec_files_have_nat; then
+		warn "router.vpp 执行的文件里有 NAT44 命令，没有能改写它们的 vpp-system（需要面板）"
+	else
+		return 0
+	fi
+	warn "NAT 保持 $([ "$old" = ed ] && echo NAT44-ED || echo NAT44-EI)，改好后可以在面板的系统页切换"
+	NAT_MODE=$old
+}
+
+rewrite_nat_mode_files() {
+	local old=$1 tool
+	[ -n "$old" ] && [ "$old" != "${NAT_MODE:-ei}" ] || return 0
+	tool=$(nat_mode_tool)
+	[ -n "$tool" ] || return 0
+	"$tool" nat-mode -mode "$NAT_MODE" -vpp-config "$STARTUP" -wireguard-store "$CONF/wireguard/wireguard.json" -backup-dir "$STATE/nat-mode" | sed 's/^/    /' ||
+		die "改写 router.vpp 执行的文件失败；原来的文件在 $STATE/nat-mode/"
+}
+
 write_config() {
 	info "写入配置 $CONF"
 	mkdir -p "$CONF" "$STATE"
@@ -3049,6 +3146,9 @@ write_config() {
 		fi
 		cp -p "$CONF/$f" "$STATE/$f.bak"
 	done
+	local old_nat
+	old_nat=$(startup_nat_mode "$STARTUP")
+	check_nat_mode_change "$old_nat"
 	gen_startup >"$STARTUP"
 	# 其他程序追加的 exec 行（比如 Gate 的设备配置）保留；面板对接口的修改不保留，按这次的回答重新生成
 	local keep=
@@ -3059,6 +3159,7 @@ write_config() {
 		printf '\n# 其他程序加入的命令，重新生成时保留\n%s\n' "$keep" >>"$CONF/router.vpp"
 		note "保留了 router.vpp 里其他程序加入的 exec 行"
 	fi
+	rewrite_nat_mode_files "$old_nat"
 	gen_env >"$CONF/router.env"
 	if [ "${RTL_PLATFORM:-0}" = 1 ]; then
 		mkdir -p "$LIBEXEC"
@@ -3291,6 +3392,7 @@ main() {
 	ask_mlx4
 	ask_cpu
 	ask_rx_mode
+	ask_nat_mode
 	ask_ipsec
 	ask_panel
 	ask_singbox

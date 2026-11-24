@@ -111,7 +111,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("cannot read the credentials (%v); create them with: vpp-monitor -set-password", err)
 	}
-	auth, err := NewAuth(credentials)
+	auth, err := NewAuth(credentials, *authFile)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -130,7 +130,7 @@ func main() {
 		firewallAPIPrefix:   NewAdminProxy(*firewallSocket, credentials.User),
 		systemAPIPrefix:     NewAdminProxy(*systemSocket, credentials.User),
 	}
-	server := &http.Server{Handler: auth.Wrap(WithAdmin(NewHandler(collector, store, nat, vpn), services)), ReadHeaderTimeout: 5 * time.Second}
+	server := &http.Server{ErrorLog: log.New(&tlsErrorLog{output: log.Writer(), now: time.Now}, log.Prefix(), log.Flags()), Handler: auth.Wrap(WithAdmin(NewHandler(collector, store, nat, vpn), services)), ReadHeaderTimeout: 5 * time.Second}
 	go func() {
 		<-ctx.Done()
 		server.Close()

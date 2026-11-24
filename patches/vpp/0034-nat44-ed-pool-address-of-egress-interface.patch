@@ -1,0 +1,139 @@
+nat44-ed: choose the pool address of the egress interface
+
+With the output feature on more than one interface, ED is meant to take
+the pool address bound to the egress interface. Addresses added without a
+tenant VRF (fib_index ~0) -- which is what "nat44 add interface address"
+and plain "nat44 add address" create -- were never bound to their
+interface, because binding required the interface FIB to equal the
+address's fib_index, and the selection only compared the egress for
+tenant-VRF addresses. Those addresses were only fallbacks picked by a
+hash of the source address, so a client could leave one exit with
+another exit's address and lose all replies.
+
+Bind addresses without a tenant VRF to the outside interface that has
+them (on address add, on output/outside enable and on interface address
+change), start them unbound (sw_if_index ~0 instead of 0), unbind on
+interface address delete, and let the output feature prefer the bound
+address for them too. Verified with two exits (WAN 192.168.1.6 by DHCP and
+a tap 10.99.0.1): every client now leaves each exit with that exit's
+address; before, half the clients pinged the internet with the tap's
+address and got no reply.
+
+--- a/src/plugins/nat/nat44-ed/nat44_ed.c
++++ b/src/plugins/nat/nat44-ed/nat44_ed.c
+@@ -268,7 +268,7 @@
+ 	}
+ 
+       fib_index = ip4_fib_table_get_index_for_sw_if_index (i->sw_if_index);
+-      if (fib_index != ap->fib_index)
++      if (ap->fib_index != ~0 && fib_index != ap->fib_index)
+ 	{
+ 	  continue;
+ 	}
+@@ -315,7 +315,7 @@
+ 
+   vec_foreach (ap, sm->addresses)
+     {
+-      if (fib_index != ap->fib_index)
++      if (ap->fib_index != ~0 && fib_index != ap->fib_index)
+ 	{
+ 	  continue;
+ 	}
+@@ -525,6 +525,8 @@
+ 
+   ap->addr_len = ~0;
+   ap->fib_index = ~0;
++  /* Not bound to an interface until one that has the address is outside. */
++  ap->sw_if_index = ~0;
+   ap->addr = *addr;
+ 
+   if (vrf_id != ~0)
+@@ -3472,7 +3474,7 @@
+ 	    ip4_fib_table_get_index_for_sw_if_index (sw_if_index);
+ 	  vec_foreach (ap, sm->addresses)
+ 	    {
+-	      if ((fib_index == ap->fib_index) &&
++	      if ((ap->fib_index == ~0 || fib_index == ap->fib_index) &&
+ 		  (address->as_u32 == ap->addr.as_u32))
+ 		{
+ 		  if (!is_delete)
+@@ -3490,6 +3492,7 @@
+ 		  else
+ 		    {
+ 		      ap->addr_len = ~0;
++		      ap->sw_if_index = ~0;
+ 		    }
+ 		  break;
+ 		}
+--- a/src/plugins/nat/nat44-ed/nat44_ed_in2out.c
++++ b/src/plugins/nat/nat44-ed/nat44_ed_in2out.c
+@@ -161,22 +161,21 @@
+ 	  for (i = s_addr_offset; i < vec_len (sm->addresses); ++i)
+ 	    {
+ 	      a = sm->addresses + i;
+-	      if (a->fib_index == rx_fib_index)
++	      if ((a->fib_index == rx_fib_index || a->fib_index == ~0) &&
++		  a->sw_if_index == tx_sw_if_index)
+ 		{
+-		  if (a->sw_if_index == tx_sw_if_index)
++		  if ((a->addr_len != ~0) &&
++		      (a->net.as_u32 ==
++		       (d_addr.as_u32 & ip4_main.fib_masks[a->addr_len])))
+ 		    {
+-		      if ((a->addr_len != ~0) &&
+-			  (a->net.as_u32 ==
+-			   (d_addr.as_u32 & ip4_main.fib_masks[a->addr_len])))
+-
+-			{
+-			  return nat_ed_alloc_addr_and_port_with_snat_address (
+-			    sm, nat_proto, thread_index, a,
+-			    sm->port_per_thread, snat_thread_index, s,
+-			    outside_addr, outside_port);
+-			}
+-		      ra = a;
++		      return nat_ed_alloc_addr_and_port_with_snat_address (
++			sm, nat_proto, thread_index, a, sm->port_per_thread,
++			snat_thread_index, s, outside_addr, outside_port);
+ 		    }
++		  ra = a;
++		}
++	      if (a->fib_index == rx_fib_index)
++		{
+ 		  ja = a;
+ 		}
+ 	      else if (a->fib_index == ~0)
+@@ -187,22 +186,21 @@
+ 	  for (i = 0; i < s_addr_offset; ++i)
+ 	    {
+ 	      a = sm->addresses + i;
+-	      if (a->fib_index == rx_fib_index)
++	      if ((a->fib_index == rx_fib_index || a->fib_index == ~0) &&
++		  a->sw_if_index == tx_sw_if_index)
+ 		{
+-		  if (a->sw_if_index == tx_sw_if_index)
++		  if ((a->addr_len != ~0) &&
++		      (a->net.as_u32 ==
++		       (d_addr.as_u32 & ip4_main.fib_masks[a->addr_len])))
+ 		    {
+-		      if ((a->addr_len != ~0) &&
+-			  (a->net.as_u32 ==
+-			   (d_addr.as_u32 & ip4_main.fib_masks[a->addr_len])))
+-
+-			{
+-			  return nat_ed_alloc_addr_and_port_with_snat_address (
+-			    sm, nat_proto, thread_index, a,
+-			    sm->port_per_thread, snat_thread_index, s,
+-			    outside_addr, outside_port);
+-			}
+-		      ra = a;
++		      return nat_ed_alloc_addr_and_port_with_snat_address (
++			sm, nat_proto, thread_index, a, sm->port_per_thread,
++			snat_thread_index, s, outside_addr, outside_port);
+ 		    }
++		  ra = a;
++		}
++	      if (a->fib_index == rx_fib_index)
++		{
+ 		  ja = a;
+ 		}
+ 	      else if (a->fib_index == ~0)

@@ -80,7 +80,11 @@ function renderNAT() {
   $('nat-empty').hidden = rows.length > 0;
   const noExternal = !(report.sessions || []).some(r => r.external);
   $('nat-sessions').classList.toggle('no-external', noExternal);
-  $('nat-no-external').hidden = !noExternal;
+  // NAT44-ED reports every destination; EI only the patched first one (patches/vpp/0012).
+  $('nat-no-external').hidden = !noExternal || report.mode === 'ed';
+  $('nat-external-note').textContent = report.mode === 'ed'
+    ? 'NAT44-ED 每个目的地一行，外部地址就是这个连接的目的地，同一个外部端口可以出现在几行里。'
+    : 'NAT44-EI 的外部地址是这个连接的第一个目的地；同一个内网端口连多个目的地时只显示第一个。';
   fillBody($('nat-sessions').tBodies[0], rows.length, (row, i) => {
     const r = rows[i];
     setCells(row, [r.exit, r.protocol + (r.static ? ' 静态' : ''), r.inside + (KIND_LABEL[r.kind] ? `（${KIND_LABEL[r.kind]}）` : ''), r.external || '—', r.outside || '—', FORMATS.bps(rate(r.bps)), si(rate(r.pps)), bytes(r.bytes), si(r.packets), idleText(r.idle_seconds)]);

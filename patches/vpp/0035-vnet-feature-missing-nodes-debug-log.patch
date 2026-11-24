@@ -1,0 +1,68 @@
+vnet: log missing feature nodes in ordering constraints at debug level
+
+A feature's runs_before/runs_after may name a node of a plugin that is not
+loaded, which VPP tolerates by design: the constraint is dropped. Each one
+was still a clib_warning at every start. The repo's IPsec and WireGuard
+ordering plugins name the nodes of both NAT44 plugins, and only one loads,
+so a start printed a dozen of these lines. They are now debug logs of
+class feature/order: none by default, and listed by "show logging" with
+"logging { class feature/order { level debug } }" in the startup file.
+The bulk constraint message also gets the arc name its format asked for.
+
+--- a/src/vnet/feature/registration.c
++++ b/src/vnet/feature/registration.c
+@@ -7,6 +7,16 @@
+ #include <vnet/ip/ip.h>
+ #include <vnet/mpls/mpls.h>
+ 
++/* An ordering constraint may name a feature of a plugin that is not loaded
++ * (NAT44-EI's nodes when NAT44-ED runs, and the other way round); that is
++ * tolerated by design, so it is logged at debug level rather than warned
++ * about at every start. With "logging { class feature/order { level debug } }"
++ * in the startup file, "show logging" lists them. */
++VLIB_REGISTER_LOG_CLASS (feature_order_log, static) = {
++  .class_name = "feature",
++  .subclass_name = "order",
++};
++
+ /**
+  * @file
+  * @brief Feature Subgraph Ordering.
+@@ -215,9 +225,10 @@
+ 	  p = hash_get_mem (index_by_name, this_constraint_c);
+ 	  if (p == 0)
+ 	    {
+-	      clib_warning
+-		("bulk constraint feature node '%s' not found for arc '%s'",
+-		 this_constraint_c);
++	      vlib_log_debug (feature_order_log.class,
++			      "bulk constraint feature node '%s' not found for arc '%s'",
++			      this_constraint_c,
++			      first_reg ? first_reg->arc_name : "?");
+ 	      these_constraints++;
+ 	      continue;
+ 	    }
+@@ -258,8 +269,9 @@
+        */
+       if (p == 0)
+ 	{
+-	  clib_warning ("feature node '%s' not found (before '%s', arc '%s')",
+-			a_name, b_name, first_reg->arc_name);
++	  vlib_log_debug (feature_order_log.class,
++			  "feature node '%s' not found (before '%s', arc '%s')",
++			  a_name, b_name, first_reg->arc_name);
+ 	  continue;
+ 	}
+       a_index = p[0];
+@@ -267,8 +279,9 @@
+       p = hash_get_mem (index_by_name, b_name);
+       if (p == 0)
+ 	{
+-	  clib_warning ("feature node '%s' not found (after '%s', arc '%s')",
+-			b_name, a_name, first_reg->arc_name);
++	  vlib_log_debug (feature_order_log.class,
++			  "feature node '%s' not found (after '%s', arc '%s')",
++			  b_name, a_name, first_reg->arc_name);
+ 	  continue;
+ 	}
+       b_index = p[0];

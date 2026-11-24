@@ -23,6 +23,12 @@ Gate 的配置解析通过 `vpp-egress-gate` 模块的 `admin_shared.go` 共用�
 
 接口路径在 `/gate/*`，面板从 `/api/gate/*` 转发过来。
 
+路由页的“DNS 劫持”开关通过 `POST /gate/dns-hijack`（`{"enabled":true}`）
+修改入口配置的 `hijack_vpp_enabled`，保留原有接口、下一跳和来源网段。
+状态中的 `vpp_dns_hijack` 提供 `enabled`、`available`；未配置 `hijack_vpp`
+或未开启 Linux DNS 重定向时不可切换。此操作重启 Gate，并沿用确认和自动回退流程。
+部署时需同时更新 Gate、gate-admin 和嵌入页面的 vpp-monitor。
+
 ## 测试
 
 ```sh

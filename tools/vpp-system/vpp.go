@@ -11,6 +11,7 @@ import (
 	"go.fd.io/govpp/api"
 	vppif "go.fd.io/govpp/binapi/interface"
 	"go.fd.io/govpp/binapi/interface_types"
+	"go.fd.io/govpp/binapi/nat44_ed"
 	"go.fd.io/govpp/binapi/nat44_ei"
 	"go.fd.io/govpp/binapi/vlib"
 	"go.fd.io/govpp/core"
@@ -33,8 +34,9 @@ type rxQueue struct {
 	Mode      string // polling, interrupt, adaptive
 }
 
-// natRunning is NAT44-EI as VPP runs it now.
+// natRunning is NAT44 as VPP runs it now.
 type natRunning struct {
+	Mode     natMode     `json:"mode"`
 	Size     natSize     `json:"size"`
 	Timeouts natTimeouts `json:"timeouts"`
 }
@@ -44,7 +46,7 @@ type vppAPI interface {
 	RxQueues() ([]rxQueue, error)
 	SetRxMode(index uint32, mode string) error
 	SetRxPlacement(index, queue, thread uint32) error
-	// NAT is nil when the NAT44-EI API is not there.
+	// NAT is nil when VPP has neither NAT44 plugin.
 	NAT() (*natRunning, error)
 	SetNATTimeouts(t natTimeouts) error
 	CLI(command string) (string, error)
@@ -182,7 +184,24 @@ func (v *realVPP) SetRxPlacement(index, queue, thread uint32) error {
 	return checkRetval("设置收包线程", reply.Retval, err)
 }
 
+// natED says whether VPP has NAT44-ED's API, which it has only with the plugin loaded.
+func (v *realVPP) natED() bool {
+	return v.ch.CheckCompatiblity(&nat44_ed.Nat44ShowRunningConfig{}, &nat44_ed.Nat44ShowRunningConfigReply{}, &nat44_ed.NatSetTimeouts{}, &nat44_ed.NatSetTimeoutsReply{}) == nil
+}
+
 func (v *realVPP) NAT() (*natRunning, error) {
+	if v.natED() {
+		reply := &nat44_ed.Nat44ShowRunningConfigReply{}
+		if err := checkRetval("读取 NAT44-ED 配置", reply.Retval, v.ch.SendRequest(&nat44_ed.Nat44ShowRunningConfig{}).ReceiveReply(reply)); err != nil {
+			return nil, err
+		}
+		t := reply.Timeouts
+		return &natRunning{
+			Mode:     natED,
+			Size:     natSize{Sessions: reply.Sessions},
+			Timeouts: natTimeouts{UDP: t.UDP, TCPEstablished: t.TCPEstablished, TCPTransitory: t.TCPTransitory, ICMP: t.ICMP},
+		}, nil
+	}
 	if v.ch.CheckCompatiblity(&nat44_ei.Nat44EiShowRunningConfig{}, &nat44_ei.Nat44EiShowRunningConfigReply{}) != nil {
 		return nil, nil
 	}
@@ -192,12 +211,18 @@ func (v *realVPP) NAT() (*natRunning, error) {
 	}
 	t := reply.Timeouts
 	return &natRunning{
+		Mode:     natEI,
 		Size:     natSize{Sessions: reply.Sessions, Users: reply.Users, UserSessions: reply.UserSessions},
 		Timeouts: natTimeouts{UDP: t.UDP, TCPEstablished: t.TCPEstablished, TCPTransitory: t.TCPTransitory, ICMP: t.ICMP},
 	}, nil
 }
 
 func (v *realVPP) SetNATTimeouts(t natTimeouts) error {
+	if v.natED() {
+		reply := &nat44_ed.NatSetTimeoutsReply{}
+		err := v.ch.SendRequest(&nat44_ed.NatSetTimeouts{UDP: t.UDP, TCPEstablished: t.TCPEstablished, TCPTransitory: t.TCPTransitory, ICMP: t.ICMP}).ReceiveReply(reply)
+		return checkRetval("设置 NAT44-ED 超时", reply.Retval, err)
+	}
 	reply := &nat44_ei.Nat44EiSetTimeoutsReply{}
 	err := v.ch.SendRequest(&nat44_ei.Nat44EiSetTimeouts{UDP: t.UDP, TCPEstablished: t.TCPEstablished, TCPTransitory: t.TCPTransitory, ICMP: t.ICMP}).ReceiveReply(reply)
 	return checkRetval("设置 NAT44-EI 超时", reply.Retval, err)

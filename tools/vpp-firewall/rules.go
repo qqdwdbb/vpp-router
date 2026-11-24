@@ -215,7 +215,7 @@ func portRule(dst ip_types.Prefix, is6 bool, proto uint8, first, last uint16) ac
 // ICMPv6 that IPv6 needs to work (RFC 4890): errors, echo replies, and neighbor discovery.
 var icmp6Needed = [][2]uint16{{1, 4}, {129, 129}, {133, 137}}
 
-// inboundRules is the ACL on the WAN's input, or nil when none is needed. NAT44-EI already
+// inboundRules is the ACL on the WAN's input, or nil when none is needed. NAT44 already
 // stops IPv4 nobody asked for, so IPv4 passes to it, apart from ping when that is off.
 func inboundRules(cfg *Config, st *vppState, wanList []*iface, desired []mapping) []acl_types.ACLRule {
 	if !cfg.IPv6Firewall && !cfg.BlockPing && !cfg.restrictedForwards() {
@@ -333,7 +333,7 @@ func reconcile(v vppAPI, cfg *Config, st *vppState) error {
 
 	desired, _ := desiredMappings(cfg, st)
 	if len(desired) > 0 && !st.NAT {
-		errs = append(errs, "VPP 没有 NAT44-EI，端口转发和本机端口不能生效")
+		errs = append(errs, "VPP 没有 NAT44，端口转发和本机端口不能生效")
 		desired = nil
 	}
 	if !st.Statics {

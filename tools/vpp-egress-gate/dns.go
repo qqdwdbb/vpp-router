@@ -457,15 +457,15 @@ func rrsigCoversSVCB(rr parsedRR) bool {
 }
 
 // StripHTTPSH3 removes HTTP/3 from HTTPS/SVCB ALPN so browsers use TCP
-// through TPROXY. Optional addressTTL rewrites A/AAAA/CNAME TTLs in answers.
+// through TPROXY. Optional addressTTL caps A/AAAA/CNAME TTLs in answers.
 // When the packet changes, names are re-encoded so compression pointers
 // stay valid after a shortened record.
 //
 // Gate policy is DNS split plus HTTP/2 fallback, not DNSSEC validation.
 // Signed HTTPS/SVCB replies are still rewritten so h3 cannot bypass
 // TPROXY. Mutation clears AD and drops covering SIG/RRSIG records so the
-// packet does not claim authenticated data. Extending a Fake-IP TTL also
-// clears AD. A nil result means the answer cannot be safely rewritten.
+// packet does not claim authenticated data. Shortening address TTLs preserves AD.
+// A nil result means the answer cannot be safely rewritten.
 func StripHTTPSH3(packet []byte, addressTTL *uint32) []byte {
 	if len(packet) < 12 {
 		return packet
@@ -485,7 +485,6 @@ func StripHTTPSH3(packet []byte, addressTTL *uint32) []byte {
 	}
 	changed := false
 	httpsMutated := false
-	ttlExtended := false
 	unsafeRdata := false
 	total := an + ns + ar
 	rrs := make([]parsedRR, 0, total)
@@ -519,9 +518,8 @@ func StripHTTPSH3(packet []byte, addressTTL *uint32) []byte {
 					ttl = 60
 				}
 			}
-		} else if i < an && class == 1 && (kind == 1 || kind == 5 || kind == 28) && addressTTL != nil {
-			changed = changed || ttl != *addressTTL
-			ttlExtended = ttlExtended || *addressTTL > ttl
+		} else if i < an && class == 1 && (kind == 1 || kind == 5 || kind == 28) && addressTTL != nil && ttl > *addressTTL {
+			changed = true
 			ttl = *addressTTL
 		}
 		rrs = append(rrs, parsedRR{owner, kind, class, ttl, prefix, names, suffix, raw})
@@ -532,9 +530,6 @@ func StripHTTPSH3(packet []byte, addressTTL *uint32) []byte {
 	}
 	if unsafeRdata {
 		return nil
-	}
-	if ttlExtended {
-		flags &^= dnsFlagAD
 	}
 	if httpsMutated {
 		flags &^= dnsFlagAD

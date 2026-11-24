@@ -1,5 +1,5 @@
 /* Firewall: what VPP lets in from its WAN. IPv4 port forwards and ports open to VPP itself are
-   NAT44-EI mappings; ping and the IPv6 inbound firewall are an ACL on the WAN. vpp-firewall
+   NAT44 mappings; ping and the IPv6 inbound firewall are an ACL on the WAN. vpp-firewall
    applies each change at once and puts it all back after VPP restarts. */
 import { $, fetchJSON, postJSON, fillBody } from '../lib.js';
 

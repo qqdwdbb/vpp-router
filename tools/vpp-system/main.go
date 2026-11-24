@@ -22,6 +22,13 @@ import (
 const maxBody = 1 << 16
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "nat-mode" {
+		if err := runNATMode(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
 	if err := run(os.Args[1:]); err != nil {
 		log.Fatal(err)
 	}
@@ -63,6 +70,7 @@ func (s *Service) Handler(maint *Maint) http.Handler {
 	actions := map[string]func(request, string) (*State, error){
 		"nat/timeouts": func(q request, u string) (*State, error) { return s.SetNATTimeouts(q.natTimeouts, u) },
 		"nat/size":     func(q request, u string) (*State, error) { return s.SetNATSize(q.natSize, u) },
+		"nat/mode":     func(q request, u string) (*State, error) { return s.SetNATMode(natMode(q.Mode), u) },
 		"threads":      func(q request, u string) (*State, error) { return s.SetThreads(q.ThreadsRequest, u) },
 		"rx-mode":      func(q request, u string) (*State, error) { return s.SetRxMode(q.Interface, q.Mode, u) },
 		"rx-placement": func(q request, u string) (*State, error) {
@@ -119,6 +127,7 @@ func run(args []string) error {
 	fs.DurationVar(&opts.Confirm, "confirm", time.Minute, "time to confirm a change before it is undone")
 	fs.IntVar(&opts.MaxWorkers, "max-workers", -1, "most workers the platform can run; -1 for no limit")
 	fs.StringVar(&opts.OtherPending, "interfaces-pending", "/var/lib/vpp-interfaces/pending.json", "vpp-interfaces' pending change; no change starts while it exists. Empty to ignore")
+	fs.StringVar(&opts.WireGuardStore, "wireguard-store", "/etc/vpp/wireguard/wireguard.json", "vpp-wireguard's configurations, whose commands a NAT mode switch checks. Empty to ignore")
 	fs.StringVar(&opts.Sysfs, "sysfs", "/sys", "where sysfs is mounted")
 	fs.StringVar(&opts.RouterEnv, "router-env", "/etc/vpp/router.env", "the installer's router.env: cards added go into its NICS. Empty turns adding cards off")
 	fs.StringVar(&opts.NICsOrig, "nics-orig", "/var/lib/vpp-router/nics.orig", "where the installer notes each card's first driver. Empty to leave it")

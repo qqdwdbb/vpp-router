@@ -1,0 +1,114 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="720" viewBox="0 0 1440 720" role="img" aria-labelledby="title desc">
+<title id="title">物理拓扑：单网口开发板单臂部署</title>
+<desc id="desc">路由器只有一个网口 port0，以 802.1Q trunk 接到交换机 4 口：局域网 VLAN 1 不打标签，WAN 为 VLAN 100。光猫接交换机 5 口（VLAN 100 access），局域网设备接 1 到 3 口（VLAN 1 不打标签）。</desc>
+<defs>
+<marker id="aw" viewBox="0 0 10 10" refX="7" refY="5" markerWidth="5" markerHeight="5" orient="auto"><path d="M1 1 8 5 1 9z" fill="#fff"/></marker>
+<style>
+text{font-family:-apple-system,BlinkMacSystemFont,'PingFang SC','Microsoft YaHei','Noto Sans CJK SC',sans-serif;fill:#253149}
+.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,'Liberation Mono',monospace}
+.m{fill:#6b788d}.b{font-weight:600}
+.lan{fill:none;stroke:#6b788d;stroke-width:2.6}
+.wan{fill:none;stroke:#d9480f;stroke-width:2.6}
+.ico{fill:#2563a6}.ico2{fill:#3b7dd8}.ico3{fill:#1d4f86}
+.wa{fill:none;stroke:#fff;stroke-width:2;marker-end:url(#aw)}
+.if{font-size:11px;font-weight:600}
+.tag{fill:#fff;stroke-width:1.4}
+</style>
+</defs>
+<rect width="1440" height="720" rx="16" fill="#fff"/>
+
+<text x="40" y="44" font-size="12" class="m b" letter-spacing="2">VPP SOFTWARE ROUTER · 物理拓扑</text>
+<text x="40" y="82" font-size="26" class="b">单网口开发板单臂部署</text>
+<text x="40" y="110" font-size="14" class="m">路由器只有一个网口，用一条 802.1Q trunk 接交换机，同一根线上跑 LAN（不打标签）和 WAN（VLAN 100）。地址均为示例。</text>
+
+<!-- ========== zones ========== -->
+<rect x="880" y="244" width="380" height="104" rx="14" fill="#fff5ee" stroke="#f3c3a3" stroke-dasharray="6 4"/>
+<text x="1246" y="338" font-size="12" class="b" text-anchor="end" style="fill:#c4420c">WAN · VLAN 100</text>
+<rect x="500" y="540" width="500" height="156" rx="14" fill="#f5f7fb" stroke="#d3dbe7" stroke-dasharray="6 4"/>
+<text x="516" y="680" font-size="12" class="b" style="fill:#4b5a72">LAN · VLAN 1（不打标签）</text>
+<text x="984" y="680" font-size="12" class="mono m" text-anchor="end">10.61.30.0/24</text>
+
+<!-- ========== links ========== -->
+<!-- internet - ONT -->
+<path d="M1000 196V272" fill="none" stroke="#33415c" stroke-width="2.6"/>
+<text x="1012" y="238" font-size="12" class="m">光纤 · PPPoE</text>
+<!-- ONT - switch port 5 -->
+<path d="M988 306L800 410" class="wan"/>
+<rect x="842" y="344" width="112" height="24" rx="12" class="tag" style="stroke:#d9480f"/>
+<text x="898" y="360" font-size="12" class="b" text-anchor="middle" style="fill:#c4420c">VLAN 100 access</text>
+<text x="958" y="332" class="if mono m">LAN</text>
+<text x="812" y="388" class="if mono m">P5</text>
+<!-- router - switch port 4 (trunk) -->
+<path d="M378 427H648" class="lan"/>
+<path d="M378 435H648" class="wan"/>
+<text x="384" y="416" class="if mono">port0</text>
+<text x="640" y="416" class="if mono m" text-anchor="end">P4</text>
+<rect x="452" y="398" width="120" height="24" rx="12" class="tag" style="stroke:#33415c"/>
+<text x="512" y="414" font-size="12" class="b" text-anchor="middle">802.1Q trunk</text>
+<text x="512" y="458" font-size="12" class="m" text-anchor="middle">VLAN 1 不打标签 + VLAN 100</text>
+<!-- switch - clients -->
+<path d="M684 450L600 566M720 450V566M756 450L840 566" class="lan"/>
+<text x="652" y="472" class="if mono m" text-anchor="end">P1</text>
+<text x="728" y="478" class="if mono m">P2</text>
+<text x="788" y="472" class="if mono m">P3</text>
+
+<!-- ========== internet cloud ========== -->
+<path d="M952 196a24 24 0 0 1 4-46a32 32 0 0 1 58-12a26 26 0 0 1 40 20a20 20 0 0 1-2 38z" fill="#eef2f8" stroke="#9aa6b8" stroke-width="1.6"/>
+<text x="1004" y="178" font-size="15" class="b" text-anchor="middle">互联网</text>
+
+<!-- ========== ONT ========== -->
+<rect x="950" y="274" width="100" height="32" rx="6" class="ico"/>
+<circle cx="968" cy="290" r="3" fill="#9fe0b5"/><circle cx="982" cy="290" r="3" fill="#9fe0b5"/><circle cx="996" cy="290" r="3" fill="#9fe0b5"/><circle cx="1010" cy="290" r="3" fill="#f6d27a"/>
+<path d="M1024 284h14M1024 290h14M1024 296h14" stroke="#9cc0ec" stroke-width="1.5"/>
+<text x="1066" y="282" font-size="15" class="b">光猫</text>
+<text x="1104" y="282" font-size="12" class="m">路由模式 · PPPoE 拨号</text>
+<text x="1066" y="302" font-size="12" class="mono m">LAN 192.168.1.1/24</text>
+
+<!-- ========== switch ========== -->
+<path d="M650 420L668 404H808L790 420Z" class="ico2"/>
+<path d="M790 420L808 404V434L790 450Z" class="ico3"/>
+<rect x="650" y="420" width="140" height="30" class="ico"/>
+<path d="M686 416H726" class="wa"/><path d="M770 408H730" class="wa"/>
+<g fill="#9cc0ec"><rect x="662" y="432" width="10" height="7" rx="1"/><rect x="678" y="432" width="10" height="7" rx="1"/><rect x="694" y="432" width="10" height="7" rx="1"/><rect x="710" y="432" width="10" height="7" rx="1"/><rect x="726" y="432" width="10" height="7" rx="1"/></g>
+<text x="826" y="432" font-size="15" class="b">交换机</text>
+<text x="826" y="452" font-size="12" class="m">支持 802.1Q VLAN</text>
+
+<!-- ========== router ========== -->
+<path d="M285 418V444A45 12 0 0 0 375 444V418Z" class="ico"/>
+<ellipse cx="330" cy="418" rx="45" ry="12" class="ico2"/>
+<path d="M310 413L326 417M350 423L334 419M338 412L350 414M322 424L310 422" class="wa"/>
+<text x="330" y="484" font-size="15" class="b" text-anchor="middle">VPP 软路由</text>
+<text x="330" y="504" font-size="12" class="m" text-anchor="middle">单网口开发板（比如 RK3588）</text>
+<rect x="196" y="518" width="268" height="62" rx="10" fill="#f7f9fc" stroke="#e1e7ef"/>
+<text x="210" y="542" font-size="12" class="mono b">port0</text><text x="290" y="542" font-size="12" class="m">LAN 网关</text><text x="350" y="542" font-size="12" class="mono">10.61.30.1</text>
+<text x="210" y="566" font-size="12" class="mono b" style="fill:#c4420c">port0.100</text><text x="290" y="566" font-size="12" class="m">WAN</text><text x="350" y="566" font-size="12" class="mono">192.168.1.2</text>
+
+<!-- ========== clients ========== -->
+<rect x="578" y="568" width="44" height="28" rx="3" class="ico"/><rect x="583" y="572" width="34" height="20" fill="#9cc0ec"/>
+<path d="M570 596H630L626 603H574Z" class="ico3"/>
+<text x="600" y="628" font-size="14" class="b" text-anchor="middle">笔记本</text>
+<text x="600" y="648" font-size="12" class="mono m" text-anchor="middle">10.61.30.101</text>
+
+<ellipse cx="720" cy="590" rx="28" ry="9" class="ico"/><ellipse cx="720" cy="586" rx="28" ry="9" class="ico2"/>
+<path d="M756 580a14 14 0 0 1 0 14M762 574a22 22 0 0 1 0 26" fill="none" stroke="#3b7dd8" stroke-width="2"/>
+<rect x="776" y="574" width="14" height="24" rx="3" class="ico"/><rect x="779" y="578" width="8" height="15" fill="#9cc0ec"/>
+<text x="720" y="628" font-size="14" class="b" text-anchor="middle">AP（桥接）</text>
+<text x="720" y="648" font-size="12" class="m" text-anchor="middle">手机经 Wi-Fi</text>
+<text x="720" y="666" font-size="12" class="mono m" text-anchor="middle">10.61.30.102</text>
+
+<rect x="814" y="566" width="52" height="32" rx="3" class="ico"/><rect x="818" y="570" width="44" height="24" fill="#9cc0ec"/>
+<path d="M834 598H846V604H834ZM826 604H854" stroke="#1d4f86" stroke-width="2" fill="#1d4f86"/>
+<text x="840" y="628" font-size="14" class="b" text-anchor="middle">电视</text>
+<text x="840" y="648" font-size="12" class="mono m" text-anchor="middle">10.61.30.103</text>
+
+<!-- ========== legend & notes ========== -->
+<g font-size="12">
+<path d="M40 626H84" class="lan"/><text x="94" y="630">VLAN 1，不打标签：LAN</text>
+<path d="M40 652H84" class="wan"/><text x="94" y="656">VLAN 100：WAN</text>
+<path d="M40 674H84" class="lan"/><path d="M40 682H84" class="wan"/><text x="94" y="682">802.1Q trunk：两者同走一根线</text>
+</g>
+<text x="1080" y="626" font-size="12" class="m">P1–P5：交换机端口。</text>
+<text x="1080" y="648" font-size="12" class="m">有两个以上网口的设备可以 WAN、LAN</text>
+<text x="1080" y="666" font-size="12" class="m">各接一个口，不需要 VLAN。</text>
+<text x="1080" y="688" font-size="12" class="m">路由器内部的接口和路由见逻辑拓扑。</text>
+</svg>

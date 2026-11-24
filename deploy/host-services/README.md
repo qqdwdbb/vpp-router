@@ -1,5 +1,30 @@
 # Linux 主机服务入口（IPv4）
 
+## Linux 客户端回程路由优先级
+
+`host-links.py` 的 JSON 配置中，`routes` 条目支持可选的整数 `metric`
+（0–4294967295）；省略时保留 iproute2 的默认行为。例如：
+
+```json
+{
+  "prefix": "fd42:1111:2222:90::/64",
+  "via": "fd42:1111:2222::1",
+  "interface": "vpp-host",
+  "metric": 100
+}
+```
+
+当客户端隧道运行在 VPP 中，而 Linux 同时存在同网段的 WireGuard 接口时，
+透明代理的回复必须经 `vpp-host` 返回 VPP。Linux IPv6 直连路由通常使用
+metric 256，未指定 metric 的 IPv6 静态路由通常为 1024；此时为该客户端网段的
+VPP 回程路由显式设置 metric 100。地址及下一跳按设备配置，不修改所有路由的默认值。
+应用后用 `ip -6 route get CLIENT_IPV6` 确认经过 VPP，并从客户端验证代理访问。
+已存在的旧 metric 路由不会因添加新 metric 自动删除，应核对后按完整路由精确清理。
+
+现场曾出现 WireGuard 客户端 IPv6 直连访问正常，但 Google IPv6 测试经透明代理
+退回 IPv4：Linux 误选自身无活动握手的 `wg0` 作为代理回程接口。显式设置上述
+回程优先级后，客户端重新测试通过。仅对确认存在冲突的网段配置该优先级。
+
 下文涉及设备的地址、MAC 和 PCI BDF 为示例，请按目标设备配置替换。
 
 LAN 与 Linux 主机共用 WAN 动态 NAT 地址 `10.61.10.2`，与上级光猫的 DMZ
