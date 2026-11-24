@@ -223,4 +223,4 @@ python3 -m pytest tests/unit
 - [uPlot](https://github.com/leeoniya/uPlot)：面板的图表
 - [TRex](https://trex-tgn.cisco.com)：性能测试发包
 
-开发过程中得到了 [Codex](https://github.com/codex) 和 [Claude Code](https://claude.com/claude-code) 的强力支持。
+开发过程中得到了 [Codex](https://openai.com/codex) 和 [Claude Code](https://claude.com/claude-code) 的强力支持。
