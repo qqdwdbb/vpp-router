@@ -153,6 +153,22 @@ func tproxyPortNftScript(rules []TProxyListen) []string {
 	b.WriteString("table inet egress_gate {\n")
 	b.WriteString("  chain gate_tproxy {\n")
 	b.WriteString("    fib daddr type local return\n")
+	// The proxy policy is TCP based. HTTPS/SVCB filtering keeps new clients on
+	// HTTP/2, but an Alt-Svc response can make a browser try HTTP/3 later. Reject
+	// QUIC before TPROXY so it falls back immediately instead of tunnelling UDP
+	// through a reliable stream and stalling on head-of-line blocking.
+	for _, rule := range rules {
+		fam, reject := "ip", "icmp port-unreachable"
+		if rule.Prefix.Addr().Is6() {
+			fam, reject = "ip6", "icmpv6 port-unreachable"
+		}
+		iif := ""
+		if rule.Interface != "" {
+			iif = fmt.Sprintf("iifname %q ", rule.Interface)
+		}
+		fmt.Fprintf(&b, "    %s%s daddr %s meta l4proto udp udp dport 443 counter reject with %s\n",
+			iif, fam, prefixString(rule.Prefix), reject)
+	}
 	for _, rule := range rules {
 		fam := "ip"
 		if rule.Prefix.Addr().Is6() {

@@ -117,7 +117,9 @@ func TestDomainFileSelectsExitAndUpstream(t *testing.T) {
 	}
 	script := strings.Join(tproxyPortNftScript(rules), "\n")
 	if !strings.Contains(script, "tproxy ip to :2082") || !strings.Contains(script, "tproxy ip6 to :2082") ||
-		!strings.Contains(script, `iifname "vpp-tproxy"`) || strings.Count(script, "iifname") != 2 {
+		!strings.Contains(script, "reject with icmp port-unreachable") ||
+		!strings.Contains(script, "reject with icmpv6 port-unreachable") ||
+		!strings.Contains(script, `iifname "vpp-tproxy"`) || strings.Count(script, "iifname") != 4 {
 		t.Fatalf("nft script %s", script)
 	}
 }

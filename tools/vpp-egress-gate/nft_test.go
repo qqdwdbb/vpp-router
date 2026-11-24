@@ -64,6 +64,8 @@ func TestTproxyPortNftScriptOwnsDedicatedTable(t *testing.T) {
 	for _, want := range []string{
 		"table inet egress_gate",
 		"flush chain inet egress_gate gate_tproxy",
+		`iifname "vpp-tproxy" ip daddr 198.18.0.0/15 meta l4proto udp udp dport 443 counter reject with icmp port-unreachable`,
+		`iifname "vpp-tproxy" ip6 daddr 2001:2::/48 meta l4proto udp udp dport 443 counter reject with icmpv6 port-unreachable`,
 		`iifname "vpp-tproxy" ip daddr 198.18.0.0/15`,
 		"tproxy ip to :2082",
 		`iifname "vpp-tproxy" ip6 daddr 2001:2::/48`,
@@ -71,6 +73,13 @@ func TestTproxyPortNftScriptOwnsDedicatedTable(t *testing.T) {
 	} {
 		if !strings.Contains(script, want) {
 			t.Fatalf("missing %q in %s", want, script)
+		}
+	}
+	for _, family := range []string{"ip", "ip6"} {
+		reject := strings.Index(script, family+` daddr`)
+		tproxy := strings.Index(script, "tproxy "+family+" to :2082")
+		if reject < 0 || tproxy < 0 || reject > tproxy {
+			t.Fatalf("%s QUIC reject is not before TPROXY: %s", family, script)
 		}
 	}
 }
