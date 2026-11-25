@@ -99,6 +99,22 @@ VPP 在用户态轮询网卡，一次处理一批包（向量处理），按节�
 - DPDK 补丁：r8169 多队列收包中断；RTL8125 非一致性 DMA PMD 和 RSS 配置。
 - 树外插件：NAPT66、NAT 映射域（`nat-ei-context`）、DNS 拦截、WireGuard 与 NAT 的顺序调整、IPsec IKE 转交，以及 strongSwan 的 VPP 后端。
 
+## 实际运行截图
+
+以下截图来自实际运行的管理面板，保留当时的状态、统计和历史曲线。实际 IP 地址、设备别名和部分规则名称已替换为“已隐藏”，账号操作记录已移除；输入框中的示例地址不属于实际配置。
+
+**监控总览**：VPP 运行状态、NAT 会话、接口带宽、包速率和 Buffer 使用情况。
+
+![管理面板监控总览](docs/screenshots/overview.png)
+
+**接口管理**：网桥、物理口、VLAN、TAP 和隧道接口的状态与 MTU。
+
+![管理面板接口与网桥（已脱敏）](docs/screenshots/interfaces.png)
+
+**Gate 分流规则**：规则优先级、IPv4/IPv6、TPROXY 与 WireGuard 出口，以及已安装路由数量。
+
+![Gate 分流规则与出口（已脱敏）](docs/screenshots/routes.png)
+
 ## 性能
 
 完整数据和测试方法见 [docs/benchmarks.md](docs/benchmarks.md)。发包端为 TRex，接收端按序号统计丢包、重复和乱序。
