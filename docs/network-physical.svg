@@ -1,6 +1,6 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="720" viewBox="0 0 1440 720" role="img" aria-labelledby="title desc">
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="770" viewBox="0 0 1440 770" role="img" aria-labelledby="title desc">
 <title id="title">物理拓扑：单网口开发板单臂部署</title>
-<desc id="desc">路由器只有一个网口 port0，以 802.1Q trunk 接到交换机 4 口：局域网 VLAN 1 不打标签，WAN 为 VLAN 100。光猫接交换机 5 口（VLAN 100 access），局域网设备接 1 到 3 口（VLAN 1 不打标签）。</desc>
+<desc id="desc">路由器只有一个网口 port0，以 802.1Q trunk 接到交换机 4 口：局域网 VLAN 1 不打标签，WAN 为 VLAN 100。光猫接交换机 5 口（VLAN 100 access），局域网设备接 1 到 3 口（VLAN 1 不打标签）。可选的管理口 mgmt0 由 Linux 持有，接 6 口，设成局域网同网段静态 IP 10.61.30.3。</desc>
 <defs>
 <marker id="aw" viewBox="0 0 10 10" refX="7" refY="5" markerWidth="5" markerHeight="5" orient="auto"><path d="M1 1 8 5 1 9z" fill="#fff"/></marker>
 <style>
@@ -8,6 +8,7 @@ text{font-family:-apple-system,BlinkMacSystemFont,'PingFang SC','Microsoft YaHei
 .mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,'Liberation Mono',monospace}
 .m{fill:#6b788d}.b{font-weight:600}
 .lan{fill:none;stroke:#6b788d;stroke-width:2.6}
+.mg{fill:none;stroke:#2f9e44;stroke-width:2.2;stroke-dasharray:7 5}
 .wan{fill:none;stroke:#d9480f;stroke-width:2.6}
 .ico{fill:#2563a6}.ico2{fill:#3b7dd8}.ico3{fill:#1d4f86}
 .wa{fill:none;stroke:#fff;stroke-width:2;marker-end:url(#aw)}
@@ -15,7 +16,7 @@ text{font-family:-apple-system,BlinkMacSystemFont,'PingFang SC','Microsoft YaHei
 .tag{fill:#fff;stroke-width:1.4}
 </style>
 </defs>
-<rect width="1440" height="720" rx="16" fill="#fff"/>
+<rect width="1440" height="770" rx="16" fill="#fff"/>
 
 <text x="40" y="44" font-size="12" class="m b" letter-spacing="2">VPP SOFTWARE ROUTER · 物理拓扑</text>
 <text x="40" y="82" font-size="26" class="b">单网口开发板单臂部署</text>
@@ -39,16 +40,21 @@ text{font-family:-apple-system,BlinkMacSystemFont,'PingFang SC','Microsoft YaHei
 <text x="958" y="332" class="if mono m">LAN</text>
 <text x="812" y="388" class="if mono m">P5</text>
 <!-- router - switch port 4 (trunk) -->
-<path d="M378 427H648" class="lan"/>
-<path d="M378 435H648" class="wan"/>
-<text x="384" y="416" class="if mono">port0</text>
-<text x="640" y="416" class="if mono m" text-anchor="end">P4</text>
-<rect x="452" y="398" width="120" height="24" rx="12" class="tag" style="stroke:#33415c"/>
-<text x="512" y="414" font-size="12" class="b" text-anchor="middle">802.1Q trunk</text>
-<text x="512" y="458" font-size="12" class="m" text-anchor="middle">VLAN 1 不打标签 + VLAN 100</text>
+<path d="M378 423H648" class="lan"/>
+<path d="M378 431H648" class="wan"/>
+<text x="384" y="413" class="if mono">port0</text>
+<text x="640" y="413" class="if mono m" text-anchor="end">P4</text>
+<rect x="452" y="388" width="120" height="24" rx="12" class="tag" style="stroke:#33415c"/>
+<text x="512" y="404" font-size="12" class="b" text-anchor="middle">802.1Q trunk</text>
+<text x="512" y="378" font-size="12" class="m" text-anchor="middle">VLAN 1 不打标签 + VLAN 100</text>
+<!-- router mgmt0 - switch port 6 (optional) -->
+<path d="M376 446H648" class="mg"/>
+<text x="384" y="463" class="if mono" style="fill:#2b8a3e">mgmt0</text>
+<text x="640" y="463" class="if mono m" text-anchor="end">P6</text>
+<text x="512" y="463" font-size="12" text-anchor="middle" style="fill:#2b8a3e">管理口（可选）· VLAN 1</text>
 <!-- switch - clients -->
 <path d="M684 450L600 566M720 450V566M756 450L840 566" class="lan"/>
-<text x="652" y="472" class="if mono m" text-anchor="end">P1</text>
+<text x="644" y="494" class="if mono m" text-anchor="end">P1</text>
 <text x="728" y="478" class="if mono m">P2</text>
 <text x="788" y="472" class="if mono m">P3</text>
 
@@ -69,7 +75,7 @@ text{font-family:-apple-system,BlinkMacSystemFont,'PingFang SC','Microsoft YaHei
 <path d="M790 420L808 404V434L790 450Z" class="ico3"/>
 <rect x="650" y="420" width="140" height="30" class="ico"/>
 <path d="M686 416H726" class="wa"/><path d="M770 408H730" class="wa"/>
-<g fill="#9cc0ec"><rect x="662" y="432" width="10" height="7" rx="1"/><rect x="678" y="432" width="10" height="7" rx="1"/><rect x="694" y="432" width="10" height="7" rx="1"/><rect x="710" y="432" width="10" height="7" rx="1"/><rect x="726" y="432" width="10" height="7" rx="1"/></g>
+<g fill="#9cc0ec"><rect x="662" y="432" width="10" height="7" rx="1"/><rect x="678" y="432" width="10" height="7" rx="1"/><rect x="694" y="432" width="10" height="7" rx="1"/><rect x="710" y="432" width="10" height="7" rx="1"/><rect x="726" y="432" width="10" height="7" rx="1"/><rect x="742" y="432" width="10" height="7" rx="1"/></g>
 <text x="826" y="432" font-size="15" class="b">交换机</text>
 <text x="826" y="452" font-size="12" class="m">支持 802.1Q VLAN</text>
 
@@ -79,9 +85,10 @@ text{font-family:-apple-system,BlinkMacSystemFont,'PingFang SC','Microsoft YaHei
 <path d="M310 413L326 417M350 423L334 419M338 412L350 414M322 424L310 422" class="wa"/>
 <text x="330" y="484" font-size="15" class="b" text-anchor="middle">VPP 软路由</text>
 <text x="330" y="504" font-size="12" class="m" text-anchor="middle">单网口开发板（比如 RK3588）</text>
-<rect x="196" y="518" width="268" height="62" rx="10" fill="#f7f9fc" stroke="#e1e7ef"/>
+<rect x="196" y="518" width="268" height="86" rx="10" fill="#f7f9fc" stroke="#e1e7ef"/>
 <text x="210" y="542" font-size="12" class="mono b">port0</text><text x="290" y="542" font-size="12" class="m">LAN 网关</text><text x="350" y="542" font-size="12" class="mono">10.61.30.1</text>
 <text x="210" y="566" font-size="12" class="mono b" style="fill:#c4420c">port0.100</text><text x="290" y="566" font-size="12" class="m">WAN</text><text x="350" y="566" font-size="12" class="mono">192.168.1.2</text>
+<text x="210" y="590" font-size="12" class="mono b" style="fill:#2b8a3e">mgmt0</text><text x="290" y="590" font-size="12" class="m">管理口</text><text x="350" y="590" font-size="12" class="mono">10.61.30.3</text><text x="428" y="590" font-size="12" class="m">静态</text>
 
 <!-- ========== clients ========== -->
 <rect x="578" y="568" width="44" height="28" rx="3" class="ico"/><rect x="583" y="572" width="34" height="20" fill="#9cc0ec"/>
@@ -106,9 +113,13 @@ text{font-family:-apple-system,BlinkMacSystemFont,'PingFang SC','Microsoft YaHei
 <path d="M40 626H84" class="lan"/><text x="94" y="630">VLAN 1，不打标签：LAN</text>
 <path d="M40 652H84" class="wan"/><text x="94" y="656">VLAN 100：WAN</text>
 <path d="M40 674H84" class="lan"/><path d="M40 682H84" class="wan"/><text x="94" y="682">802.1Q trunk：两者同走一根线</text>
+<path d="M40 708H84" class="mg"/><text x="94" y="712">管理口（可选）：Linux 持有，不经过 VPP</text>
 </g>
-<text x="1080" y="626" font-size="12" class="m">P1–P5：交换机端口。</text>
-<text x="1080" y="648" font-size="12" class="m">有两个以上网口的设备可以 WAN、LAN</text>
-<text x="1080" y="666" font-size="12" class="m">各接一个口，不需要 VLAN。</text>
-<text x="1080" y="688" font-size="12" class="m">路由器内部的接口和路由见逻辑拓扑。</text>
+<text x="1080" y="626" font-size="12" class="m">P1–P6：交换机端口。</text>
+<text x="1080" y="648" font-size="12" class="m">管理口可选（比如 USB 网卡），设成局域网</text>
+<text x="1080" y="666" font-size="12" class="m">同网段的静态 IP、不配网关。VPP 停了也能</text>
+<text x="1080" y="684" font-size="12" class="m">直接登录 Linux，不用改接线。</text>
+<text x="1080" y="706" font-size="12" class="m">有两个以上网口的设备可以 WAN、LAN</text>
+<text x="1080" y="724" font-size="12" class="m">各接一个口，不需要 VLAN。</text>
+<text x="1080" y="746" font-size="12" class="m">路由器内部的接口和路由见逻辑拓扑。</text>
 </svg>
