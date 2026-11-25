@@ -18,11 +18,15 @@
 
 ![逻辑拓扑](docs/network-logical.svg)
 
-`port0` 不打标签的部分加入 VPP 的网桥 `bd1`，局域网 `10.61.30.0/24` 的网关是 `loop0` 的 `10.61.30.1`；子接口 `port0.100` 是 WAN，经光猫上网；另有一条 WireGuard 隧道 `wg1` 连到 VPS。Linux 通过 TAP 接到 VPP：`vpp-host` 是 Linux 在局域网上的接口（`lan0`，`10.61.30.2`），上面运行 Gate、dnsmasq 和管理面板；`gate-tproxy` 和 `tap-tun0` 把流量交给 Linux 上的 sing-box 和 OpenVPN 隧道 `tun0`，VPP 不支持的协议就这样接进来。转发都在 VPP 里完成，只有选了 Linux 出口的流量才进入 Linux。
+`port0` 不打标签的部分加入 VPP 的网桥 `bd1`，局域网 `10.61.30.0/24` 的网关是 `loop0` 的 `10.61.30.1`；子接口 `port0.100` 是 WAN，经光猫上网；另有一条 WireGuard 隧道 `wg1` 连到 VPS。Linux 通过 TAP 接到 VPP：`vpp-host` 是 Linux 在局域网上的接口（`lan0`，`10.61.30.2`），上面运行 Gate、dnsmasq 和管理面板；`gate-tproxy` 和 `tap-tun0` 把流量交给 Linux 上的 sing-box 和 OpenVPN 隧道 `tun0`，VPP 不支持的协议就这样接进来。常规转发由 VPP 完成，代理或 Linux 隧道出口的流量经 TAP 交给 Linux 处理；DNS、DHCP 和管理面板等本地服务也运行在 Linux 上。
 
 ### Gate：按目的域名和 IP 决定路由
 
-VPP 只能按目的地址选出口，不认识域名。Gate 的规则有两种：按目的 IP 或网段的规则不依赖 DNS，Gate 直接写进 VPP 的路由表；按域名的规则要靠 Gate 自己解析 DNS。局域网的 DNS 查询都交给 Gate（手动设成公网 DNS 的查询由 ABF 送来）。Gate 向上游解析后，如果域名命中规则，先通过 Binary API 把解析出的地址写进 VPP 的路由表，确认生效后才把应答发回客户端；写入失败就返回 SERVFAIL。所以客户端拿到地址时，路由已经就绪，连接的第一个包就会走 `wg1`、代理或 `tun0`，没命中规则的走默认路由出 `port0.100`，路由写入失败的客户端因为无法解析IP直接无法访问。走代理的域名用 Fake-IP，地址池 `198.18.0.0/15` 的路由在启动时就已装好。VPP 重启后，Gate 会重新下发全部路由。
+Gate 当前通过 VPP 的目的地址路由实现分流。规则有两种：按目的 IP 或网段的规则不依赖 DNS，Gate 直接写进 VPP 的路由表；按域名的规则依赖经过 Gate 的 DNS 查询。启用 DNS 接管后，已配置接口和来源网段发往任意 DNS 服务器的 TCP/UDP 53 查询由 ABF 送到 Gate；DoH 和 DoT 不在此接管范围内。
+
+使用真实 IP 解析时，Gate 向上游查询，域名命中规则后先通过 Binary API 把解析出的地址写进 VPP 的路由表，确认生效后才把应答发回客户端；写入失败就返回 SERVFAIL。客户端拿到地址时，路由已经就绪，第一个包就会走相应的 `wg1`、代理或 `tun0` 出口。未命中规则的地址按现有路由表转发，在本例中经默认路由出 `port0.100`。
+
+代理支持真实 IP 和 Fake-IP 两种模式。Fake-IP 模式下，地址池（例如 IPv4 的 `198.18.0.0/15`）的路由在启动时安装，DNS 返回池内地址，代理收到连接后还原为域名；真实 IP 模式下则把实际目的地址的流量送到代理。VPP 重启后，Gate 会重新下发其管理的路由。
 
 ## 开发背景
 
@@ -68,7 +72,7 @@ VPP 在用户态轮询网卡，一次处理一批包（向量处理），按节�
 - 下载、打补丁、编译 DPDK 和 VPP。小内存机器自动限制并行数并临时启用 zram。
 - 生成 VPP 配置和 systemd 单元，不与发行版的 vpp 软件包冲突。
 - 收包方式可选自适应中断：流量小时 worker 休眠，由网卡中断唤醒，CPU 可以降频；流量大时自动转为轮询。r8169、mlx4 和 N1 平台网卡的中断支持来自本项目的补丁。
-- WAN 支持 DHCP 或静态地址，出口做 NAT44-EI；LAN 用网桥。支持单臂（VLAN 区分 WAN/LAN）、多网卡和 WAN trunk。
+- WAN 支持 DHCP 或静态地址，出口做 NAT44-EI（全锥形 NAT）；LAN 用网桥。支持单臂（VLAN 区分 WAN/LAN）、多网卡和 WAN trunk。
 - 可选：dnsmasq 提供 LAN DHCP/DNS（已有系统 dnsmasq 时导入它的配置并替换它），IPv6-PD，IPsec 服务器（strongSwan + VPP），sing-box 代理入口，Gate 策略路由。
 - 承载当前 SSH 的网卡交给 VPP 时，可以启用 10 分钟自动回退，没有确认就还原网卡。
 - `--restore` 把网卡还给内核，`--uninstall` 删除程序但保留配置。
@@ -146,16 +150,46 @@ VPP 在用户态轮询网卡，一次处理一批包（向量处理），按节�
 
 ```sh
 git clone https://github.com/qqdwdbb/vpp-router.git && cd vpp-router
-sudo deploy/install/vpp-router-install.sh                # 检测、选网卡、编译、安装、配置
-sudo deploy/install/vpp-router-install.sh --config-only  # 不编译，只重新配置网卡和地址
-sudo deploy/install/vpp-router-install.sh --restore      # 停止 VPP，网卡还给内核驱动
-sudo deploy/install/vpp-router-install.sh --uninstall    # 删除程序和服务，保留 /etc/vpp
+sudo deploy/install/vpp-router-install.sh  # 检测、选网卡、编译、安装、配置
 ```
 
-脚本会依次询问：交给 VPP 的网卡，WAN/LAN 分配，WAN 的 DHCP 或静态地址，收包方式（轮询或自适应中断），以及 dnsmasq、IPv6-PD、IPsec、sing-box、Gate 这些可选项。装好后：
+脚本会依次询问：交给 VPP 的网卡，WAN/LAN 分配，WAN 的 DHCP 或静态地址，收包方式（轮询或自适应中断），以及 dnsmasq、IPv6-PD、IPsec、sing-box、Gate 这些可选项。首次安装面板时，还会要求设置 `admin` 用户的密码（至少 8 位）；后续安装保留已设置的密码。面板账号与 SSH 账号独立。
 
-- VPP 由 `vpp-router.service` 管理，配置在 `/etc/vpp/`（`router.conf` 是启动参数，`router.vpp` 是启动 CLI），用 `sudo vppctl` 查看状态。
-- 管理面板用 HTTPS，默认端口 9480。启用了 Linux 管理 TAP（`vpp-host`）时监听它的地址，否则只监听 `127.0.0.1`，可以用 SSH 端口转发访问。安装结束时脚本会打印实际地址。
+### 首次使用与检查
+
+1. 安装完成后，按脚本最后打印的实际地址打开管理面板。面板使用 HTTPS，默认端口 9480，用户名为 `admin`，密码是安装时设置的密码。默认使用自签证书，首次访问时浏览器会提示证书不受信任。启用了 Linux 管理 TAP（`vpp-host`）时面板监听它的地址，否则只监听 `127.0.0.1`，访问方法见[面板文档](tools/vpp-monitor/README.md#构建和安装)中的 SSH 端口转发示例。
+2. 在“总览”确认 VPP 显示运行中、流量曲线持续更新；在“接口”确认 WAN/LAN 接口状态及地址符合安装时的配置。VPP 由 `vpp-router.service` 管理，配置位于 `/etc/vpp/`（`router.conf` 为启动参数，`router.vpp` 为启动 CLI）。可在路由器上运行以下只读命令排查服务和接口状态：
+
+   ```sh
+   systemctl status vpp-router.service vpp-monitor.service --no-pager
+   sudo vppctl show interface
+   sudo vppctl show ip fib
+   ```
+
+3. 将客户端接入 LAN。启用了 dnsmasq DHCP 时，重新获取租约，确认客户端获得预期的地址、网关和 DNS；手动配置时使用本次安装的实际值。网关是 VPP 的 LAN 地址，DNS 使用安装时公布的 DNS 服务地址，两者不一定相同。
+4. 在客户端打开一个 HTTPS 网站，验证域名解析和实际上网，并在面板观察 WAN 流量。安装了 Gate 时，再选择一个已配置分流规则的域名检查解析和访问；代理需要先配置可用上游。服务显示运行中不能代替实际联网验证。
+
+### 重新配置与卸载
+
+以下命令按需单独执行。在仓库目录中重新配置网卡和地址（不编译，会重新生成接口配置）：
+
+```sh
+sudo deploy/install/vpp-router-install.sh --config-only
+```
+
+停止 VPP 并把网卡交还内核驱动：
+
+```sh
+sudo deploy/install/vpp-router-install.sh --restore
+```
+
+卸载程序和服务，保留 `/etc/vpp/`：
+
+```sh
+sudo deploy/install/vpp-router-install.sh --uninstall
+```
+
+### 自定义端口与详细文档
 
 面板（9480）、Gate 的 DNS（1053）和 sing-box 的 SOCKS5、TPROXY、Fake-IP DNS（1080、2082、5354）的端口都可以自定义：安装时按提示修改，或者用环境变量指定，比如：
 
