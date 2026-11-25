@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"io/fs"
 	"regexp"
 	"testing"
@@ -45,5 +46,21 @@ func TestScriptIDsExist(t *testing.T) {
 				t.Errorf("%s looks up #%s, which index.html does not have", name, match[1])
 			}
 		}
+	}
+}
+
+func TestNATSessionEntriesSupportEIAndED(t *testing.T) {
+	source, err := webFiles.ReadFile("web/pages/overview.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, prefix := range []string{"nat-ei/", "nat-ed/"} {
+		if !bytes.Contains(source, []byte("g.key.startsWith('"+prefix+"')")) {
+			t.Errorf("NAT session entry does not accept %s gauges", prefix)
+		}
+	}
+	// One definition plus the card and header-button call sites.
+	if calls := bytes.Count(source, []byte("hasNATSessions(")); calls != 3 {
+		t.Errorf("hasNATSessions has %d occurrences, want definition and two entry points", calls)
 	}
 }

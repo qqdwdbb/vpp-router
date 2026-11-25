@@ -2,6 +2,11 @@
 import { $, si, bytes, FORMATS, duration, read, write, color, token, fetchJSON, setCells, fillBody, linkCell } from '../lib.js';
 import { openNAT } from './exits.js';
 
+function hasNATSessions(status) {
+  return (status.gauges || []).some(g => g.key.endsWith('total-sessions') &&
+    (g.key.startsWith('nat-ei/') || g.key.startsWith('nat-ed/')));
+}
+
 const RANGES = [
   [300, '5 分钟', 2000], [900, '15 分钟', 2000], [3600, '1 小时', 10000],
   [10800, '3 小时', 10000], [86400, '24 小时', 30000], [604800, '7 天', 60000],
@@ -174,7 +179,7 @@ function renderTiles(status) {
   if (heap) tiles.push(['主堆', bytes(heap.used), `共 ${bytes(heap.total)}`]);
   const sessions = (status.gauges || []).find(g => g.key.endsWith('total-sessions'));
   if (sessions) {
-    const canOpen = sessions.key.startsWith('nat-ei');
+    const canOpen = hasNATSessions(status);
     tiles.push(['NAT 会话', si(sessions.value), canOpen ? '点击查看出口连接' : sessions.name, canOpen ? openNAT : null]);
   }
   setTiles($('tiles'), tiles);
@@ -339,7 +344,7 @@ async function refresh() {
     renderTables(status);
     renderRuns(status);
     renderFooter(status);
-    $('open-flows').hidden = !(status.gauges || []).some(g => g.key.startsWith('nat-ei'));
+    $('open-flows').hidden = !hasNATSessions(status);
     const defs = definitions(status);
     syncCharts(defs);
     await Promise.all([loadGroup(defs, 'fast'), loadGroup(defs, 'slow')]);
