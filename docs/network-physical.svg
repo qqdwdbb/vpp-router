@@ -116,9 +116,9 @@ text{font-family:-apple-system,BlinkMacSystemFont,'PingFang SC','Microsoft YaHei
 <path d="M40 708H84" class="mg"/><text x="94" y="712">管理口（可选）：Linux 持有，不经过 VPP</text>
 </g>
 <text x="1080" y="626" font-size="12" class="m">P1–P6：交换机端口。</text>
-<text x="1080" y="648" font-size="12" class="m">管理口可选（比如 USB 网卡），设成局域网</text>
-<text x="1080" y="666" font-size="12" class="m">同网段的静态 IP、不配网关。VPP 停了也能</text>
-<text x="1080" y="684" font-size="12" class="m">直接登录 Linux，不用改接线。</text>
+<text x="1080" y="648" font-size="12" class="m">管理口可选，正常运行不需要；有屏幕或串口</text>
+<text x="1080" y="666" font-size="12" class="m">时安装也不需要。接的话设成局域网同网段的</text>
+<text x="1080" y="684" font-size="12" class="m">静态 IP、不配网关，VPP 停了也能直接登录。</text>
 <text x="1080" y="706" font-size="12" class="m">有两个以上网口的设备可以 WAN、LAN</text>
 <text x="1080" y="724" font-size="12" class="m">各接一个口，不需要 VLAN。</text>
 <text x="1080" y="746" font-size="12" class="m">路由器内部的接口和路由见逻辑拓扑。</text>

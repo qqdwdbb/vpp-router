@@ -647,7 +647,7 @@ choose_nics() {
 	for i in "${SEL[@]}"; do
 		if [ "${N_SSH[i]}" = 1 ]; then
 			warn "${N_IF[i]} 承载当前 SSH 连接。VPP 接管后这台机器的 Linux 网络会断开，"
-			note "直到经 VPP 的 LAN 管理接口 $HOST_TAP 重新连接。请准备好控制台。"
+			note "直到经 Linux 的 LAN 接口 $HOST_TAP 重新连接。请准备好屏幕或串口。"
 			ask_yn "仍然把 ${N_IF[i]} 交给 VPP？" n || { choose_nics; return; }
 		fi
 		[ "${N_KIND[i]}" = afp ] && note "${N_IF[i]} 将以 AF_PACKET 方式接入（DPDK 不支持该网卡）。"
@@ -788,7 +788,7 @@ ask_network() {
 	LAN_GW=$(ipv4 addr "$LAN_CIDR")
 
 	echo
-	info "Linux 管理接口"
+	info "Linux 的 LAN 接口"
 	note "VPP 在 LAN 网桥上创建 TAP，Linux 侧名为 ${HOST_TAP}，用于管理本机和运行 DHCP/DNS。"
 	local need_tap=0 i
 	for i in "${SEL[@]}"; do [ "${N_SSH[i]}" = 1 ] && need_tap=1; done
@@ -954,7 +954,7 @@ panel_tools() {
 	return 0
 }
 
-# 面板只监听 Linux 管理口的地址，局域网从这里访问；没有管理口时只能 SSH 转发
+# 面板只监听 Linux 在 LAN 上的地址，局域网从这里访问；没有这个地址时只能 SSH 转发
 panel_listen() {
 	if [ -n "$HOST_CIDR" ]; then ipv4 addr "$HOST_CIDR"; else echo 127.0.0.1; fi
 }
@@ -1046,7 +1046,7 @@ ask_panel() {
 	echo
 	info "管理面板"
 	note "面板 vpp-monitor 显示流量，修改接口、WireGuard 和路由规则，地址 https://$(panel_listen):$PANEL_PORT/"
-	[ -n "$HOST_CIDR" ] || note "没有 Linux 管理口，面板只监听 127.0.0.1，要用 ssh -L $PANEL_PORT:127.0.0.1:$PANEL_PORT 访问。"
+	[ -n "$HOST_CIDR" ] || note "Linux 在 LAN 上没有地址，面板只监听 127.0.0.1，要用 ssh -L $PANEL_PORT:127.0.0.1:$PANEL_PORT 访问。"
 	if [ "$MODE" = install ] && ! gate_present; then
 		note "Gate 按域名把流量分到不同出口，路由页面用它。它会接管局域网 DNS，安装时要回答出口和局域网的问题。"
 		if ask_yn "同时安装 Gate？（VPP 启动后进行）" n; then WANT_GATE=1; fi
@@ -2212,7 +2212,7 @@ gen_router_vpp() {
 	done
 	if [ -n "$HOST_CIDR" ]; then
 		echo
-		echo "# Linux 管理接口；地址和路由由 vpp-router-ctl post 用 ip 命令设置"
+		echo "# Linux 的 LAN 接口；地址和路由由 vpp-router-ctl post 用 ip 命令设置"
 		echo "create tap id 0 host-if-name $HOST_TAP host-mac-addr $tap_mac host-mtu-size 1500"
 		echo "set interface mtu packet 1500 tap0"
 		echo "set interface l2 bridge tap0 1"
@@ -3297,14 +3297,14 @@ installed_ctl() {
 }
 
 # 停掉 VPP 后，现有 rollback 只能恢复 Linux 网卡，不能恢复经 TAP 的 SSH。
-# 同时检查 SSH 本地地址和回程路由，避免遗漏经 VPP 管理口登录的升级。
+# 同时检查 SSH 本地地址和回程路由，避免遗漏经 VPP 网络登录的升级。
 check_management_path() {
 	local client port server rest dev local_dev old_ifs
 	[ -n "${SSH_CONNECTION:-${SSH_CLIENT:-}}" ] || return 0
 	systemctl is-active --quiet "$SERVICE" || return 0
 	read -r client port server rest <<<"${SSH_CONNECTION:-${SSH_CLIENT:-}}"
 	dev=$(ip route get "$client" | awk '{for (i=1; i<NF; i++) if ($i == "dev") {print $(i+1); exit}}')
-	[ -n "$dev" ] || die "无法确认 SSH 回程接口，请从控制台或独立管理口执行"
+	[ -n "$dev" ] || die "无法确认 SSH 回程接口，请从屏幕、串口或不经过 VPP 的网口执行"
 	local_dev=$(ip -o addr show | awk -v ip="${server:-}" '{split($4,a,"/"); if (a[1] == ip) {print $2; exit}}')
 	old_ifs=$(
 		if [ -r "$CONF/router.env" ]; then
@@ -3315,7 +3315,7 @@ check_management_path() {
 	)
 	if [ "$dev" = "$HOST_TAP" ] || [ "$local_dev" = "$HOST_TAP" ] ||
 		{ [ -n "$old_ifs" ] && { grep -qxF -- "$dev" <<<"$old_ifs" || { [ -n "$local_dev" ] && grep -qxF -- "$local_dev" <<<"$old_ifs"; }; }; }; then
-		die "当前 SSH 经过 VPP 管理网络，停止旧 VPP 会断连且无法由 Linux 网卡回退恢复；请从控制台或独立管理口执行"
+		die "当前 SSH 经过 VPP，停止旧 VPP 会断连且无法由 Linux 网卡回退恢复；请从屏幕、串口或不经过 VPP 的网口执行"
 	fi
 }
 

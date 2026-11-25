@@ -270,7 +270,7 @@ sudo deploy/install/vpp-router-install.sh --uninstall    # 还原网卡，删除
   - 上游是 `upstream.json` 里标签为 `proxy` 的出站或 endpoint，sing-box 支持的任何协议都行（SOCKS5、Trojan、Shadowsocks、VLESS、WireGuard 等）。安装时可以按提示填 SOCKS5 或 Trojan，或者导入一个 sing-box 出站或 endpoint 的 JSON 文件（一个对象、它们的列表，或带 `outbounds`/`endpoints` 的片段；只有一个时自动设成 `proxy`，WireGuard 自动放进 `endpoints`），也可以稍后配置。还没有上游时，占位配置拒绝所有代理流量，不会不经代理就连出去。
   - 换上游：在面板的“代理”页面用向导设置，或从 sing-box 配置、分享链接、订阅导入（由一起安装的 `vpp-proxy` 执行，见 `tools/vpp-proxy/README.md`）；也可以直接编辑 `upstream.json` 再 `systemctl restart vpp-router-sing-box`，启动前会先用 `sing-box check` 检查。服务是 `vpp-router-sing-box.service` 和 `vpp-proxy.service`。UDP 要上游协议支持（SOCKS5 要支持 UDP ASSOCIATE）。
 - 端口可以自定义：面板（默认 9480）、Gate 的 DNS（1053）、sing-box 的 SOCKS5（1080）、TPROXY（2082）和 Fake-IP DNS（5354）。回答完 sing-box 的问题后，脚本列出这次会用到的端口并询问是否修改；也可以用环境变量 `VPP_PANEL_PORT`、`VPP_GATE_DNS_PORT`、`VPP_SOCKS_PORT`、`VPP_TPROXY_PORT`、`VPP_FAKEDNS_PORT` 指定。端口要在 1 到 65535 之间、互不相同，不能是 53 和 67（客户端的 DNS 和 DHCP 用的是这两个固定端口，Gate 通过重定向接收 53 端口的查询）。选定的值记在 `/var/lib/vpp-router/ports`，重新运行和 `--config-only` 时沿用。Gate 的 DNS、TPROXY 和 Fake-IP DNS 只在第一次生成 Gate 配置时使用，之后以 `/etc/vpp/egress-gate.json` 为准，要改时改那里（或在面板的路由页面改代理规则）。
-- 升级或 `--config-only` 会在覆盖旧配置和程序前，使用旧控制脚本停止 VPP、释放原网卡；释放失败则停止操作。当前 SSH 的本地地址或回程接口属于旧 VPP 管理网络时，拒绝停服，须改用控制台或独立管理口执行：Linux 网卡回退不能恢复原来的 VPP TAP 管理通道。
+- 升级或 `--config-only` 会在覆盖旧配置和程序前，使用旧控制脚本停止 VPP、释放原网卡；释放失败则停止操作。当前 SSH 的本地地址或回程接口属于旧 VPP 的网络时，拒绝停服，须改用屏幕、串口或不经过 VPP 的网口执行：Linux 网卡回退不能恢复原来经 VPP TAP 的连接。
 
 | 内容 | 位置 |
 | --- | --- |
