@@ -129,7 +129,7 @@ VPP 在用户态轮询网卡，一次处理一批包（向量处理），按节�
 ### 从源码安装
 
 ```sh
-git clone <本仓库地址> vpp-router && cd vpp-router
+git clone https://github.com/qqdwdbb/vpp-router.git && cd vpp-router
 sudo deploy/install/vpp-router-install.sh                # 检测、选网卡、编译、安装、配置
 sudo deploy/install/vpp-router-install.sh --config-only  # 不编译，只重新配置网卡和地址
 sudo deploy/install/vpp-router-install.sh --restore      # 停止 VPP，网卡还给内核驱动
