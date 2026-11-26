@@ -25,6 +25,7 @@ int main(void) {
     assert(used==1 && batches[0].unique==3 && batches[0].duplicate==1);
     assert(batches[0].reordered==1 && batches[0].first==1 && batches[0].last==3);
     unsigned char *short_frame=malloc(1); assert(short_frame);
+    short_frame[0]=0;
     packet(short_frame,1,5); free(short_frame);
     put32(frame+50,3); packet(frame,60,6);
     put32(frame+54,0); packet(frame,60,7);

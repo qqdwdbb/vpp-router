@@ -234,10 +234,10 @@ ask_nat_mode
 echo "mode=$NAT_MODE"
 '''
         for conf, mode in (('', 'ei'),
-                           ("printf 'plugins {\\n  plugin nat44_ei_plugin.so { enable }\\n}\\n' >\"$STARTUP\"", 'ei'),
-                           ("printf 'plugins {\\n  plugin nat_plugin.so { enable }\\n}\\n' >\"$STARTUP\"", 'ed')):
+                           ("printf 'plugins {\n  plugin nat44_ei_plugin.so { enable }\n}\n' >\"$STARTUP\"", 'ei'),
+                           ("printf 'plugins {\n  plugin nat_plugin.so { enable }\n}\n' >\"$STARTUP\"", 'ed')):
             with self.subTest(mode=mode, conf=conf):
-                result = self.run_shell(['ask_nat_mode'], body.replace('@CONF@', conf))
+                result = self.run_shell(['startup_nat_mode', 'ask_nat_mode'], body.replace('@CONF@', conf))
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertIn('mode=' + mode, result.stdout)
 
@@ -569,8 +569,11 @@ cat "$CONF/startup.conf"; test ! -e "$STATE/startup.conf.bak"
         self.assertEqual(result.stdout, 'package\n')
 
     def test_write_config_never_writes_startup_conf(self):
-        result = self.run_shell(['write_config'], '''
+        result = self.run_shell(['startup_nat_mode', 'nat_mode_tool', 'exec_files_have_nat',
+                                 'check_nat_mode_change', 'rewrite_nat_mode_files', 'system_cpus',
+                                 'write_config'], '''
 mkdir -p "$CONF"; echo '# vpp-router-install.sh old' >"$CONF/startup.conf"
+SYSTEMD_CPU="$T/systemd/90-vpp-router-cpu.conf"; WORKERS=0; CPUS=1
 gen_startup(){ echo '# vpp-router-install.sh startup'; }
 gen_router_vpp(){ :; }; gen_env(){ :; }; pinned_wan_mac(){ :; }; save_ports(){ :; }
 DNSMASQ=0; write_dnsmasq(){ :; }
