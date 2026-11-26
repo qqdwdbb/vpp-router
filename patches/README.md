@@ -77,6 +77,15 @@ vnet 记在队列上；端口启动、探测完以后按每个队列的方式打
 
 0037–0045 的目的、遇到的问题和 `ip4-local` 的缺陷见 [NAT44：TAP 校验和 offload 与 hairpinning](../docs/nat44-offload-hairpin.md)。
 
+VPP 0046 修 0027 留下的问题：节点设回 adaptive 后可能一直轮询。0027 让 adaptive 节点从轮询开始，
+一个线程上最后一个轮询队列改回 adaptive 时，节点要的状态仍是轮询；vnet 只在轮询列表、中断数或
+`rxq_vector_poll` 变化时才更新。`rxq_vector_poll` 只在 adaptive 时替换，adaptive → polling → adaptive
+后它和原来一样；中断数只有在最后改回的队列索引最大时才变。其余情况跳过更新，节点拿不到
+`VLIB_NODE_FLAG_ADAPTIVE_MODE`，空转 100% CPU。启动时按创建顺序设置，最后一个索引最大，不受影响；
+面板“系统”页单独切换一个口（不是索引最大的那个）就会触发。补丁比较节点现有的 adaptive 标志。
+只改 libvnet。2026-11-26 在 RK3588 开发板上发现，在 ConnectX-3 主机上复现并验证，
+切换时间的实测见 [adaptive 收包的切换时间](../docs/rk3588/rk3588-adaptive-switch-timing.md)。
+
 VPP 0037（NAT44-ED）和 0038（NAT44-EI）让 NAT 正确改写"校验和未完成"的包。TAP 打开
 `csum-offload` 或 `gso` 时，Linux 自己发出的 TCP/UDP 带 `NEEDS_CSUM` 进入 VPP，L4 校验和
 字段里只有伪首部的和（未取反），由下一个 TAP 或网卡补全。NAT 原来把它当完整校验和做增量

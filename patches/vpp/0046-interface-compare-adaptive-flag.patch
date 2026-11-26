@@ -1,0 +1,38 @@
+interface: count a change of the adaptive flag as a runtime change
+
+0027 starts adaptive input nodes polling. When the last polling queue of a
+thread turns adaptive, the wanted node state therefore stays polling, and
+the update only goes ahead if the polling vector, the interrupt count or
+rxq_vector_poll differ. rxq_vector_poll is only replaced while the node is
+adaptive, so after adaptive -> polling -> adaptive it still holds the same
+queues; the interrupt count changes only if the queue turned last has the
+highest queue index. Otherwise the update is skipped, the node never gets
+VLIB_NODE_FLAG_ADAPTIVE_MODE and keeps polling at 100% CPU with an empty
+ring. On the RK3588 board, wan0 and lan0 set polling and then lan0, wan0
+adaptive left dpdk-input polling; on the ConnectX-3 host the same happened
+with port0 turned adaptive last. Boot sets NICs in creation order, so the
+last one has the highest index and boot was not affected. Compare the
+node's adaptive flag with the wanted one.
+
+--- a/src/vnet/interface/runtime.c
++++ b/src/vnet/interface/runtime.c
+@@ -162,6 +162,19 @@
+ 		     node_state_str[per_thread_node_state[i]]);
+ 	}
+
++      /* An adaptive node starts polling, so turning the last polling queue
++	 of a thread adaptive leaves the state unchanged, and the vectors
++	 below may still match the ones from an earlier adaptive setup: the
++	 node would keep polling without the adaptive flag. Compare it too. */
++      if (!(vlib_node_get_runtime (ovm, node_index)->flags &
++	    VLIB_NODE_FLAG_ADAPTIVE_MODE) != !per_thread_node_adaptive[i])
++	{
++	  something_changed_on_rx = 1;
++	  log_debug ("adaptive mode changed for node %U on thread %u to %u",
++		     format_vlib_node_name, vm, node_index, i,
++		     per_thread_node_adaptive[i]);
++	}
++
+       /* check if something changed */
+       if (something_changed_on_rx == 0)
+ 	{

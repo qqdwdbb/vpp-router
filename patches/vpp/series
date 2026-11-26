@@ -43,3 +43,4 @@
 0043-nat44-ei-hairpin-classify.patch
 0044-nat44-ed-hairpin-classify.patch
 0045-nat44-ei-port-bitmap-race.patch
+0046-interface-compare-adaptive-flag.patch
