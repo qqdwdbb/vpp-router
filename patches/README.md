@@ -86,6 +86,23 @@ VPP 0046 修 0027 留下的问题：节点设回 adaptive 后可能一直轮询�
 只改 libvnet。2026-11-26 在 RK3588 开发板上发现，在 ConnectX-3 主机上复现并验证，
 切换时间的实测见 [adaptive 收包的切换时间](../docs/rk3588/rk3588-adaptive-switch-timing.md)。
 
+VPP 0047 把 NAT44-EI 和 NAT44-ED 的 worker 交接队列从 64 个元素加到 512 个（`NAT_FQ_NELTS_DEFAULT`），
+并修正 vlib 的 frame-queue 跟踪：跟踪数组只有 `FRAME_QUEUE_MAX_NELTS`（64）项，dequeue 时按队列长度
+写，队列超过 64 个元素时 `trace frame-queue on` 会写出数组。每个元素装一次入队调用的包，轻载时
+常常只有十几个，64 个元素约容一千个包。一个局域网主机的会话都在同一个 worker 上，另一个 worker
+把 RSS 分给它的包全部交过去；线速突发到来时，接收方正在唤醒或被 powersave 压在低频，队列满了就按
+`congestion drop` 丢掉，表现为 TCP 重传。每个元素约 2.1 KB，每个队列每个线程约多占 1 MB；单 worker
+不建交接队列。改 libvlib、nat44_ei_plugin 和 nat_plugin。原因和实测见
+[NAT 交接队列（0047）](../docs/worker-idle.md#nat-交接队列0047)。
+
+VPP 0048 给 `abf-input-ip6` 注册错误计数。上游注册这个节点时写的是 `.n_errors = 0`，但 ip4/ip6 共用的
+`abf_input_inline` 照样在它上面计 `matched`（1）和 `missed`（2）；它的错误表起点是 0，计数落到全局下标
+1、2，也就是错误表里排第一的那个节点。这里的 26.06 构建上那是 `wg4-output-tun-handoff`：每个没命中 ABF 的
+IPv6 包都显示成一次 WireGuard `congestion drop`。2026-11-26 在 RK3588 开发板上看到约 267 万次（每秒约 60 次，
+那个节点一次都没运行过，同时段 `abf-input-ip6` 处理的包数与之相同）。补丁让 ip6 节点使用和 ip4 相同的错误
+字符串，只改 abf_plugin。在 ConnectX-3 主机上验证：从局域网 ping6 路由器 200 次，修补前计到
+`wg4-output-tun-handoff congestion drop`，修补后计到 `abf-input-ip6 missed`。
+
 VPP 0037（NAT44-ED）和 0038（NAT44-EI）让 NAT 正确改写"校验和未完成"的包。TAP 打开
 `csum-offload` 或 `gso` 时，Linux 自己发出的 TCP/UDP 带 `NEEDS_CSUM` 进入 VPP，L4 校验和
 字段里只有伪首部的和（未取反），由下一个 TAP 或网卡补全。NAT 原来把它当完整校验和做增量

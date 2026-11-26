@@ -44,3 +44,5 @@
 0044-nat44-ed-hairpin-classify.patch
 0045-nat44-ei-port-bitmap-race.patch
 0046-interface-compare-adaptive-flag.patch
+0047-nat44-handoff-queue-512.patch
+0048-abf-ip6-error-counters.patch

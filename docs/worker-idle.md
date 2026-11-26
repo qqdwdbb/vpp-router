@@ -74,3 +74,36 @@ mensura.cdn-apple.com（约 1.1 Gbps）时 worker 读数 60–95%，但每次调
 同档两轮差异主要来自 8 条流被 RSS 分到哪些队列。busy-loops 16 时 worker 合计约降 20%，
 最忙 worker 从约 94% 降到约 69%，dpdk-intr（cpu4，A76）约增 12 个百分点，速度与延迟未见变化。
 剩余占用来自每次唤醒的开销：共享 INTx 每次唤醒全部队列，跨线程交接也会唤醒对方线程。
+
+## NAT 交接队列（0047）
+
+2026-11-26 在 ConnectX-3 主机（i5-9300H，2 worker，port0 两个 RX 队列，adaptive，NAT44-EI）上发现。
+测试机用两个 netns 当局域网客户端（VLAN 2）和外网服务器（VLAN 100），iperf3 TCP 8 条流、每条限速 125 Mbps
+（共 1 Gbps）下载 20 秒：内核 nft 转发重传为 0，VPP 每轮 0–336 次。每轮的重传数都等于
+`nat44-ei-out2in-worker-handoff` 的 `congestion drop`，网卡没有丢包，发送端没有 DSACK（不是乱序）。
+
+原因：
+
+- NAT44-EI 按源地址选 worker，只有一个局域网客户端时会话都在 wk1；下载包被 RSS 分到两个队列，
+  wk0 收到的一半全部交给 wk1。
+- iperf 限速的包按批到来：perf 看到两个 worker 都是约 6 ms 空闲、2–3 ms 忙碌，批内是 10G 线速。
+- adaptive 下 worker 平均只忙三成，intel_pstate（powersave，EPP balance_performance）把 CPU 压在约 1 GHz。
+- 交接队列只有 64 个元素，每个元素装一次入队调用的包（这里平均 19 个）。批大时 wk1 来不及取，队列满，
+  入队方直接丢包。调度延迟不是原因：`perf sched` 测到 wk1 唤醒后最多 0.08 ms 拿到 CPU。
+
+同一主机、同一测试，每轮 20 秒：
+
+| 条件 | 有交接丢包的轮数 | 每轮丢包 |
+|---|---:|---|
+| 64 元素，adaptive | 9 / 13 | 30–254 |
+| 64 元素，全部轮询 | 0 / 4 | 0 |
+| 64 元素，只有 wk1 的队列轮询 | 0 / 3 | 0 |
+| 64 元素，只有 wk0 的队列轮询 | 1 / 3 | 76 |
+| 64 元素，adaptive，CPU2/3 最低频率 4.1 GHz | 0 / 4 | 0 |
+| 512 元素（0047），adaptive | 0 / 11 | 0 |
+
+0047 后限速 1G、2.5G 的上下行都没有重传，CPU 和功耗不变（空闲 3.5 W，1G 约 4.8 W）。不限速（9.35 Gbps）
+时仍有约 1150 次重传，丢在 `port0-tx` 的 `dpdk tx failure`（单口收发都接近 10G，发送环满），没有交接丢包。
+
+队列大小上游可以经 API（`nat44_ei_set_fq_options`）在启用插件前修改，没有 CLI；0047 直接改默认值，
+安装器和面板写的 CLI 文件不用变。`show frame-queue` 打开跟踪后显示 `ring size 512`。

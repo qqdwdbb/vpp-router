@@ -1,0 +1,22 @@
+abf: register the error counters of abf-input-ip6
+
+abf_input_inline counts ABF_ERROR_MATCHED and ABF_ERROR_MISSED on the
+node of the address family it runs for, but abf-input-ip6 was registered
+with .n_errors = 0. Its error heap index stays 0, so the counts land on
+global error indices 1 and 2, which belong to whatever node comes first
+in the error heap. On the 26.06 builds here that is wg4-output-tun-handoff: every
+IPv6 packet that misses ABF showed up as a WireGuard "congestion drop".
+Register the same error strings as abf-input-ip4.
+
+--- a/src/plugins/abf/abf_itf_attach.c
++++ b/src/plugins/abf/abf_itf_attach.c
+@@ -658,7 +658,8 @@
+   .vector_size = sizeof (u32),
+   .format_trace = format_abf_input_trace,
+   .type = VLIB_NODE_TYPE_INTERNAL,
+-  .n_errors = 0,
++  .n_errors = ABF_N_ERROR,
++  .error_strings = abf_error_strings,
+   .n_next_nodes = ABF_N_NEXT,
+ 
+   .next_nodes =

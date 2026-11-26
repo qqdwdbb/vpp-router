@@ -1,0 +1,71 @@
+nat44: 512-element worker handoff queues; clamp frame-queue trace
+
+NAT44-EI and NAT44-ED hand packets between workers through frame queues
+of NAT_FQ_NELTS_DEFAULT (64) elements. Each element carries the packets
+of one enqueue call, which at low load is often a few dozen, so 64
+elements absorb only about a thousand packets. With one busy LAN host all
+sessions sit on one worker and the other worker hands over its whole RSS
+share; line-rate bursts then overflow the queue while the receiving
+worker wakes up or runs at a low clock (adaptive RX, intel_pstate
+powersave), and the packets are dropped as "congestion drop" (TCP
+retransmits). Raise the default to 512 (about 1.1 MB per queue and
+thread). The size could already be raised through the API.
+
+The frame-queue trace arrays hold FRAME_QUEUE_MAX_NELTS (64) entries but
+the dequeue trace indexed them by the queue size, writing past them for
+queues larger than 64. Clamp both indices.
+
+--- a/src/plugins/nat/nat44-ed/nat44_ed.h
++++ b/src/plugins/nat/nat44-ed/nat44_ed.h
+@@ -22,8 +22,11 @@
+ 
+ #include <nat/lib/lib.h>
+ 
+-/* default number of worker handoff frame queue elements */
+-#define NAT_FQ_NELTS_DEFAULT 64
++/* default number of worker handoff frame queue elements; each element holds
++ * one enqueue call, often far fewer than VLIB_FRAME_SIZE packets, so 64
++ * overflows on line-rate bursts while the receiving worker wakes up or runs
++ * at a low clock */
++#define NAT_FQ_NELTS_DEFAULT 512
+ 
+ /* number of attempts to get a port for ED overloading algorithm, if rolling
+  * a dice this many times doesn't produce a free port, it's treated
+--- a/src/plugins/nat/nat44-ei/nat44_ei.h
++++ b/src/plugins/nat/nat44-ei/nat44_ei.h
+@@ -28,8 +28,11 @@
+ #include <nat/lib/lib.h>
+ #include <nat/lib/nat_proto.h>
+ 
+-/* default number of worker handoff frame queue elements */
+-#define NAT_FQ_NELTS_DEFAULT 64
++/* default number of worker handoff frame queue elements; each element holds
++ * one enqueue call, often far fewer than VLIB_FRAME_SIZE packets, so 64
++ * overflows on line-rate bursts while the receiving worker wakes up or runs
++ * at a low clock */
++#define NAT_FQ_NELTS_DEFAULT 512
+ 
+ /* External address and port allocation modes */
+ #define foreach_nat44_ei_addr_and_port_alloc_alg                              \
+--- a/src/vlib/buffer_funcs.c
++++ b/src/vlib/buffer_funcs.c
+@@ -663,13 +663,18 @@
+ 	  // if beyond max then use max
+ 	  fqt->n_in_use = fqt->nelts - 1;
+ 	}
++      /* The trace and histogram arrays hold FRAME_QUEUE_MAX_NELTS entries,
++       * while a queue may have more elements: clamp to the arrays. */
++      if (fqt->n_in_use >= FRAME_QUEUE_MAX_NELTS)
++	fqt->n_in_use = FRAME_QUEUE_MAX_NELTS - 1;
+ 
+       /* Record the number of elements in use in the histogram */
+       fqh = &fqm->frame_queue_histogram[thread_id];
+       fqh->count[fqt->n_in_use]++;
+ 
+       /* Record a snapshot of the elements in use */
+-      for (elix = 0; elix < fqt->nelts; elix++)
++      for (elix = 0; elix < clib_min (fqt->nelts, FRAME_QUEUE_MAX_NELTS);
++	   elix++)
+ 	{
+ 	  elt = fq->elts + ((fq->head + 1 + elix) & (mask));
+ 	  if (1 || elt->valid)
