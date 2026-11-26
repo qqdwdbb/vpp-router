@@ -54,3 +54,7 @@ worker 睡着时，第一个包的唤醒约多 0.17 ms（中位数）。空闲�
 不是索引最大的那个时，vnet 判断没有变化，节点没有拿到 adaptive 标志。面板“系统”页单独切换一个口的
 收包方式就能触发。当时先设为 interrupt 再设回 adaptive 恢复。ConnectX-3 主机上按同样条件
 （port0 最后改回）复现，装上 0046 后三种顺序都回到中断态、worker 0%。
+
+同日部署到 RK3588 开发板：先不打补丁重编 libvnet，`.text`、`.rodata`、`.data`、`.eh_frame` 与已装文件相同，
+再打 0046 重编，由一次性脱离运行的部署脚本替换并重启 VPP（失败则回退），重启后 3 秒健康检查通过。
+之后重复 lan0、wan0 设为 polling 再按 lan0、wan0 设回 adaptive，dpdk-input 回到中断态，worker 约 2%。
