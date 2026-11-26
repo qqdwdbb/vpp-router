@@ -1109,6 +1109,42 @@ ask_nat_mode() {
 	return 0
 }
 
+# NAT 回流（hairpinning）：局域网里的设备用 WAN 地址访问本网的端口转发时把流量转回局域网。
+# 在 loop0 上开，只有能被 NAT 映射回内网的包才进 NAT（补丁 0043/0044）；网关收到的每个 IPv4 包
+# 多一次检查，满负荷时 NAT 吞吐约降低 8%，所以默认关。重新运行时默认沿用 router.vpp 里的
+HAIRPIN=0
+
+# 已有 router.vpp 是否在 loop0 上开了回流
+router_hairpin() {
+	[ -r "$1" ] && grep -Eq '^[[:space:]]*set[[:space:]]+int[a-z]*[[:space:]]+nat44[[:space:]]+(ei[[:space:]]+)?hairpinning[[:space:]]+loop0[[:space:]]*$' "$1"
+}
+
+# 装好的 NAT 插件有没有回流命令。完整安装时按本仓库的补丁重新编译，总是有
+hairpin_supported() {
+	local so=$LIBDIR/vpp_plugins/nat44_ei_plugin.so text='nat44 ei hairpinning'
+	[ "$MODE" = install ] && return 0
+	[ "${NAT_MODE:-ei}" = ed ] && so=$LIBDIR/vpp_plugins/nat_plugin.so text='set interface nat44 hairpinning'
+	[ -r "$so" ] && grep -aqF "$text" "$so"
+}
+
+ask_hairpin() {
+	local def=n
+	HAIRPIN=0
+	router_hairpin "$CONF/router.vpp" && def=y
+	echo
+	info "NAT 回流（hairpinning）"
+	note "局域网里的设备用 WAN 的外部地址（或解析到它的域名）访问本网的端口转发时，把流量转回局域网。"
+	note "不开时这种访问不通，只能用内网地址。开了以后局域网网关收到的每个 IPv4 包多做一次检查，"
+	note "满负荷时 NAT 吞吐约降低 8%。以后可以在面板的接口页（网桥）开关。"
+	if ! hairpin_supported; then
+		note "已装的 VPP NAT 插件没有回流命令（补丁 0043/0044），完整安装（不加 --config-only）更新 VPP 后才能开。"
+		return 0
+	fi
+	ask_yn "开启 NAT 回流？" "$def" || return 0
+	HAIRPIN=1
+	return 0
+}
+
 # NAT44 命令的开头：NAT44-ED 的命令没有 ei
 nat44() {
 	if [ "${NAT_MODE:-ei}" = ed ]; then echo nat44; else echo nat44 ei; fi
@@ -1412,7 +1448,7 @@ summary() {
 		note "WAN      ${N_IF[WAN_NIC]} (${N_PCI[WAN_NIC]})"
 		for i in "${LAN[@]}"; do note "LAN      ${N_IF[i]} (${N_PCI[i]})"; done
 	fi
-	note "WAN 地址 $([ "$WAN_MODE" = dhcp ] && echo DHCP || echo "$WAN_CIDR 网关 $WAN_GW")，$([ "${NAT_MODE:-ei}" = ed ] && echo NAT44-ED || echo NAT44-EI)"
+	note "WAN 地址 $([ "$WAN_MODE" = dhcp ] && echo DHCP || echo "$WAN_CIDR 网关 $WAN_GW")，$([ "${NAT_MODE:-ei}" = ed ] && echo NAT44-ED || echo NAT44-EI)$([ "${HAIRPIN:-0}" = 1 ] && echo "，NAT 回流")"
 	note "LAN 网关 $LAN_CIDR"
 	[ "$IPV6_PD" = 1 ] && note "IPv6     WAN DHCPv6-PD，LAN RA/SLAAC"
 	[ -n "$LAN_ULA" ] && note "IPv6     LAN 固定 ULA $LAN_ULA（RA/SLAAC）"
@@ -2267,6 +2303,10 @@ gen_router_vpp() {
 	fi
 	echo "$(nat44) add interface address $wan"
 	echo "set interface $(nat44) out $wan output-feature"
+	if [ "${HAIRPIN:-0}" = 1 ]; then
+		echo "# NAT 回流：局域网用 WAN 地址访问端口转发时转回局域网"
+		echo "set interface $(nat44) hairpinning loop0"
+	fi
 	[ "$IPSEC" = 1 ] && gen_ipsec_vpp "$wan"
 	return 0
 }
@@ -3393,6 +3433,7 @@ main() {
 	ask_cpu
 	ask_rx_mode
 	ask_nat_mode
+	ask_hairpin
 	ask_ipsec
 	ask_panel
 	ask_singbox

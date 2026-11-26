@@ -52,6 +52,7 @@ sudo systemctl enable --now vpp-interfaces
 | `set interface l2 bridge 接口 桥 [bvi]`、`set interface l2 tag-rewrite 接口 pop 1` | 加入、移出、换桥 |
 | `set interface state 接口 up/down`、`set interface mtu packet N 接口` | 状态、MTU |
 | `nat44 ei add interface address 接口`、`set interface nat44 ei out 接口 output-feature`（NAT44-ED 为 `nat44 add interface address 接口`、`set interface nat44 out 接口 output-feature`） | 出口（NAT）：从这个口出去的流量转换成它自己的地址 |
+| `set interface nat44 ei hairpinning 接口`（NAT44-ED 为 `set interface nat44 hairpinning 接口`） | NAT 回流，见下文 |
 
 - 文件里提到的接口和物理口才能修改。WireGuard、Gate 的 TAP 等由其他程序创建的接口只显示。
 - 新的行插在这个接口已有的行后面（也在它所在桥的 `create bridge-domain` 后面），文件里没有这个接口时加在末尾。
@@ -71,6 +72,16 @@ sudo systemctl enable --now vpp-interfaces
 - 取消时只删这两行，插件保持启用。文件里还有引用这个接口的其他 NAT 命令（静态映射、identity mapping，比如 IPsec 的 500、4500 端口）时拒绝，要先手动删掉。
 - 是出口的接口不能加入网桥，子接口不能删除，要先取消。
 - 只管 IPv4。IPv6 的 NAT66 不在这里。
+
+## NAT 回流
+
+“开启回流”在局域网一侧的接口（通常是网桥的网关 `loop0`，在网桥表里开关）上开 hairpinning：局域网里的设备用出口的外部地址访问本网的端口转发（或其他 NAT 映射）时，包按从外部进来的方式转换后送回局域网，服务端看到的来源是出口地址。命令要 VPP 补丁 0043/0044，VPP 的 NAT 插件没有这条命令时不能开（读的是 `show nat44 [ei] hairpinning interfaces`）。
+
+- 有代价，默认关：这个接口收到的每个 IPv4 包都多一次分片重组查表和目的地址检查，约 75 个时钟周期，满负荷时 NAT 吞吐约降低 8%（`docs/nat44-offload-hairpin.md`）。
+- 立即生效，写一行，放在启用插件和出口的 NAT 行之后；关闭时删这一行。
+- 要先有出口（文件里启用了 NAT 插件）、接口要有 IPv4 配置；出口、网桥里的二层口、用 `set interface nat44 [ei] in` 配置的接口不能开。
+- 开着回流的接口不能做出口、不能改网桥、不能删除，要先关闭。
+- 系统页切换 EI/ED 时这一行跟着改写。
 
 ## 多个默认路由
 
@@ -96,6 +107,7 @@ sudo systemctl enable --now vpp-interfaces
 | `POST /interfaces/bridge` | `{"interface","bridge","bvi"}`，`bridge` 为 0 表示移出 |
 | `POST /interfaces/state`、`/mtu` | `{"interface","up"}`、`{"interface","mtu"}` |
 | `POST /interfaces/nat` | `{"interface","nat"}`，`nat` 为 `true` 设为出口，`false` 取消 |
+| `POST /interfaces/hairpin` | `{"interface","hairpin"}`，`hairpin` 为 `true` 开启 NAT 回流，`false` 关闭 |
 | `POST /interfaces/subif` | `{"parent","vlan","sub_id"}`，`sub_id` 为 0 时同 VLAN ID |
 | `POST /interfaces/subif/delete`、`/vlan` | `{"interface"}`、`{"interface","vlan"}` |
 | `POST /interfaces/bridge-domain` | `{"bridge","bvi","addresses":[...]}` |

@@ -169,8 +169,9 @@ sudo python3 tests/integration/integration_nat44_partial_checksum.py --nat ed|ei
 
 ## 未完成和已知问题
 
-- 安装脚本还没有在配置里写 hairpinning 那一行，面板切换 EI/ED 时也还不会互相改写这条命令。
-- 只有输出特性、不开 hairpinning 时，VPP 仍然不做 hairpin（这是现在安装脚本的配法）。
+- 只有输出特性、不开 hairpinning 时，VPP 仍然不做 hairpin。因为有上面的开销，hairpinning 做成开关、默认关：
+  安装脚本问一次（开时在 `loop0` 上写 `set interface nat44 [ei] hairpinning loop0`），面板接口页按接口开关
+  （vpp-interfaces），系统页切换 EI/ED 时这一行跟着改写。
 - 分类节点依赖接口上的分片重组；自己解析未分片的 TCP/UDP、只给送往 in2out 的包补字段，每包还能省约 40 个时钟
   周期，代价是要跟着分片重组节点的输出格式走。
 - ICMP 和分片不做 hairpin。

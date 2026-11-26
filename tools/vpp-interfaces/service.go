@@ -425,9 +425,14 @@ type InterfaceView struct {
 	// DHCPGateway is the router of the IPv4 DHCP lease, as VPP has it now.
 	DHCPGateway string `json:"dhcp_gateway,omitempty"`
 	// IPv6Gateway is ::/0's next hop through the interface, as VPP has it now.
-	IPv6Gateway string   `json:"ipv6_gateway,omitempty"`
-	NATReason   string   `json:"nat_reason"` // why it cannot be turned on; turning it off has its own checks
-	References  []string `json:"references"`
+	IPv6Gateway string `json:"ipv6_gateway,omitempty"`
+	NATReason   string `json:"nat_reason"` // why it cannot be turned on; turning it off has its own checks
+	// Hairpin is whether the file turns NAT hairpinning on for the interface; HairpinLive whether
+	// VPP has it on now. HairpinReason is why it cannot be turned on.
+	Hairpin       bool     `json:"hairpin"`
+	HairpinLive   bool     `json:"hairpin_live"`
+	HairpinReason string   `json:"hairpin_reason"`
+	References    []string `json:"references"`
 }
 
 type BridgeView struct {
@@ -549,6 +554,7 @@ func (s *Service) view(file *cliFile, live *liveState, iface *liveInterface) Int
 		v.References = append(v.References, strings.TrimSpace(line.text))
 	}
 	v.NAT = natEnabled(file, iface.Name)
+	v.Hairpin, v.HairpinLive = hairpinEnabled(file, iface.Name), live.Hairpin[iface.Name]
 	if iface.DHCPRouter.IsValid() {
 		v.DHCPGateway = iface.DHCPRouter.String()
 	}
@@ -557,10 +563,13 @@ func (s *Service) view(file *cliFile, live *liveState, iface *liveInterface) Int
 	}
 	v.Reason = managed(file, iface)
 	if v.Reason != "" {
-		v.AddressReason, v.BridgeReason, v.VLANReason, v.DeleteReason, v.NATReason = v.Reason, v.Reason, v.Reason, v.Reason, v.Reason
+		v.AddressReason, v.BridgeReason, v.VLANReason, v.DeleteReason, v.NATReason, v.HairpinReason = v.Reason, v.Reason, v.Reason, v.Reason, v.Reason, v.Reason
 		return v
 	}
 	v.NATReason = natReason(file, live, iface)
+	if !v.Hairpin {
+		v.HairpinReason = hairpinReason(file, live, iface)
+	}
 	bd, bvi := fileBridge(file, iface.Name)
 	switch {
 	case (iface.Bridge != 0 && !iface.BVI) || (bd != 0 && !bvi):
@@ -582,9 +591,15 @@ func (s *Service) view(file *cliFile, live *liveState, iface *liveInterface) Int
 		if len(file.own(iface.Name, lineNATAddress, lineNATOutput)) > 0 {
 			v.DeleteReason = "还是出口（NAT），先取消"
 		}
+		if hairpinEnabled(file, iface.Name) {
+			v.DeleteReason = "开着 NAT 回流，先关闭"
+		}
 	}
 	if len(file.own(iface.Name, lineNATAddress, lineNATOutput)) > 0 && v.BridgeReason == "" {
 		v.BridgeReason = "是出口（NAT），先取消才能加入网桥"
+	}
+	if hairpinEnabled(file, iface.Name) && v.BridgeReason == "" {
+		v.BridgeReason = "开着 NAT 回流，先关闭才能改网桥"
 	}
 	return v
 }
@@ -758,6 +773,9 @@ func (s *Service) SetBridge(name string, bd uint32, bvi bool, user string) (*Sta
 		if bd != 0 && len(file.own(name, lineNATAddress, lineNATOutput)) > 0 {
 			return nil, fmt.Errorf("%s 是出口（NAT），先取消才能加入网桥", name)
 		}
+		if hairpinEnabled(file, name) {
+			return nil, fmt.Errorf("%s 开着 NAT 回流，先关闭才能改网桥", name)
+		}
 		c := &change{file: file}
 		pop := iface.Sub && iface.Exact && iface.Plain
 		hadPop := len(file.own(name, lineTagRewrite)) > 0
@@ -918,6 +936,9 @@ func (s *Service) DeleteSubif(name string, user string) (*State, error) {
 		}
 		if len(file.own(name, lineNATAddress, lineNATOutput)) > 0 {
 			return nil, fmt.Errorf("%s 还是出口（NAT），先取消", name)
+		}
+		if hairpinEnabled(file, name) {
+			return nil, fmt.Errorf("%s 开着 NAT 回流，先关闭", name)
 		}
 		c := &change{file: file, description: "删除子接口 " + name}
 		// Undo runs in reverse: the interface is recreated from its lines, then gets its

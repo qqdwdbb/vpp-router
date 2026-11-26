@@ -228,6 +228,7 @@ set nat44 ei timeout tcp-established 1800 tcp-transitory 120
 nat44 ei add interface address port0
 set interface nat44 ei out port0 output-feature
 set int nat44 ei in loop0 out port1
+set interface nat44 ei hairpinning loop1
   nat44 ei add identity mapping external port0 udp 500
 nat44 ei add static mapping tcp local 192.168.1.10 22 external port0 2222
 nat44 ei add address 10.0.0.1 - 10.0.0.4 tenant-vrf 0
@@ -240,6 +241,7 @@ set nat timeout tcp-established 1800 tcp-transitory 120
 nat44 add interface address port0
 set interface nat44 out port0 output-feature
 set int nat44 in loop0 out port1
+set interface nat44 hairpinning loop1
   nat44 add identity mapping external port0 udp 500
 nat44 add static mapping tcp local 192.168.1.10 22 external port0 2222
 nat44 add address 10.0.0.1 - 10.0.0.4 tenant-vrf 0

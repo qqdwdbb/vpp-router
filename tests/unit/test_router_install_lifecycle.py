@@ -241,6 +241,46 @@ echo "mode=$NAT_MODE"
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertIn('mode=' + mode, result.stdout)
 
+    def test_hairpin_line_follows_the_answer_and_the_nat_mode(self):
+        body = '''
+SEL=(0); LAN=(); N_KIND=(afp); N_IF=(eth0); V_NAME=(host-eth0); N_PCI=(0000:01:00.0)
+WAN_NIC=0; SINGLE=1; WAN_VLAN=100; LAN_VLAN=1
+LAN_CIDR=10.61.30.1/24; HOST_CIDR=; WAN_MODE=dhcp; IPV6_PD=0; IPSEC=0
+stable_mac(){ echo 02:00:00:00:00:01; }
+NAT_MODE=@MODE@; HAIRPIN=@HAIRPIN@
+gen_router_vpp
+'''
+        names = ['nat44', 'gen_router_vpp']
+        for mode, line in (('ei', 'set interface nat44 ei hairpinning loop0'), ('ed', 'set interface nat44 hairpinning loop0')):
+            with self.subTest(mode=mode):
+                on = self.run_shell(names, body.replace('@MODE@', mode).replace('@HAIRPIN@', '1'))
+                self.assertEqual(on.returncode, 0, on.stderr)
+                self.assertIn('output-feature\n# NAT 回流：局域网用 WAN 地址访问端口转发时转回局域网\n' + line + '\n', on.stdout)
+                off = self.run_shell(names, body.replace('@MODE@', mode).replace('@HAIRPIN@', '0'))
+                self.assertEqual(off.returncode, 0, off.stderr)
+                self.assertNotIn('hairpinning', off.stdout)
+
+    def test_hairpin_defaults_to_the_last_router_vpp_and_needs_the_command(self):
+        body = '''
+ask_yn(){ [ "$2" = y ]; }
+mkdir -p "$CONF" "$LIBDIR/vpp_plugins"
+MODE=@INSTALL@; NAT_MODE=ei
+@CONF@
+@PLUGIN@
+ask_hairpin
+echo "hairpin=$HAIRPIN"
+'''
+        line = "printf 'set int nat44 ei hairpinning loop0\\n' >\"$CONF/router.vpp\""
+        plugin = "printf 'x set interface nat44 ei hairpinning y' >\"$LIBDIR/vpp_plugins/nat44_ei_plugin.so\""
+        for install, conf, so, want in (('install', '', '', '0'), ('install', line, '', '1'),
+                                        ('config', line, plugin, '1'), ('config', line, '', '0'),
+                                        ('config', '', plugin, '0')):
+            with self.subTest(install=install, conf=conf, so=so):
+                result = self.run_shell(['router_hairpin', 'hairpin_supported', 'ask_hairpin'],
+                                        body.replace('@INSTALL@', install).replace('@CONF@', conf).replace('@PLUGIN@', so))
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn('hairpin=' + want, result.stdout)
+
     def test_ipv6_pd_configuration_uses_selected_wan(self):
         body = '''
 SEL=(0); LAN=(); N_KIND=(afp); N_IF=(eth0); V_NAME=(host-eth0)

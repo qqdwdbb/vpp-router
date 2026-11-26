@@ -92,6 +92,7 @@ func (s *Service) Handler() http.Handler {
 		Gateway   string   `json:"gateway"`
 		Hostname  string   `json:"hostname"`
 		NAT       bool     `json:"nat"`
+		Hairpin   bool     `json:"hairpin"`
 		DeviceRequest
 	}
 	mux := http.NewServeMux()
@@ -109,6 +110,7 @@ func (s *Service) Handler() http.Handler {
 		},
 		"state":         func(q request, u string) (*State, error) { return s.SetState(q.Interface, q.Up, u) },
 		"nat":           func(q request, u string) (*State, error) { return s.SetNAT(q.Interface, q.NAT, u) },
+		"hairpin":       func(q request, u string) (*State, error) { return s.SetHairpin(q.Interface, q.Hairpin, u) },
 		"create":        func(q request, u string) (*State, error) { return s.CreateDevice(q.DeviceRequest, u) },
 		"delete":        func(q request, u string) (*State, error) { return s.DeleteDevice(q.Interface, u) },
 		"mtu":           func(q request, u string) (*State, error) { return s.SetMTU(q.Interface, q.MTU, u) },

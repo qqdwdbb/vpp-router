@@ -18,7 +18,7 @@ func natModeOf(file *cliFile, name string, live *liveState) (natMode, error) {
 	var mode natMode
 	for _, line := range file.lines {
 		switch line.kind {
-		case lineNATEnable, lineNATAddress, lineNATOutput:
+		case lineNATEnable, lineNATAddress, lineNATOutput, lineNATHairpin:
 			if mode != "" && line.nat != mode {
 				return "", fmt.Errorf("%s 里同时有 NAT44-EI 和 NAT44-ED 的命令", name)
 			}
@@ -69,6 +69,8 @@ func natReason(file *cliFile, live *liveState, iface *liveInterface) string {
 		return "接口在网桥里，二层接口不能做出口"
 	case fileFamily(file, iface.Name, false).mode == modeNone:
 		return "先给接口设置 IPv4 地址或 DHCP"
+	case len(file.own(iface.Name, lineNATHairpin)) > 0:
+		return "接口开着 NAT 回流，在局域网一侧，不能做出口"
 	}
 	for _, line := range natReferences(file, iface.Name) {
 		if keyword(line.words[0], "set") {
@@ -135,6 +137,78 @@ func (s *Service) SetNAT(name string, enable bool, user string) (*State, error) 
 			c.steps = append(c.steps, step{natOutputCommand(mode, name, false), natOutputCommand(mode, name, true)})
 		}
 		file.insert(file.insertionPoint(name, append(append([]int{enableLine}, pool...), output...)...), texts...)
+		return c, nil
+	})
+}
+
+// Hairpinning lets hosts on a LAN reach a port forward, or another NAT mapping, by the exit's
+// outside address: the packet is translated as if it came from outside and sent back in, with
+// the exit's address as its source. Without it such a packet leaves by the exit unchanged. It
+// costs every IPv4 packet the interface receives a reassembly lookup and a check of its
+// destination against the NAT addresses, roughly 75 clocks, so it is off unless turned on.
+
+func hairpinEnabled(file *cliFile, iface string) bool {
+	return len(file.own(iface, lineNATHairpin)) > 0
+}
+
+// hairpinReason says why hairpinning cannot be turned on for iface, or empty when it can.
+func hairpinReason(file *cliFile, live *liveState, iface *liveInterface) string {
+	bd, bvi := fileBridge(file, iface.Name)
+	switch {
+	case live.NAT == "":
+		return "VPP 没有加载 NAT 插件"
+	case !live.HairpinCLI:
+		return "VPP 的 NAT 插件没有回流命令（补丁 0043/0044），重新运行安装脚本更新 VPP 后才能用"
+	case len(file.find(lineNATEnable)) == 0:
+		return "还没有出口，先把上行口设为出口"
+	case natEnabled(file, iface.Name):
+		return "出口不需要回流，在局域网一侧的接口（比如网桥的网关接口）上开"
+	case (iface.Bridge != 0 && !iface.BVI) || (bd != 0 && !bvi):
+		return "接口在网桥里，在网桥的网关接口上开"
+	case fileFamily(file, iface.Name, false).mode == modeNone:
+		return "先给接口设置 IPv4 地址"
+	}
+	for _, line := range natReferences(file, iface.Name) {
+		if keyword(line.words[0], "set") {
+			return "这个接口的 NAT 用其他方式配置：" + strings.TrimSpace(line.text)
+		}
+	}
+	return ""
+}
+
+// SetHairpin turns hairpinning on or off for a LAN-side interface. It takes effect at once.
+func (s *Service) SetHairpin(name string, enable bool, user string) (*State, error) {
+	return s.apply(user, func(file *cliFile, live *liveState) (*change, error) {
+		iface, err := editable(file, live, name)
+		if err != nil {
+			return nil, err
+		}
+		lines := file.own(name, lineNATHairpin)
+		if enable == (len(lines) > 0) {
+			return nil, errors.New("回流设置没有变化")
+		}
+		mode, err := natModeOf(file, s.opts.CLIFile, live)
+		if err != nil {
+			return nil, err
+		}
+		if !enable {
+			c := &change{file: file, description: "关闭 " + name + " 的 NAT 回流"}
+			if live.Hairpin[name] {
+				c.steps = append(c.steps, step{natHairpinCommand(mode, name, true), natHairpinCommand(mode, name, false)})
+			}
+			file.remove(lines...)
+			return c, nil
+		}
+		if reason := hairpinReason(file, live, iface); reason != "" {
+			return nil, errors.New(reason)
+		}
+		c := &change{file: file, description: "开启 " + name + " 的 NAT 回流：局域网内用出口地址访问端口转发时转回局域网"}
+		if !live.Hairpin[name] {
+			c.steps = append(c.steps, step{natHairpinCommand(mode, name, false), natHairpinCommand(mode, name, true)})
+		}
+		// After the plugin is enabled and the exits are set up, as the installer writes it.
+		after := file.find(lineNATEnable, lineNATAddress, lineNATOutput)
+		file.insert(file.insertionPoint(name, after...), natHairpinCommand(mode, name, false))
 		return c, nil
 	})
 }

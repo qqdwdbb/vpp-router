@@ -31,6 +31,7 @@ const (
 	lineNATEnable           // nat44 ei plugin enable ... | nat44 plugin enable ...
 	lineNATAddress          // nat44 [ei] add interface address IF
 	lineNATOutput           // set interface nat44 [ei] out IF output-feature
+	lineNATHairpin          // set interface nat44 [ei] hairpinning IF
 	lineCreate              // create tap|vxlan tunnel|gre tunnel|ipip tunnel|host-interface, see device
 )
 
@@ -51,7 +52,7 @@ type cliLine struct {
 	host   string       // lineDHCP4
 	via    netip.Addr   // lineGateway
 	device string       // lineCreate: tap, vxlan, gre, ipip or af_packet
-	nat    natMode      // lineNATEnable, lineNATAddress, lineNATOutput: which NAT44 plugin's command
+	nat    natMode      // lineNATEnable, lineNATAddress, lineNATOutput, lineNATHairpin: which NAT44 plugin's command
 	words  []string     // lineOther, to find the interfaces it refers to
 }
 
@@ -184,6 +185,10 @@ func parseLine(text string) *cliLine {
 		line.kind, line.iface, line.nat = lineNATOutput, f[5], natEI
 	case len(f) == 6 && words(f, "set", "interface", "nat44", "out") && f[5] == "output-feature":
 		line.kind, line.iface, line.nat = lineNATOutput, f[4], natED
+	case len(f) == 6 && words(f, "set", "interface", "nat44", "ei", "hairpinning"):
+		line.kind, line.iface, line.nat = lineNATHairpin, f[5], natEI
+	case len(f) == 5 && words(f, "set", "interface", "nat44", "hairpinning"):
+		line.kind, line.iface, line.nat = lineNATHairpin, f[4], natED
 	}
 	return line
 }
@@ -281,6 +286,17 @@ func (f *cliFile) references(iface string) []*cliLine {
 	return found
 }
 
+// find returns the lines of the given kinds, whatever interface they are for.
+func (f *cliFile) find(kinds ...lineKind) []int {
+	var found []int
+	for i, line := range f.lines {
+		if slices.Contains(kinds, line.kind) {
+			found = append(found, i)
+		}
+	}
+	return found
+}
+
 // mentions tells whether the file says anything about iface.
 func (f *cliFile) mentions(iface string) bool {
 	return len(f.own(iface)) > 0 || len(f.references(iface)) > 0
@@ -311,7 +327,7 @@ func (f *cliFile) insertionPoint(iface string, after ...int) int {
 	at := -1
 	for _, i := range f.own(iface) {
 		// NAT lines go after the plugin is enabled, often at the end; others keep their place.
-		if kind := f.lines[i].kind; kind != lineNATAddress && kind != lineNATOutput {
+		if kind := f.lines[i].kind; kind != lineNATAddress && kind != lineNATOutput && kind != lineNATHairpin {
 			at = max(at, i)
 		}
 	}
@@ -487,6 +503,16 @@ func natOutputCommand(m natMode, iface string, del bool) string {
 		return "set interface nat44 " + m.word() + "out " + iface + " output-feature del"
 	}
 	return "set interface nat44 " + m.word() + "out " + iface + " output-feature"
+}
+
+// natHairpinCommand turns hairpinning on or off for a LAN-side interface (VPP patches 0043 and
+// 0044): its packets to an address and port the NAT maps to an inside host, such as a port
+// forward on the exit's address, are translated and sent back inside instead of out.
+func natHairpinCommand(m natMode, iface string, del bool) string {
+	if del {
+		return "set interface nat44 " + m.word() + "hairpinning " + iface + " del"
+	}
+	return "set interface nat44 " + m.word() + "hairpinning " + iface
 }
 
 func gatewayCommand(iface string, via netip.Addr, del bool) string {

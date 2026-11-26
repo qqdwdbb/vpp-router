@@ -93,7 +93,7 @@ func translateNAT(f []string, ei bool) ([]string, bool) {
 	case hasWords(f, "nat44", "add", "address"), hasWords(f, "nat44", "add", "interface", "address"),
 		hasWords(f, "nat44", "add", "static", "mapping"), hasWords(f, "nat44", "add", "identity", "mapping"):
 		return slices.Insert(words, 1, "ei"), true
-	case len(f) > 3 && keyword(f[0], "set") && keyword(f[1], "interface") && f[2] == "nat44" && (f[3] == "in" || f[3] == "out"):
+	case len(f) > 3 && keyword(f[0], "set") && keyword(f[1], "interface") && f[2] == "nat44" && (f[3] == "in" || f[3] == "out" || f[3] == "hairpinning"):
 		return slices.Insert(words, 3, "ei"), true
 	}
 	return nil, false

@@ -225,6 +225,8 @@ func deviceDeleteReason(file *cliFile, iface *liveInterface) string {
 		return "还在用 DHCP、SLAAC 或网关，先把 IPv4 和 IPv6 设为不配置"
 	case len(file.own(name, lineNATAddress, lineNATOutput)) > 0:
 		return "还是出口（NAT），先取消"
+	case hairpinEnabled(file, name):
+		return "开着 NAT 回流，先关闭"
 	}
 	if refs := file.references(name); len(refs) > 0 {
 		return "配置文件里还有引用它的命令：" + strings.TrimSpace(refs[0].text)

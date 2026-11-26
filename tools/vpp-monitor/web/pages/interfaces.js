@@ -140,6 +140,26 @@ function natButton(iface, locked) {
   return element;
 }
 
+/* Hairpinning lets LAN hosts reach a port forward by the exit's outside address. It costs every
+   IPv4 packet the interface receives a little (about 8 % of NAT throughput at full load), so it is
+   off until turned on, per LAN-side interface: normally a bridge's gateway. */
+function hairpinText(iface) {
+  if (!iface.hairpin) return iface.hairpin_live ? '关（VPP 里还开着）' : '关';
+  return iface.hairpin_live ? '开' : '开（VPP 里没开）';
+}
+
+function hairpinButton(iface, locked) {
+  if (iface.hairpin) {
+    return button('关闭回流', () => apply('hairpin', { interface: iface.name, hairpin: false }, `关闭 ${shown(iface.name)} 的 NAT 回流`,
+      '局域网里的设备用出口的外部地址访问端口转发时不再转回局域网，要改用内网地址。'), locked);
+  }
+  return button('开启回流', () => apply('hairpin', { interface: iface.name, hairpin: true }, `开启 ${shown(iface.name)} 的 NAT 回流：从这里进来、发往出口外部地址上端口转发的流量转回局域网`,
+    '这个接口收到的每个 IPv4 包都要多做一次检查，满负荷时 NAT 吞吐约降低 8%。不用外部地址访问自己的端口转发时不需要开。'), locked || !!iface.hairpin_reason, iface.hairpin_reason);
+}
+
+/* Interfaces where hairpinning makes sense to offer: LAN-side layer-3 ones, not exits. */
+const hairpinCandidate = iface => iface.hairpin || (!iface.nat && !iface.bridge && !iface.reason && iface.ipv4 && iface.ipv4.mode !== 'none');
+
 function renderInterfaces() {
   const state = page.state;
   const locked = !!state.pending || page.busy;
@@ -147,7 +167,7 @@ function renderInterfaces() {
   const rows = state.interfaces.filter(iface => !iface.bvi);
   fillBody($('ifaces-table').tBodies[0], rows.length, (row, i) => {
     const iface = rows[i];
-    setCells(row, [shown(iface.name), KIND[iface.kind] || iface.kind, iface.vlan ? String(iface.vlan) : '—', stateText(iface), iface.mtu ? String(iface.mtu) : iface.kind === 'sub' ? '继承' : '—', addressText(iface), bridgeText(iface), iface.nat ? 'NAT' : '—', '']);
+    setCells(row, [shown(iface.name), KIND[iface.kind] || iface.kind, iface.vlan ? String(iface.vlan) : '—', stateText(iface), iface.mtu ? String(iface.mtu) : iface.kind === 'sub' ? '继承' : '—', addressText(iface), bridgeText(iface), iface.nat ? 'NAT' : iface.hairpin ? '回流' : '—', '']);
     row.children[3].className = iface.up && iface.link ? 'online' : 'offline';
     const cell = row.lastChild;
     cell.textContent = '';
@@ -159,6 +179,7 @@ function renderInterfaces() {
       cell.className = '';
       cell.title = '';
       cell.append(button('编辑', () => openEditor(iface.name), locked), ' ', natButton(iface, locked));
+      if (hairpinCandidate(iface)) cell.append(' ', hairpinButton(iface, locked));
     }
   });
   $('ifaces-summary').textContent = state.file;
@@ -176,7 +197,7 @@ function renderBridges() {
     const gateway = gatewayOf(bridge);
     const addresses = gateway ? gateway.addresses.join(' ') || '（没有地址）' : '没有网关（纯二层）';
     const status = gateway ? stateText(gateway) : '—';
-    setCells(row, [`网桥 ${bridge.id}`, addresses, bridge.members.map(shown).join('、') || '—', status, '']);
+    setCells(row, [`网桥 ${bridge.id}`, addresses, bridge.members.map(shown).join('、') || '—', status, gateway ? hairpinText(gateway) : '—', '']);
     row.children[3].className = gateway && gateway.up ? 'online' : 'offline';
     const cell = row.lastChild;
     cell.textContent = '';
@@ -186,6 +207,7 @@ function renderBridges() {
     } else {
       cell.className = '';
       cell.append(button('编辑', () => openBridge(bridge.id), locked));
+      if (gateway && !gateway.reason) cell.append(' ', hairpinButton(gateway, locked));
     }
   });
   $('ifaces-bridges-empty').hidden = state.bridges.length > 0;

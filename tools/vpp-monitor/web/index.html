@@ -123,8 +123,9 @@
       <section class="card route-card">
         <h2>网桥</h2>
         <p class="note section-help">网桥把成员接口连成一个二层网络，比如局域网。网关地址是网桥在这个网络里的三层地址，由 VPP 的 BVI 接口（loopback）承载，所以它不出现在下面的接口表里。修改写入 VPP 的启动配置文件 <code id="ifaces-summary"></code>，同时立即生效，60 秒内不确认就自动恢复。</p>
-        <div class="scroll"><table id="ifaces-bridges"><thead><tr><th>网桥</th><th class="text">网关地址</th><th class="text">成员</th><th class="text">状态</th><th>操作</th></tr></thead><tbody></tbody></table></div>
+        <div class="scroll"><table id="ifaces-bridges"><thead><tr><th>网桥</th><th class="text">网关地址</th><th class="text">成员</th><th class="text">状态</th><th class="text">NAT 回流</th><th>操作</th></tr></thead><tbody></tbody></table></div>
         <p class="note" id="ifaces-bridges-empty" hidden>还没有网桥。</p>
+        <p class="note section-help">NAT 回流：局域网里的设备用出口的外部地址（或解析到它的域名）访问本网的端口转发时，把流量转回局域网，服务端看到的来源是出口地址。不开时这种访问会从出口发出去而不通，只能用内网地址。开了以后网关接口收到的每个 IPv4 包都要多做一次检查，满负荷时 NAT 吞吐约降低 8%，所以默认关闭。</p>
         <h3>新建网桥</h3>
         <div class="form-row">
           <label>编号 <input id="bd-id" type="number" min="1" max="16777215" autocomplete="off"></label>

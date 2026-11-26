@@ -52,6 +52,10 @@ type liveState struct {
 	Bridges    map[uint32]bool
 	// NAT is the NAT44 plugin VPP has loaded, empty for none.
 	NAT natMode
+	// HairpinCLI is whether that plugin has "set interface nat44 [ei] hairpinning" (patches
+	// 0043/0044); Hairpin are the interfaces it is on for.
+	HairpinCLI bool
+	Hairpin    map[string]bool
 }
 
 func (s *liveState) find(name string) *liveInterface {
@@ -109,6 +113,20 @@ func (s *realSystem) cli(command string) (string, error) {
 		return reply.Reply, fmt.Errorf("%s: %s", command, strings.TrimSpace(reply.Reply))
 	}
 	return reply.Reply, nil
+}
+
+// readHairpin asks the NAT plugin which interfaces hairpin. A plugin without the patches does not
+// know the command.
+func readHairpin(ch api.Channel, mode natMode) (bool, map[string]bool) {
+	reply := &vlib.CliInbandReply{}
+	if ch.SendRequest(&vlib.CliInband{Cmd: "show nat44 " + mode.word() + "hairpinning interfaces"}).ReceiveReply(reply) != nil || reply.Retval != 0 || cliError.MatchString(reply.Reply) {
+		return false, nil
+	}
+	on := map[string]bool{}
+	for _, name := range strings.Fields(reply.Reply) {
+		on[name] = true
+	}
+	return true, on
 }
 
 func (s *realSystem) read() (*liveState, error) {
@@ -221,6 +239,9 @@ func (s *realSystem) read() (*liveState, error) {
 		state.NAT = natED
 	case ch.CheckCompatiblity((*nat44_ei.Nat44EiShowRunningConfig)(nil), (*nat44_ei.Nat44EiShowRunningConfigReply)(nil)) == nil:
 		state.NAT = natEI
+	}
+	if state.NAT != "" {
+		state.HairpinCLI, state.Hairpin = readHairpin(ch, state.NAT)
 	}
 	// Leases only add a detail, so VPP without the DHCP plugin is no error.
 	if ch.CheckCompatiblity((*dhcp.DHCPClientDump)(nil), (*dhcp.DHCPClientDetails)(nil)) == nil {

@@ -952,3 +952,113 @@ func TestSystemPendingRefuses(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func hairpinLive() *liveState {
+	live := installerLive()
+	live.HairpinCLI, live.Hairpin = true, map[string]bool{}
+	return live
+}
+
+func TestHairpinOnAndOff(t *testing.T) {
+	s, sys, path := setup(t, installerFile, "")
+	sys.live = hairpinLive()
+	state, err := s.SetHairpin("loop0", true, "admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(sys.commands, []string{"set interface nat44 ei hairpinning loop0"}) {
+		t.Fatalf("commands %q", sys.commands)
+	}
+	if got := read(t, path); got != installerFile+"set interface nat44 ei hairpinning loop0\n" {
+		t.Fatalf("the line goes after the exit's NAT lines:\n%s", got)
+	}
+	for _, v := range state.Interfaces {
+		if v.Name == "loop0" && (!v.Hairpin || v.HairpinReason != "" || v.BridgeReason == "") {
+			t.Fatalf("view %+v", v)
+		}
+	}
+	sys.commands = nil
+	s.Rollback("admin")
+	if !slices.Equal(sys.commands, []string{"set interface nat44 ei hairpinning loop0 del"}) {
+		t.Fatalf("undo %q", sys.commands)
+	}
+	if read(t, path) != installerFile {
+		t.Fatal("rollback left the line")
+	}
+
+	s, sys, path = setup(t, installerFile+"set interface nat44 ei hairpinning loop0\n", "")
+	sys.live = hairpinLive()
+	sys.live.Hairpin["loop0"] = true
+	if _, err := s.SetHairpin("loop0", true, "admin"); err == nil {
+		t.Fatal("no change accepted")
+	}
+	if _, err := s.SetNAT("loop0", true, "admin"); err == nil {
+		t.Fatal("a hairpinning LAN became an exit")
+	}
+	if _, err := s.SetBridge("loop0", 0, false, "admin"); err == nil {
+		t.Fatal("a hairpinning interface left its bridge")
+	}
+	if _, err := s.SetHairpin("loop0", false, "admin"); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(sys.commands, []string{"set interface nat44 ei hairpinning loop0 del"}) {
+		t.Fatalf("commands %q", sys.commands)
+	}
+	if read(t, path) != installerFile {
+		t.Fatal("the line was not removed")
+	}
+}
+
+func TestHairpinUnderED(t *testing.T) {
+	s, sys, path := setup(t, edFile, "")
+	sys.live = hairpinLive()
+	sys.live.NAT = natED
+	if _, err := s.SetHairpin("loop0", true, "admin"); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(sys.commands, []string{"set interface nat44 hairpinning loop0"}) {
+		t.Fatalf("commands %q", sys.commands)
+	}
+	if got := read(t, path); !strings.HasSuffix(got, "set interface nat44 out eth0.100 output-feature\nset interface nat44 hairpinning loop0\n") {
+		t.Fatalf("file:\n%s", got)
+	}
+	// The file's line decides the mode, as the other NAT lines do.
+	if parseLine("set int nat44 hairpinning loop0").kind != lineNATHairpin || parseLine("set interface nat44 ei hairpinning loop0 del").kind != lineOther {
+		t.Fatal("parse")
+	}
+}
+
+func TestHairpinRefusals(t *testing.T) {
+	noNAT := strings.Replace(installerFile, "nat44 ei plugin enable sessions 65536 users 4096 user-sessions 16384\nnat44 ei add interface address eth0.100\nset interface nat44 ei out eth0.100 output-feature\n", "", 1)
+	for _, c := range []struct {
+		file, name, want string
+		live           func(*liveState)
+	}{
+		{installerFile, "loop0", "补丁", func(l *liveState) { l.HairpinCLI = false }},
+		{installerFile, "loop0", "没有加载", func(l *liveState) { l.NAT = "" }},
+		{noNAT, "loop0", "出口", nil},
+		{installerFile, "eth0.100", "出口不需要", nil},
+		{installerFile, "eth0", "网桥", nil},
+		{installerFile, "eth1", "IPv4", nil},
+		{installerFile + "set interface nat44 ei in loop0\n", "loop0", "其他方式", nil},
+	} {
+		s, sys, path := setup(t, c.file, "")
+		sys.live = hairpinLive()
+		if c.live != nil {
+			c.live(sys.live)
+		}
+		if _, err := s.SetHairpin(c.name, true, "admin"); err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("%s: %v, want %q", c.name, err, c.want)
+		}
+		if len(sys.commands) != 0 || read(t, path) != c.file {
+			t.Errorf("%s: a refused change did something", c.name)
+		}
+	}
+	// A sub-interface that hairpins is not deleted with its line.
+	s, sys, _ := setup(t, installerFile+"create sub-interface eth0 200 dot1q 200 exact-match\nset interface ip address eth0.200 10.62.0.1/24\nset interface nat44 ei hairpinning eth0.200\n", "")
+	sys.live = hairpinLive()
+	sys.live.Interfaces = append(sys.live.Interfaces, &liveInterface{Index: 9, Name: "eth0.200", Parent: "eth0", Sub: true, SubID: 200, VLAN: 200, Exact: true, Plain: true, Addresses: []netip.Prefix{pfx("10.62.0.1/24")}})
+	if _, err := s.DeleteSubif("eth0.200", "admin"); err == nil || !strings.Contains(err.Error(), "回流") {
+		t.Fatalf("deleted a hairpinning sub-interface: %v", err)
+	}
+}
