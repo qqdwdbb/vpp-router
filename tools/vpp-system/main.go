@@ -130,6 +130,7 @@ func run(args []string) error {
 	fs.StringVar(&opts.WireGuardStore, "wireguard-store", "/etc/vpp/wireguard/wireguard.json", "vpp-wireguard's configurations, whose commands a NAT mode switch checks. Empty to ignore")
 	fs.StringVar(&opts.Sysfs, "sysfs", "/sys", "where sysfs is mounted")
 	fs.StringVar(&opts.RouterEnv, "router-env", "/etc/vpp/router.env", "the installer's router.env: cards added go into its NICS. Empty turns adding cards off")
+	fs.StringVar(&opts.CPUAffinityFile, "cpu-affinity-file", "/etc/systemd/system.conf.d/90-vpp-router-cpu.conf", "installer-managed systemd default CPU affinity, synchronized with worker changes")
 	fs.StringVar(&opts.NICsOrig, "nics-orig", "/var/lib/vpp-router/nics.orig", "where the installer notes each card's first driver. Empty to leave it")
 	fs.StringVar(&opts.PCIIDs, "pci-ids", "/usr/local/share/vpp-router/dpdk-pci-ids", "DPDK's PCI ID table from the build, which says what the PMDs drive")
 	fs.StringVar(&opts.DPDKPlugin, "dpdk-plugin", "", "VPP's dpdk_plugin.so, to see if it names each port of a multi-port device; found from the startup file's plugin path when empty")

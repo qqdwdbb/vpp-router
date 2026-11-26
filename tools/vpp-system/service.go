@@ -49,10 +49,11 @@ type Options struct {
 	// RouterEnv is the installer's router.env, whose NICS vpp-router-ctl binds before VPP starts;
 	// NICsOrig is where the installer notes each card's first driver; PCIIDs is DPDK's PCI ID
 	// table; UnitFile is VPP's unit file. Empty RouterEnv turns adding cards off.
-	RouterEnv string
-	NICsOrig  string
-	PCIIDs    string
-	UnitFile  string
+	RouterEnv       string
+	NICsOrig        string
+	PCIIDs          string
+	UnitFile        string
+	CPUAffinityFile string // systemd's installer-managed default CPU affinity
 	// DPDKPlugin is VPP's dpdk plugin, found from the startup file's plugin path when empty.
 	DPDKPlugin string
 }
@@ -64,7 +65,8 @@ type Pending struct {
 	User        string    `json:"user"`
 	Deadline    time.Time `json:"deadline"`
 	// Files are the files changed, each backed up in the state directory under its base name.
-	Files []string `json:"files"`
+	Files        []string `json:"files"`
+	MissingFiles []string `json:"missing_files,omitempty"` // created by this change; removed on rollback
 	// Device is the card the change added, given back to its driver on rollback.
 	Device *AddedNIC `json:"device,omitempty"`
 	// Retired is the card the change took out of VPP, given back to its driver; a rollback puts
@@ -90,6 +92,7 @@ type Service struct {
 	unitActive func(unit string) bool
 	unitFailed func(unit string) bool
 	stamp      func() (fileStamp, error)
+	reloadCPU  func() error
 	now        func() time.Time
 	sleep      func(time.Duration)
 
@@ -138,6 +141,12 @@ func NewService(opts Options, dial func() (vppAPI, error)) (*Service, error) {
 		unitActive: func(unit string) bool { return systemctl("is-active", "--quiet", unit) == nil },
 		unitFailed: func(unit string) bool { return systemctl("is-failed", "--quiet", unit) == nil },
 		stamp:      func() (fileStamp, error) { return stampOf(opts.APISocket) },
+		reloadCPU: func() error {
+			if err := systemctl("daemon-reload"); err != nil {
+				return err
+			}
+			return systemctl("daemon-reexec")
+		},
 	}
 	if err := os.MkdirAll(opts.StateDir, 0o700); err != nil {
 		return nil, err
@@ -285,6 +294,12 @@ func (s *Service) verify(check func(vppAPI) error) error {
 func (s *Service) restoreFiles(files []string) error {
 	var first error
 	for _, file := range files {
+		if slices.Contains(s.pending.MissingFiles, file) {
+			if err := os.Remove(file); err != nil && !errors.Is(err, os.ErrNotExist) && first == nil {
+				first = err
+			}
+			continue
+		}
 		data, err := os.ReadFile(s.backupPath(file))
 		if err == nil {
 			err = writeFileAtomic(file, data, fileMode(file))
@@ -312,6 +327,13 @@ func (s *Service) rollbackLocked(reason string) {
 		return // the backups stay, for someone to look at
 	}
 	var problems []string
+	cpuRestoreFailed := false
+	if slices.Contains(s.pending.Files, s.opts.CPUAffinityFile) {
+		if err := s.reloadCPU(); err != nil {
+			cpuRestoreFailed = true
+			problems = append(problems, "恢复 systemd CPU 亲和性："+err.Error())
+		}
+	}
 	if device != nil {
 		if err := s.host.giveBack(device); err != nil {
 			problems = append(problems, "网卡没有交还给原驱动："+err.Error())
@@ -325,6 +347,9 @@ func (s *Service) rollbackLocked(reason string) {
 	} else {
 		s.finish(description, "rolled-back", reason)
 	}
+	if cpuRestoreFailed {
+		return
+	} // keep the persisted transaction and backups for retry
 	s.clearPending()
 }
 
@@ -346,8 +371,13 @@ func (s *Service) restartChange(user, description string, files map[string]strin
 		}
 		backups[s.backupPath(path)] = path
 	}
+	var missing []string
 	for _, path := range paths {
 		data, err := os.ReadFile(path)
+		if errors.Is(err, os.ErrNotExist) && path == s.opts.CPUAffinityFile {
+			missing = append(missing, path)
+			continue
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -356,7 +386,7 @@ func (s *Service) restartChange(user, description string, files map[string]strin
 		}
 	}
 	s.nextID++
-	s.pending = &Pending{ID: strconv.FormatInt(s.now().Unix(), 10) + "-" + strconv.Itoa(s.nextID), Description: description, User: user, Files: paths, Device: device, Retired: retired}
+	s.pending = &Pending{ID: strconv.FormatInt(s.now().Unix(), 10) + "-" + strconv.Itoa(s.nextID), Description: description, User: user, Files: paths, MissingFiles: missing, Device: device, Retired: retired}
 	// Saved before anything changes, so a crash from here on still rolls back.
 	s.pending.Deadline = s.now().Add(readyTimeout + verifyTimeout + s.opts.Confirm)
 	if err := s.savePending(); err != nil {
@@ -385,6 +415,12 @@ func (s *Service) restartChange(user, description string, files map[string]strin
 		if err := s.host.giveBack(retired); err != nil {
 			s.rollbackLocked("网卡没有交还给原驱动：" + err.Error())
 			return nil, fmt.Errorf("网卡没有交还给原驱动，已恢复旧配置：%w", err)
+		}
+	}
+	if slices.Contains(paths, s.opts.CPUAffinityFile) {
+		if err := s.reloadCPU(); err != nil {
+			s.rollbackLocked("应用 systemd CPU 亲和性失败：" + err.Error())
+			return nil, fmt.Errorf("应用 systemd CPU 亲和性失败：%w", err)
 		}
 	}
 	log.Printf("audit: %s applied by %s, restarting VPP", description, user)
@@ -881,7 +917,11 @@ func (s *Service) SetThreads(q ThreadsRequest, user string) (*State, error) {
 	for address, n := range q.RxQueues {
 		description += fmt.Sprintf("，%s %d 个收包队列", address, n)
 	}
-	return s.restartChange(user, description, map[string]string{s.opts.StartConf: text}, nil, nil, func(v vppAPI) error {
+	files := map[string]string{s.opts.StartConf: text}
+	if err := s.workerCPUFiles(q.Workers, files); err != nil {
+		return nil, err
+	}
+	return s.restartChange(user, description, files, nil, nil, func(v vppAPI) error {
 		threads, err := v.Threads()
 		if err != nil {
 			return err

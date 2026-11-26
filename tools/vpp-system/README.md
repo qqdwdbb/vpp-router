@@ -31,6 +31,7 @@ sudo systemctl enable --now vpp-system
 | `--interfaces-pending` | `/var/lib/vpp-interfaces/pending.json` | `vpp-interfaces` 待确认的改动，存在时线程和 NAT 的修改被拒绝；空字符串不检查 |
 | `--sysfs` | `/sys` | sysfs 的位置 |
 | `--router-env` | `/etc/vpp/router.env` | 安装器的 `router.env`，加的网卡写进其中的 `NICS`。空字符串关闭加网卡 |
+| `--cpu-affinity-file` | `/etc/systemd/system.conf.d/90-vpp-router-cpu.conf` | 安装器管理的系统默认 CPU 亲和性；`router.env` 有 `SYSTEM_CPUS` 时随线程布局同步更新 |
 | `--nics-orig` | `/var/lib/vpp-router/nics.orig` | 安装器记录每块网卡原驱动的文件，加网卡时补上一行；空字符串不写 |
 | `--pci-ids` | `/usr/local/share/vpp-router/dpdk-pci-ids` | 安装器从 DPDK 构建产物生成的 PCI ID 表，判断这次编译的 PMD 支持哪些网卡 |
 | `--dpdk-plugin` | 从启动文件找 | VPP 的 `dpdk_plugin.so`，判断能否给同一 PCI 设备的几个口分别命名 |
@@ -55,6 +56,14 @@ sudo systemctl enable --now vpp-system
 ### 启动文件
 
 只改顶层的 `cpu` 段，写成一行；段里本程序不管的参数（`relative`、`skip-cores` 等）保留。原来是 `workers N` 或 `coremask-workers` 的，保存后换成 `corelist-workers`。没有 `cpu` 段时加在文件末尾。`dpdk` 里只改 PCI 地址的 `dev` 块的 `num-rx-queues`，没有就加上；`dev default` 和平台 vdev 只显示。文件的其他字节不动，注释、缩进、多行写法都保留。
+
+安装器启用 worker CPU 隔离（`router.env` 包含 `SYSTEM_CPUS`）时，保存线程布局还会同步修改 `SYSTEM_CPUS`、
+systemd 默认 CPU 亲和性和 VPP 单元的 `CPUAffinity`。系统使用在线 CPU 中除 worker 以外的 CPU，包含主线程的 CPU；
+VPP 单元仍可使用全部在线 CPU。没有 worker 时释放全部 CPU。四份文件一起备份并等待确认，超时、手动撤销、
+启动验证失败或管理服务重启后发现过期改动时一起恢复；原先不存在的 systemd 配置文件会在回退时删除。
+应用和恢复时都重新加载 systemd 的默认亲和性，再重启 VPP。`vpp-router-ctl post` 迁移允许使用全部 CPU 或上次
+系统 CPU 范围的用户线程，保留其他自定义亲和性和内核线程；迁移范围保存在 `/run/vpp-router/system-cpus`，
+即使迁移中途失败，回退仍能识别已经迁移过的线程。该联动需要安装新版控制脚本。
 
 检查：CPU 要在线，主线程不能和 worker 同一个 CPU，worker 数不超过 `--max-workers`，队列数不超过网卡的上限（`show hardware-interfaces` 的 `rx: queues N (max M)`，读不到时 16），优先级（1–99）只用于 `fifo`、`rr`。
 

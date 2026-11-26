@@ -51,6 +51,8 @@ STARTUP=$CONF/router.conf
 STATE=/var/lib/vpp-router
 # IPv6-PD 时让 Linux 的 vpp-host 即使开启转发也能接受 VPP 发出的 RA。
 SYSCTL_IPV6=/etc/sysctl.d/99-vpp-router-ipv6.conf
+# VPP worker 所在的 CPU 只留给 VPP：systemd 起的其他进程默认不用这些 CPU（见 gen_systemd_cpu）
+SYSTEMD_CPU=/etc/systemd/system.conf.d/90-vpp-router-cpu.conf
 UNIT_DIR=/etc/systemd/system
 SERVICE=vpp-router
 # 发行版 vpp 软件包的服务：会用 /run/vpp/cli.sock，dpdk 插件还会接管所有绑定到 vfio-pci 的网卡
@@ -261,7 +263,8 @@ detect_platform() {
 	x86_64|aarch64) ;;
 	*) die "不支持的架构 ${ARCH}（只支持 x86_64 和 aarch64）" ;;
 	esac
-	CPUS=$(nproc)
+	# systemd 的默认亲和性可能已排除 worker 核；重新配置仍需按整机 CPU 数生成 VPP 绑核和系统亲和性
+	CPUS=$(nproc --all)
 	MEM_MB=$(awk '/^MemTotal:/ {print int($2 / 1024)}' /proc/meminfo)
 	HUGE_KB=$(awk '/^Hugepagesize:/ {print $2}' /proc/meminfo)
 	HUGE_KB=${HUGE_KB:-0}
@@ -902,6 +905,35 @@ ask_cpu() {
 		ask WORKERS "worker 线程数（0–${max}，0 表示只用主线程）" "$def"
 		[[ $WORKERS =~ ^[0-9]+$ ]] && [ "$WORKERS" -le "$max" ] && break
 	done
+}
+
+# CPU 列表 a 到 b（a = b 时只写一个）
+cpu_range() {
+	if [ "$1" = "$2" ]; then echo "$1"; else echo "$1-$2"; fi
+}
+
+# worker 用的 CPU（2 起）；没有 worker 时为空
+worker_cpus() {
+	[ "${WORKERS:-0}" -gt 0 ] || return 0
+	cpu_range 2 $((1 + WORKERS))
+}
+
+# 留给其他进程的 CPU：worker 以外的全部，包括 CPU 0 和主线程的 CPU。主线程只跑控制面
+# （CLI、API、定时器），和其他进程共用没有关系；网卡中断线程 dpdk-intr 也在主线程的 CPU 上，
+# 由 vpp-router-ctl post 设成实时优先级。没有 worker 时为空，不限制
+system_cpus() {
+	local next=$((2 + ${WORKERS:-0}))
+	[ "${WORKERS:-0}" -gt 0 ] || return 0
+	if [ "$next" -le $((CPUS - 1)) ]; then echo "0-1,$(cpu_range "$next" $((CPUS - 1)))"; else echo "0-1"; fi
+}
+
+# systemd 的默认 CPU 亲和性：之后启动的服务、登录会话都不用 worker 的 CPU。
+# worker 在中断/adaptive 收包时会睡下，其他进程就占用这个 CPU；包到了 worker 要等调度器把它们
+# 换下去，RK3588 开发板上实测最长 10–18 ms。vpp-router.service 自己设成全部 CPU，VPP 再给各线程绑核
+gen_systemd_cpu() {
+	echo "# 由 vpp-router-install.sh 生成：VPP worker 的 CPU（$(worker_cpus)）只留给 VPP"
+	echo "[Manager]"
+	echo "CPUAffinity=$(system_cpus)"
 }
 
 # 收包方式。轮询时 VPP 线程不停查询网卡；中断（VPP 的 adaptive 模式）时包间隔大就休眠，由网卡中断唤醒，
@@ -2361,6 +2393,7 @@ gen_env() {
 	echo "LAN_ULA=${LAN_ULA:-}"
 	echo "PLAT_KMOD=${PLAT_KMOD:-}"
 	echo "RX_MODE=${RX_MODE:-polling}"
+	echo "SYSTEM_CPUS=$(system_cpus)"
 	echo "IPSEC=$IPSEC"
 	echo "IPSEC_NS=$IPSEC_NS"
 	echo "IPSEC_WAN=$([ "$IPSEC" = 1 ] && ipsec_wan_name)"
@@ -2569,6 +2602,9 @@ post() {
 	done
 	$VPPCTL show version >/dev/null 2>&1 || { log "VPP 30 秒内没有响应"; return 1; }
 	[ "${RX_MODE:-polling}" = interrupt ] && set_interrupt
+	if [ "${SYSTEM_CPUS+x}" = x ]; then isolate_workers || return 1; fi
+	# 不看 RX_MODE：面板（系统页）可以在运行时把网卡改成中断收包
+	intr_fifo || true
 	# WAN 用 DHCP 时地址可能还没拿到；失败不影响 VPP，地址到了以后执行 vpp-router-ctl ipsec
 	[ "${IPSEC:-0}" = 1 ] && { ipsec_ns 30 || true; }
 	[ -n "$HOST_CIDR" ] || return 0
@@ -2610,6 +2646,58 @@ set_interrupt() {
 		else
 			log "$vname 使用 adaptive 收包"
 		fi
+	done
+	return 0
+}
+
+# VPP worker 的 CPU 只留给 VPP（SYSTEM_CPUS 由安装脚本按 worker 数生成）。worker 睡下后其他进程会
+# 占用它的 CPU，包到了要等调度器把它们换下去（RK3588 开发板实测最长 10–18 ms）。开机后的新进程由
+# systemd 的 CPUAffinity 保证；这里迁移允许用全部 CPU 或上次系统 CPU 范围的进程。
+# 记录迁移范围，切核、取消 worker 和自动回退时都能重新迁移；单独设过亲和性的、内核线程和 VPP 自己不动
+isolate_workers() {
+	local proc=${PROC:-/proc} vpp=${MAINPID:-$(pidof -s vpp || true)} online d p a last= user=0 n=0 failed=0
+	local state=${CPU_AFFINITY_STATE:-/run/vpp-router/system-cpus} managed target
+	online=$(cat "${CPU_ONLINE:-/sys/devices/system/cpu/online}")
+	target=${SYSTEM_CPUS:-$online}
+	managed=$(cat "$state" 2>/dev/null || true)
+	managed=$(printf '%s\n%s\n%s' "$managed" "$online" "$target")
+	# 在迁移前保留旧、新范围；中途失败或被终止后，回退仍能识别已经迁移了一半的进程
+	mkdir -p "$(dirname "$state")" || return 1
+	printf '%s\n' "$managed" >"$state.next" && mv -f "$state.next" "$state" || return 1
+	for d in "$proc"/[0-9]*/task/[0-9]*; do
+		p=${d#"$proc"/}; p=${p%%/*}
+		[ "$p" = "$vpp" ] && continue
+		if [ "$p" != "$last" ]; then
+			last=$p
+			# 内核线程的 cmdline 为空（proc 文件的大小总是 0，要读出来看）
+			user=0
+			[ -n "$(head -c1 "$proc/$p/cmdline" 2>/dev/null | tr -d '\0')" ] && user=1
+		fi
+		[ "$user" = 1 ] || continue
+		a=$(awk '/^Cpus_allowed_list/ {print $2}' "$d/status" 2>/dev/null) || continue
+		[ "$a" = "$target" ] && continue
+		case $'\n'"$managed"$'\n' in *$'\n'"$a"$'\n'*) ;; *) continue ;; esac
+		if ${TASKSET:-taskset} -p -c "$target" "${d##*/}" >/dev/null 2>&1; then
+			n=$((n + 1))
+		elif [ -e "$d/status" ]; then
+			failed=$((failed + 1))
+		fi
+	done
+	log "$n 个线程改用系统 CPU $target"
+	[ "$failed" = 0 ] || { log "$failed 个线程无法迁移 CPU"; return 1; }
+	printf '%s\n' "$target" >"$state.next" && mv -f "$state.next" "$state" || return 1
+	return 0
+}
+
+# DPDK 的中断线程 dpdk-intr 和主线程共用 CPU，网卡中断由它转给 worker。设成实时优先级，中断到了
+# 马上运行，不用等这个 CPU 上的普通进程（RK3588 开发板实测否则最长 7 ms）。它几乎一直阻塞在
+# epoll 里，实时优先级不会占住 CPU；worker 不能这样设，它轮询时占满 CPU，会被实时限流
+intr_fifo() {
+	local proc=${PROC:-/proc} vpp=${MAINPID:-$(pidof -s vpp || true)} t
+	[ -n "$vpp" ] || return 0
+	for t in "$proc/$vpp"/task/[0-9]*; do
+		[ "$(cat "$t/comm" 2>/dev/null)" = dpdk-intr ] || continue
+		${CHRT:-chrt} -f -p 10 "${t##*/}" && log "dpdk-intr 使用 SCHED_FIFO 10"
 	done
 	return 0
 }
@@ -2737,6 +2825,9 @@ write_units() {
 			platform_prep+="ExecStartPre=/usr/bin/python3 $LIBEXEC/rtl8125-init.py --unit $SERVICE.service --pci ${N_PCI[i]} --kernel-driver $driver"$'\n'
 		done
 	fi
+	# 其他进程默认不用 worker 的 CPU（$SYSTEMD_CPU）；VPP 自己要全部 CPU，再给各线程绑核
+	local affinity=
+	[ -n "$(system_cpus)" ] && affinity="CPUAffinity=$(cpu_range 0 $((CPUS - 1)))"
 	cat >"$UNIT_DIR/$SERVICE.service" <<EOF
 [Unit]
 Description=VPP router (VPP $VPP_TAG, DPDK $DPDK_VERSION)
@@ -2759,6 +2850,7 @@ ExecStopPost=$CTL release
 Restart=on-failure
 RestartSec=5
 LimitMEMLOCK=infinity
+$affinity
 
 [Install]
 WantedBy=multi-user.target
@@ -2811,6 +2903,9 @@ EOF
 	fi
 	write_panel_units
 	systemctl daemon-reload
+	# 新的默认 CPU 亲和性对之后启动的进程生效；已经在运行的由 vpp-router-ctl post 挪走
+	[ "${CPU_CONF_CHANGED:-0}" = 1 ] && systemctl daemon-reexec
+	return 0
 }
 
 # 面板和它转发的服务。它们都不要求 VPP 先启动：各自等 VPP 的 socket，跟随 VPP 重启
@@ -3241,6 +3336,17 @@ PY
 		gen_ipv6_sysctl >"$SYSCTL_IPV6"
 		note "$SYSCTL_IPV6    vpp-host 的 IPv6 RA/SLAAC sysctl"
 	fi
+	# systemd 的 [Manager] 设置要 daemon-reexec 才生效，write_units 据 CPU_CONF_CHANGED 执行
+	local cpu_old=
+	[ -e "$SYSTEMD_CPU" ] && cpu_old=$(cat "$SYSTEMD_CPU")
+	if [ -n "$(system_cpus)" ]; then
+		mkdir -p "$(dirname "$SYSTEMD_CPU")"
+		gen_systemd_cpu >"$SYSTEMD_CPU"
+		note "$SYSTEMD_CPU    其他进程不用 worker 的 CPU $(worker_cpus)"
+	else
+		rm -f "$SYSTEMD_CPU"
+	fi
+	[ "$cpu_old" = "$(cat "$SYSTEMD_CPU" 2>/dev/null)" ] || CPU_CONF_CHANGED=1
 	note "$STARTUP     VPP 启动参数"
 	note "$CONF/router.vpp     接口、桥、NAT（VPP CLI）"
 	note "$CONF/router.env     网卡绑定设置"
@@ -3394,6 +3500,7 @@ do_uninstall() {
 	[ -e "/run/netns/$IPSEC_NS" ] && { ip netns del "$IPSEC_NS" 2>/dev/null || warn "无法删除命名空间 $IPSEC_NS"; }
 	systemctl disable --now "$PD_SERVICE" "$DNS_SERVICE" "$SERVICE" 2>/dev/null || true
 	rm -f "$UNIT_DIR/$SERVICE.service" "$UNIT_DIR/$DNS_SERVICE.service" "$UNIT_DIR/$PD_SERVICE.service"
+	if [ -e "$SYSTEMD_CPU" ]; then rm -f "$SYSTEMD_CPU"; systemctl daemon-reexec || true; fi
 	# 只删本脚本写的面板单元（ExecStart 指向本前缀）
 	for f in vpp-monitor vpp-interfaces vpp-wireguard vpp-firewall vpp-system gate-admin vpp-proxy "$SINGBOX_UNIT"; do
 		bin=$f
