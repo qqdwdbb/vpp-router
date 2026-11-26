@@ -47,6 +47,28 @@ lan0、wan0 都没有 `rx missed`。
 
 worker 睡着时，第一个包的唤醒约多 0.17 ms（中位数）。空闲时 worker 约 2–3% CPU，polling 为 100%。
 
+## x86 对照：ConnectX-3 主机
+
+同日在 ConnectX-3 主机（i5-9300H，intel_pstate powersave，C 态最深 C10，退出延迟 890 µs）上用同样方法测。
+为排除路由器转发造成的成批到达，测试机经交换机在 VLAN 2 上直接向 port0.2 所在网桥的 BVI MAC 发
+原始帧（ethertype 0x88b5，进 dpdk-input 后丢弃）。
+
+窗口同样按 128 轮计，但 x86 循环快得多：有包轮询时一个窗口只有约 15 µs。300 kpps 时一个窗口约 4 个包，
+不到 6 个就算空闲，约 57 µs 后切回中断。结果是 300 kpps 以下 adaptive 基本一直在中断态：
+
+| 输入 | 轮询占时间 | 每秒切到轮询 | 中断态每次唤醒取包 | worker CPU（adaptive / polling） |
+|---|---|---|---|---|
+| 20 kpps | 0.2% | 136 | 1.0 | 36% / 100% |
+| 100 kpps | 0.9% | 556 | 1.1 | 66% / 100% |
+| 300 kpps | 5.4% | 713 | 1.8 | 94% / 100% |
+
+中断态下约每 4.5 µs 被唤醒一次，几乎一包一次；300 kpps 时 CPU 已接近轮询，节省的只是唤醒开销之外的空转。
+没有丢包。经路由器转发时，到达本身就是约 50–95 µs 一批，窗口里没有包，同样很快切回中断。
+
+稀疏 ping（经路由器转发，看差值）：adaptive p50 1.050 ms，polling 0.458 ms，唤醒约多 0.57 ms。
+持有 `/dev/cpu_dma_latency` = 0（禁止深 C 态）后 adaptive p50 0.492 ms，只多约 0.03 ms：x86 的唤醒延迟几乎全是
+C 态退出。RK3588 开发板上唤醒约多 0.17 ms。
+
 ## 发现的问题：切回 adaptive 后停在轮询（0046）
 
 测试中把 lan0、wan0 设为 polling，再按 lan0、wan0 的顺序设回 adaptive，dpdk-input 一直是 polling，
