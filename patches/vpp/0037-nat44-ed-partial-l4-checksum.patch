@@ -1,0 +1,91 @@
+nat44-ed: keep partial L4 checksums partial
+
+Linux behind a TAP with checksum offload (csum-offload or gso) hands VPP its
+own TCP and UDP with VIRTIO_NET_HDR_F_NEEDS_CSUM; the TAP marks them
+VNET_BUFFER_OFFLOAD_F_TCP_CKSUM or _UDP_CKSUM, and the L4 checksum field
+holds only the uncomplemented pseudo-header sum, which the next TAP or the
+NIC completes. NAT44-ED updated that field as if it were a complete
+checksum: the address change went in with the wrong sign, and the port and
+MSS changes went in although the device sums those bytes itself. Leaving
+through a TAP or a NIC without checksum offload hid it, since those rewrite
+the pseudo-header sum or recompute in software; a NIC that takes the field
+as given (DPDK sets the pseudo-header only for Intel drivers) sent a wrong
+checksum.
+
+For such packets add the address delta to the field and leave the port and
+MSS changes out. UDP with a partial sum of zero is updated too: there zero
+is a sum, not "no checksum". ICMP errors' inner packets are always complete
+and keep the old update. Packets without the offload flags take the same
+path as before, behind one flag test on the buffer header NAT reads anyway.
+
+Verified in an isolated VPP with two TAPs with checksum offload, in/out and
+output-feature NAT, static mappings rewriting ports and MSS clamping: the
+pcap of the outside TAP, taken before the TAP rewrites the field, holds the
+translated packet's pseudo-header sum for every TCP and UDP packet, and
+complete checksums stay complete with Linux checksum offload off. Without
+this patch the first SYN already carried a wrong field. Test:
+tests/integration/integration_nat44_partial_checksum.py --nat ed.
+
+--- a/src/plugins/nat/nat44-ed/nat44_ed.c
++++ b/src/plugins/nat/nat44-ed/nat44_ed.c
+@@ -3736,6 +3736,19 @@
+ static_always_inline int
+ nat_6t_flow_icmp_translate (vlib_main_t *vm, snat_main_t *sm, vlib_buffer_t *b,
+ 			    ip4_header_t *ip, nat_6t_flow_t *f);
++
++/* A packet from a TAP with checksum offload, Linux's own TCP or UDP, carries
++ * in its L4 checksum field only the uncomplemented sum of the pseudo-header;
++ * the TAP or the NIC adds the L4 bytes when it sends it. */
++static_always_inline int
++nat_6t_l4_csum_is_partial (vlib_buffer_t *b, ip_protocol_t proto)
++{
++  if (!(b->flags & VNET_BUFFER_F_OFFLOAD))
++    return 0;
++  return (vnet_buffer (b)->oflags &
++	  (IP_PROTOCOL_TCP == proto ? VNET_BUFFER_OFFLOAD_F_TCP_CKSUM :
++				      VNET_BUFFER_OFFLOAD_F_UDP_CKSUM)) != 0;
++}
+ 
+ static_always_inline void
+ nat_6t_flow_ip4_translate (snat_main_t *sm, vlib_buffer_t *b, ip4_header_t *ip,
+@@ -3763,14 +3776,37 @@
+ 	  udp->dst_port = f->rewrite.sport;
+ 	}
+ 
++      /* The pseudo-header sum is not complemented, so the address change
++       * goes in with the opposite sign; ports and the MSS option are L4
++       * bytes the device sums itself. Checksums of an ICMP error's inner
++       * packet are always complete. */
++      int partial =
++	!is_icmp_inner_ip4 && nat_6t_l4_csum_is_partial (b, proto);
++
+       if (IP_PROTOCOL_TCP == proto)
+ 	{
+ 	  ip_csum_t tcp_sum = tcp->checksum;
+-	  tcp_sum = ip_csum_sub_even (tcp_sum, f->l3_csum_delta);
+-	  tcp_sum = ip_csum_sub_even (tcp_sum, f->l4_csum_delta);
+-	  mss_clamping (sm->mss_clamping, tcp, &tcp_sum);
++	  if (PREDICT_FALSE (partial))
++	    {
++	      ip_csum_t unused = 0;
++	      tcp_sum = ip_csum_add_even (tcp_sum, f->l3_csum_delta);
++	      mss_clamping (sm->mss_clamping, tcp, &unused);
++	    }
++	  else
++	    {
++	      tcp_sum = ip_csum_sub_even (tcp_sum, f->l3_csum_delta);
++	      tcp_sum = ip_csum_sub_even (tcp_sum, f->l4_csum_delta);
++	      mss_clamping (sm->mss_clamping, tcp, &tcp_sum);
++	    }
+ 	  tcp->checksum = ip_csum_fold (tcp_sum);
+ 	}
++      else if (IP_PROTOCOL_UDP == proto && PREDICT_FALSE (partial))
++	{
++	  /* zero here is a sum, not "no checksum" */
++	  ip_csum_t udp_sum = udp->checksum;
++	  udp_sum = ip_csum_add_even (udp_sum, f->l3_csum_delta);
++	  udp->checksum = ip_csum_fold (udp_sum);
++	}
+       else if (IP_PROTOCOL_UDP == proto && udp->checksum)
+ 	{
+ 	  ip_csum_t udp_sum = udp->checksum;

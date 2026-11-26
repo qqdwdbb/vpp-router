@@ -1,0 +1,76 @@
+nat44-ei: keep the shared port bitmap from being reallocated under workers
+
+Each pool address has one busy-port bitmap per protocol, shared by all
+workers (each allocating from its own port range) and by the main thread
+(static mappings). It started empty and grew with clib_bitmap_set as higher
+ports were taken, so on a fresh address the first burst of new sessions had
+one worker reallocate the vector while another set bits in the old one,
+corrupting the heap. On a two-worker test router TRex traffic right after a
+VPP restart (8 sources x 1024 ports, so 8192 new sessions at once on both
+workers) made dlmalloc abort in try_realloc_chunk under
+nat44_ei_alloc_default_cb, or deadlock the next allocator. One worker is not
+affected.
+
+Size the bitmap for all 65536 ports (8 KiB per protocol) when the address
+is added, so it is never reallocated, and set and clear bits with atomic
+word operations, as two workers' ranges share a word when the number of
+workers does not divide the port space evenly. Free the bitmaps with the
+per-thread counters when the address is deleted. Only the NAT plugin
+changes.
+
+--- a/src/plugins/nat/nat44-ei/nat44_ei.c
++++ b/src/plugins/nat/nat44-ei/nat44_ei.c
+@@ -187,6 +187,13 @@
+   ip4_address_t l_addr, ip4_address_t e_addr, u16 l_port, u16 e_port,
+   nat_protocol_t proto, u32 vrf_id, u32 sw_if_index, u32 flags);
+ 
++/* An address's port bitmap is shared by all workers, each allocating from
++ * its own port range, and by the main thread for static mappings. It is
++ * sized for every port when the address is added, so that nobody reallocates
++ * it under another thread, and changed with atomic word operations, because
++ * two ranges can share a word. */
++#define NAT44_EI_PORT_BITMAP_WORDS ((1 << 16) / BITS (uword))
++
+ always_inline bool
+ nat44_ei_port_is_used (nat44_ei_address_t *a, u8 proto, u16 port)
+ {
+@@ -197,16 +204,18 @@
+ nat44_ei_port_get (nat44_ei_address_t *a, u8 proto, u16 port)
+ {
+   ASSERT (!nat44_ei_port_is_used (a, proto, port));
+-  a->busy_port_bitmap[proto] =
+-    clib_bitmap_set (a->busy_port_bitmap[proto], port, 1);
++  ASSERT (vec_len (a->busy_port_bitmap[proto]) == NAT44_EI_PORT_BITMAP_WORDS);
++  __atomic_fetch_or (a->busy_port_bitmap[proto] + port / BITS (uword),
++		     (uword) 1 << (port % BITS (uword)), __ATOMIC_RELAXED);
+ }
+ 
+ always_inline void
+ nat44_ei_port_put (nat44_ei_address_t *a, u8 proto, u16 port)
+ {
+   ASSERT (nat44_ei_port_is_used (a, proto, port));
+-  a->busy_port_bitmap[proto] =
+-    clib_bitmap_set (a->busy_port_bitmap[proto], port, 0);
++  ASSERT (vec_len (a->busy_port_bitmap[proto]) == NAT44_EI_PORT_BITMAP_WORDS);
++  __atomic_fetch_and (a->busy_port_bitmap[proto] + port / BITS (uword),
++		      ~((uword) 1 << (port % BITS (uword))), __ATOMIC_RELAXED);
+ }
+ 
+ static u8 *
+@@ -3049,6 +3058,8 @@
+   for (proto = 0; proto < NAT_N_PROTOCOLS; ++proto)
+     {
+       ap->busy_port_bitmap[proto] = 0;
++      vec_validate_init_empty (ap->busy_port_bitmap[proto],
++			       NAT44_EI_PORT_BITMAP_WORDS - 1, 0);
+       ap->busy_ports[proto] = 0;
+       ap->busy_ports_per_thread[proto] = 0;
+       vec_validate_init_empty (ap->busy_ports_per_thread[proto],
+@@ -3144,6 +3155,7 @@
+   for (proto = 0; proto < NAT_N_PROTOCOLS; ++proto)
+     {
+       vec_free (a->busy_ports_per_thread[proto]);
++      vec_free (a->busy_port_bitmap[proto]);
+     }
+ 
+   vec_del1 (nm->addresses, j);

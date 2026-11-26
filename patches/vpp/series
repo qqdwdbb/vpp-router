@@ -34,3 +34,12 @@
 0034-nat44-ed-pool-address-of-egress-interface.patch
 0035-vnet-feature-missing-nodes-debug-log.patch
 0036-nat44-ed-own-icmp-from-pool-address.patch
+0037-nat44-ed-partial-l4-checksum.patch
+0038-nat44-ei-partial-l4-checksum.patch
+0039-nat44-ei-hairpinning-rx-sw-if-index.patch
+0040-nat44-ed-hairpin-reply-sport.patch
+0041-nat44-ei-in2out-after-abf.patch
+0042-nat44-ed-in2out-after-abf.patch
+0043-nat44-ei-hairpin-classify.patch
+0044-nat44-ed-hairpin-classify.patch
+0045-nat44-ei-port-bitmap-race.patch

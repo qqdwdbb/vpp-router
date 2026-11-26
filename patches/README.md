@@ -75,6 +75,87 @@ vnet 记在队列上；端口启动、探测完以后按每个队列的方式打
 只改 dpdk 插件。2026-11-21 在 ConnectX-3 主机上实测：down 时设的三种方式在 up 后都生效，5 次 down/up
 后每个队列只有一个文件、没有 epoll 报错，WAN 口 3 次 down/up 后 worker 休眠时 ping 全部收到。
 
+0037–0045 的目的、遇到的问题和 `ip4-local` 的缺陷见 [NAT44：TAP 校验和 offload 与 hairpinning](../docs/nat44-offload-hairpin.md)。
+
+VPP 0037（NAT44-ED）和 0038（NAT44-EI）让 NAT 正确改写"校验和未完成"的包。TAP 打开
+`csum-offload` 或 `gso` 时，Linux 自己发出的 TCP/UDP 带 `NEEDS_CSUM` 进入 VPP，L4 校验和
+字段里只有伪首部的和（未取反），由下一个 TAP 或网卡补全。NAT 原来把它当完整校验和做增量
+更新：地址增量方向反了，端口和 MSS 的增量本不该加也加了；EI 的 hairpinning 改端口时还把
+UDP 字段清零，丢掉了伪首部。从 TAP 或没有校验和 offload 的网卡发出时会被重写或软件重算，
+看不出来；交给按字段原值计算的网卡（DPDK 只给 Intel 驱动重写伪首部）时发出错误的校验和。
+现在这类包只把地址增量按正确方向加进字段，端口和 MSS 不加（MSS 选项照样改写）；这时 UDP
+字段为 0 也要更新（是和，不是"没有校验和"）。ICMP 差错报文里的内层包总是完整校验和，照旧。
+不带标志的包路径不变，只多一次缓冲区头部的标志判断。ED 只改 `nat_6t_flow_ip4_translate`
+一处；EI 改 in2out 和 out2in 的慢路径、双包和单包快路径，以及 hairpinning，只改各自的
+NAT 插件。
+
+`tests/integration/integration_nat44_partial_checksum.py`（root）在独立的 VPP 里用两个带
+校验和 offload 的 TAP 测 in/out 和输出特性两种接法：静态映射改端口、MSS 钳制改 SYN，回包
+测 out2in。`pcap trace rx tx` 在 TAP 重写字段之前抓包，每个发出的包按它收进来时的样子判断：
+Linux 并非每个包都留部分校验和（有些纯 ACK 带完整校验和），收进来是部分的，发出时必须等于
+翻译后的伪首部和，收进来是完整的，发出时必须仍是完整校验和；再关掉 Linux 的 TX checksum
+各测一遍。有 inside 接口时（`inout`、`mixed`）还测 hairpinning，依赖 0039、0040。2026-11-25
+在 ConnectX-3 主机上：带 0037–0044 的 ED、EI 在 `inout`、`output`、`mixed`、`hairpin` 四种接法、Linux 校验和
+offload 开和关下全部通过；它上面装的不带这些补丁的插件第一个 SYN 就失败（字段 `0xf94c`，
+应为 `0xfe2e`），关掉 offload 时 hairpin 的 TCP 连不上。
+
+VPP 0039（NAT44-EI）和 0040（NAT44-ED）修 hairpinning：从局域网访问路由器外网地址上的
+端口映射（比如局域网设备用公网地址访问自己的端口转发）。上游 26.06 和当前 master 都有这两个
+问题，与本项目其他补丁无关。
+
+- EI：in2out 把源地址换成外网地址后，包按目的地址进 `ip4-local`，应由 `nat44-ei-hairpinning`
+  改写目的地址。EI 把这个节点挂在 `local0` 的 `ip4-local` 特性链上，`ip4-local` 按
+  `ip.rx_sw_if_index` 选特性链，但这个字段只在源地址检查里赋值，而带 `VNET_BUFFER_F_IS_NATED`
+  的包跳过这一检查，字段里是和它共用内存的分片重组数据，特性链落在不存在的接口上，包被
+  punt（`ip4-local: unknown ip protocol`）。0039 在 in2out 标记 `IS_NATED` 的地方把这个字段
+  设成 `local0`。
+- ED：hairpin 会话的 o2i 流把回包的源地址改回外网地址，却没把源端口从内部端口改回映射端口，
+  客户端收到来自内部端口的回包后丢弃。0040 补上源端口改写；非 hairpin 时它等于原端口，
+  不起作用。
+
+只改各自的 NAT 插件。两者都只在有 inside 接口时生效：只有输出特性（安装脚本现在的配法，
+`set interface nat44 out <WAN> output-feature`）时，发往外网地址的包不经过 in2out，VPP 不做
+hairpinning，有没有这两个补丁都一样。在输出特性之外把局域网接口也设成 inside（测试的
+`mixed`）时，EI、ED 的 hairpin 和普通出站都通过了测试，但 2026-11-26 在 ConnectX-3 主机上实测，这样做
+NAT 吞吐从约 6.8 Mpps 降到约 3.0 Mpps：局域网流量在入口转换一次，到出口的输出特性又处理一次，
+而且输出特性的 worker 交接按源地址选 worker，源地址都成了同一个外网地址，全部压到一个 worker
+上。所以不用 `mixed`，改用 0043/0044 的 hairpinning 接法。
+
+VPP 0041（NAT44-EI）和 0042（NAT44-ED）调整 inside 接口上 NAT 的位置：in2out 一侧的特性
+（EI 的 `nat44-ei-in2out`、`nat44-ei-in2out-worker-handoff`、两个 classify；ED 的
+`nat-pre-in2out`、`nat44-ed-in2out`、`nat44-in2out-worker-handoff`、两个 classify）排到
+`abf-input-ip4` 和 `dns-intercept-ip4` 之后。原来 NAT 在前，局域网设为 inside 后，源地址
+先被改成外网地址，按局域网源地址匹配的策略就失效了：2026-11-25 在 ConnectX-3 主机上把 `loop0` 设成
+inside 后，Gate 的 DNS 劫持（ABF，ACL 匹配源 `10.61.30.0/24`）不再生效，局域网 DNS 直接发往
+公网解析器，没有任何报错。调整后被 ABF 重定向的流量不经过 NAT，和只有输出特性时一样；其余
+流量照常转换，out2in 不变。这两个名字只用于排序，不要求加载对应插件。测试里有 inside 接口时
+检查 ABF 重定向收到的是客户端自己的地址：没有 0041 的 EI 在 `inout`、`mixed` 下失败；没有
+0042 的 ED 在 `inout` 下失败，`mixed` 下 ED 本来就不转换经输出特性出口离开的被重定向流量，
+有没有 0042 都通过。
+
+VPP 0043（NAT44-EI）和 0044（NAT44-ED）让不是 inside 的局域网接口也能 hairpin：
+`set interface nat44 ei hairpinning <接口> [del]`（ED 为 `set interface nat44 hairpinning`），
+查看用 `show nat44 ei hairpinning interfaces`（ED 为 `show nat44 hairpinning interfaces`）。它在
+接口的 `ip4-unicast` 上加一个分类节点（排在输入 ACL、分片重组、dns-intercept 和 ABF 之后），
+只把 hairpin 能找到目的地的 TCP/UDP 送进 in2out：EI 是命中 out2in 会话或非恒等的静态映射，
+ED 是命中非恒等的静态映射，或者目的是地址池地址且属于已有的流（hairpin 会话里内部服务的回包）。
+其余流量原样放行，发往外网地址的其他流量（比如 ping 路由器外网地址）也不受影响。ICMP 和非首个
+分片不做 hairpin；在 inside 接口上启用会被拒绝。EI 的 in2out 转换后直接去 `ip4-lookup`，hairpin
+的目的地址由 `ip4-local` 的 `nat44-ei-hairpinning` 改写，依赖 0039；ED 的 in2out 自己改写两个
+地址，依赖 0040，ED 的分类节点是 `nat-default` 的 sibling，因为 ED 的 in2out 按 `nat.arc_next`
+走下一跳，编号必须在同一张下一跳表里（最初没这样做时 in2out 按错的编号循环，堆耗尽）。
+2026-11-26 在 ConnectX-3 主机上（2 个 worker，`loop0` 开 hairpinning，WAN 输出特性，Gate DNS 劫持，
+WireGuard 和桥接出口）：DNS 劫持、各出口、hairpin 和外部访问端口转发都正常；TRex 64 字节 UDP
+在 6 Mpps 以内与只有输出特性时相同，饱和点约 6.2 Mpps（只有输出特性约 6.8 Mpps），是每个
+TCP/UDP 包两三次哈希查找的代价。安装脚本和面板还没有接上这个命令。
+
+```sh
+sudo python3 tests/integration/integration_nat44_partial_checksum.py --nat ed|ei \
+  --plugins <含 nat_plugin.so 或 nat44_ei_plugin.so 的目录> [--vpp /usr/local/bin/vpp] \
+  [--system-plugins /usr/local/lib/vpp-router/vpp_plugins] [--mode inout|output|mixed]... \
+  [--offload on|off]... [--dump]
+```
+
 DPDK 补丁：
 
 | 补丁 | 内容 | 硬件相关 |

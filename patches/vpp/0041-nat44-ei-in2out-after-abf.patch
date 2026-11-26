@@ -1,0 +1,65 @@
+nat44-ei: translate inside traffic after ABF and dns-intercept
+
+On an inside interface the in2out features ran before abf-input-ip4 (and
+dns-intercept-ip4, which runs just before ABF). With the router's LAN set as
+inside, beside the output feature on the WAN, the source was already the
+outside address when an ABF policy matched on the LAN prefix: Gate's DNS
+hijack (an ACL on the LAN prefix, redirecting to vpp-host) stopped
+matching, and LAN DNS went straight to the public resolver, bypassing Gate,
+with no visible error.
+
+Order nat44-ei-in2out, nat44-ei-in2out-worker-handoff, nat44-ei-classify
+and nat44-ei-handoff-classify after both. Traffic an ABF policy redirects
+then leaves the arc untranslated, as it does today with the output feature
+alone; the rest is translated as before. Out2in is unchanged. The names
+are only ordering constraints and need neither plugin loaded.
+
+Verified in an isolated VPP (in/out, output feature, and output feature plus
+inside interface): a redirected query reaches its ABF next hop from the
+client's own address; without this patch, with an inside interface, it
+leaves through the outside interface translated. On the test router with the
+LAN as inside, the hijacked DNS reached Gate from the client again. Test:
+tests/integration/integration_nat44_partial_checksum.py --nat ei.
+
+--- a/src/plugins/nat/nat44-ei/nat44_ei.c
++++ b/src/plugins/nat/nat44-ei/nat44_ei.c
+@@ -73,19 +73,25 @@
+   .arc_name = "ip4-unicast",
+   .node_name = "nat44-ei-classify",
+   .runs_after = VNET_FEATURES ("acl-plugin-in-ip4-fa",
+-			       "ip4-sv-reassembly-feature"),
++			       "ip4-sv-reassembly-feature",
++			       "dns-intercept-ip4",
++			       "abf-input-ip4"),
+ };
+ VNET_FEATURE_INIT (ip4_nat_handoff_classify, static) = {
+   .arc_name = "ip4-unicast",
+   .node_name = "nat44-ei-handoff-classify",
+   .runs_after = VNET_FEATURES ("acl-plugin-in-ip4-fa",
+-			       "ip4-sv-reassembly-feature"),
++			       "ip4-sv-reassembly-feature",
++			       "dns-intercept-ip4",
++			       "abf-input-ip4"),
+ };
+ VNET_FEATURE_INIT (ip4_nat44_ei_in2out, static) = {
+   .arc_name = "ip4-unicast",
+   .node_name = "nat44-ei-in2out",
+   .runs_after = VNET_FEATURES ("acl-plugin-in-ip4-fa",
+-			       "ip4-sv-reassembly-feature"),
++			       "ip4-sv-reassembly-feature",
++			       "dns-intercept-ip4",
++			       "abf-input-ip4"),
+ };
+ VNET_FEATURE_INIT (ip4_nat44_ei_out2in, static) = {
+   .arc_name = "ip4-unicast",
+@@ -109,7 +115,9 @@
+   .arc_name = "ip4-unicast",
+   .node_name = "nat44-ei-in2out-worker-handoff",
+   .runs_after = VNET_FEATURES ("acl-plugin-in-ip4-fa",
+-			       "ip4-sv-reassembly-feature"),
++			       "ip4-sv-reassembly-feature",
++			       "dns-intercept-ip4",
++			       "abf-input-ip4"),
+ };
+ VNET_FEATURE_INIT (ip4_nat44_ei_out2in_worker_handoff, static) = {
+   .arc_name = "ip4-unicast",

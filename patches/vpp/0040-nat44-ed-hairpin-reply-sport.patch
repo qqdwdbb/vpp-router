@@ -1,0 +1,40 @@
+nat44-ed: hairpinned replies leave from the mapped port
+
+When an inside host connects to the outside address and a static mapping
+that leads back inside, the new session's o2i flow matches the reply from
+the mapped service's inside address and port and rewrites its source address
+back to the outside address, but not its source port: the reply left from
+the inside port (5003) instead of the mapped one (6003), and the client,
+which had sent to 6003, dropped it. Both the dynamic and the static-mapping
+branch of slow-path session creation missed it.
+
+Rewrite the source port to the port the client sent to. Without hairpinning
+that port is already the one the flow matches, so nat_6t_l3_l4_csum_calc
+treats the rewrite as no change.
+
+Verified in an isolated VPP: hairpinned TCP connects and UDP gets its answer
+from the mapped port, with in/out interfaces and with the output feature plus
+an inside interface; without this patch TCP never connects. Test:
+tests/integration/integration_nat44_partial_checksum.py --nat ed.
+
+--- a/src/plugins/nat/nat44-ed/nat44_ed_in2out.c
++++ b/src/plugins/nat/nat44-ed/nat44_ed_in2out.c
+@@ -513,6 +513,9 @@
+       else
+ 	{
+ 	  nat_6t_flow_dport_rewrite_set (&s->o2i, l_port);
++	  /* hairpinning: the reply comes from the mapped service's inside
++	   * port and must leave with the port the client sent to */
++	  nat_6t_flow_sport_rewrite_set (&s->o2i, r_port);
+ 	}
+       nat_6t_flow_txfib_rewrite_set (&s->o2i, rx_fib_index);
+       nat_6t_flow_saddr_rewrite_set (&s->o2i, r_addr.as_u32);
+@@ -557,6 +560,8 @@
+ 	  nat_6t_o2i_flow_init (sm, thread_index, s, daddr, dport, sm_addr,
+ 				sm_port, s->out2in.fib_index, proto);
+ 	  nat_6t_flow_dport_rewrite_set (&s->o2i, l_port);
++	  /* hairpinning, as above */
++	  nat_6t_flow_sport_rewrite_set (&s->o2i, r_port);
+ 	}
+       nat_6t_flow_daddr_rewrite_set (&s->o2i, l_addr.as_u32);
+       nat_6t_flow_txfib_rewrite_set (&s->o2i, rx_fib_index);

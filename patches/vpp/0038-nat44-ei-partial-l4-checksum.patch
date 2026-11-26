@@ -1,0 +1,397 @@
+nat44-ei: keep partial L4 checksums partial
+
+The NAT44-EI counterpart of 0037. Linux behind a TAP with checksum offload
+hands VPP its own TCP and UDP with VNET_BUFFER_OFFLOAD_F_TCP_CKSUM or
+_UDP_CKSUM set and only the uncomplemented pseudo-header sum in the L4
+checksum field. EI updated that field as a complete checksum in every place
+it rewrites a port or address: in2out (slow path, the two-packet and the
+single-packet fast loops), out2in (the same three) and hairpinning. The
+address change went in with the wrong sign, the port and MSS changes went
+in although the device sums those bytes, and hairpinning cleared the UDP
+field, which for a partial sum loses the pseudo-header.
+
+For such packets add only the address change, the other way round, and
+leave ports and MSS to the device; MSS clamping still rewrites the option.
+A UDP field of zero is updated too, being a sum. Packets without the
+offload flags keep the old code, behind one flag test on the buffer header.
+
+Verified in an isolated VPP with two TAPs with checksum offload, in/out and
+output-feature NAT, static mappings rewriting ports and MSS clamping: every
+packet the outside and inside TAPs sent was paired with its received copy,
+and each one received partial left with the translated packet's
+pseudo-header sum, each one received complete with a complete checksum.
+Without this patch the first SYN already carried a wrong field. The
+hairpinning changes are exercised once 0039 makes hairpinning work. Test:
+tests/integration/integration_nat44_partial_checksum.py --nat ei.
+
+--- a/src/plugins/nat/nat44-ei/nat44_ei_in2out.c
++++ b/src/plugins/nat/nat44-ei/nat44_ei_in2out.c
+@@ -1197,27 +1197,51 @@
+ 	  if (PREDICT_TRUE (proto0 == NAT_PROTOCOL_TCP))
+ 	    {
+ 	      tcp0->dst = new_dst_port0;
+-	      sum0 = tcp0->checksum;
+-	      sum0 = ip_csum_update (sum0, old_dst_addr0, new_dst_addr0,
+-				     ip4_header_t, dst_address);
+-	      sum0 = ip_csum_update (sum0, old_dst_port0, new_dst_port0,
+-				     ip4_header_t /* cheat */, length);
+-	      tcp0->checksum = ip_csum_fold (sum0);
++	      if (PREDICT_FALSE (nat44_ei_l4_csum_is_partial (b0)))
++		{
++		  tcp0->checksum = nat44_ei_partial_l4_csum (
++		    tcp0->checksum, old_dst_addr0, new_dst_addr0);
++		}
++	      else
++		{
++		  sum0 = tcp0->checksum;
++		  sum0 = ip_csum_update (sum0, old_dst_addr0, new_dst_addr0,
++					 ip4_header_t, dst_address);
++		  sum0 = ip_csum_update (sum0, old_dst_port0, new_dst_port0,
++					 ip4_header_t /* cheat */, length);
++		  tcp0->checksum = ip_csum_fold (sum0);
++		}
+ 	    }
+ 	  else
+ 	    {
+ 	      udp0->dst_port = new_dst_port0;
+-	      udp0->checksum = 0;
++	      if (PREDICT_FALSE (nat44_ei_l4_csum_is_partial (b0)))
++		udp0->checksum = nat44_ei_partial_l4_csum (
++		  udp0->checksum, old_dst_addr0, new_dst_addr0);
++	      else
++		udp0->checksum = 0;
+ 	    }
+ 	}
+       else
+ 	{
++	  if (PREDICT_FALSE (proto0 == NAT_PROTOCOL_UDP &&
++			     nat44_ei_l4_csum_is_partial (b0)))
++	    udp0->checksum = nat44_ei_partial_l4_csum (
++	      udp0->checksum, old_dst_addr0, new_dst_addr0);
+ 	  if (PREDICT_TRUE (proto0 == NAT_PROTOCOL_TCP))
+ 	    {
+-	      sum0 = tcp0->checksum;
+-	      sum0 = ip_csum_update (sum0, old_dst_addr0, new_dst_addr0,
+-				     ip4_header_t, dst_address);
+-	      tcp0->checksum = ip_csum_fold (sum0);
++	      if (PREDICT_FALSE (nat44_ei_l4_csum_is_partial (b0)))
++		{
++		  tcp0->checksum = nat44_ei_partial_l4_csum (
++		    tcp0->checksum, old_dst_addr0, new_dst_addr0);
++		}
++	      else
++		{
++		  sum0 = tcp0->checksum;
++		  sum0 = ip_csum_update (sum0, old_dst_addr0, new_dst_addr0,
++					 ip4_header_t, dst_address);
++		  tcp0->checksum = ip_csum_fold (sum0);
++		}
+ 	    }
+ 	}
+       rv = 1;
+@@ -1572,15 +1596,25 @@
+ 	    {
+ 	      old_port0 = vnet_buffer (b0)->ip.reass.l4_src_port;
+ 	      new_port0 = udp0->src_port = s0->out2in.port;
+-	      sum0 = tcp0->checksum;
+-	      sum0 = ip_csum_update (sum0, old_addr0, new_addr0,
+-				     ip4_header_t,
+-				     dst_address /* changed member */ );
+-	      sum0 = ip_csum_update (sum0, old_port0, new_port0,
+-				     ip4_header_t /* cheat */ ,
+-				     length /* changed member */ );
+-	      mss_clamping (nm->mss_clamping, tcp0, &sum0);
+-	      tcp0->checksum = ip_csum_fold (sum0);
++	      if (PREDICT_FALSE (nat44_ei_l4_csum_is_partial (b0)))
++		{
++		  ip_csum_t unused = 0;
++		  tcp0->checksum = nat44_ei_partial_l4_csum (
++		    tcp0->checksum, old_addr0, new_addr0);
++		  mss_clamping (nm->mss_clamping, tcp0, &unused);
++		}
++	      else
++		{
++		  sum0 = tcp0->checksum;
++		  sum0 = ip_csum_update (sum0, old_addr0, new_addr0,
++					 ip4_header_t,
++					 dst_address /* changed member */ );
++		  sum0 = ip_csum_update (sum0, old_port0, new_port0,
++					 ip4_header_t /* cheat */ ,
++					 length /* changed member */ );
++		  mss_clamping (nm->mss_clamping, tcp0, &sum0);
++		  tcp0->checksum = ip_csum_fold (sum0);
++		}
+ 	    }
+ 	  vlib_increment_simple_counter (is_slow_path ?
+ 					   &nm->counters.slowpath.in2out.tcp :
+@@ -1592,7 +1626,10 @@
+ 	  if (!vnet_buffer (b0)->ip.reass.is_non_first_fragment)
+ 	    {
+ 	      udp0->src_port = s0->out2in.port;
+-	      if (PREDICT_FALSE (udp0->checksum))
++	      if (PREDICT_FALSE (nat44_ei_l4_csum_is_partial (b0)))
++		udp0->checksum = nat44_ei_partial_l4_csum (
++		  udp0->checksum, old_addr0, new_addr0);
++	      else if (PREDICT_FALSE (udp0->checksum))
+ 		{
+ 		  old_port0 = vnet_buffer (b0)->ip.reass.l4_src_port;
+ 		  new_port0 = udp0->src_port;
+@@ -1799,15 +1836,25 @@
+ 	    {
+ 	      old_port1 = vnet_buffer (b1)->ip.reass.l4_src_port;
+ 	      new_port1 = udp1->src_port = s1->out2in.port;
+-	      sum1 = tcp1->checksum;
+-	      sum1 = ip_csum_update (sum1, old_addr1, new_addr1,
+-				     ip4_header_t,
+-				     dst_address /* changed member */ );
+-	      sum1 = ip_csum_update (sum1, old_port1, new_port1,
+-				     ip4_header_t /* cheat */ ,
+-				     length /* changed member */ );
+-	      mss_clamping (nm->mss_clamping, tcp1, &sum1);
+-	      tcp1->checksum = ip_csum_fold (sum1);
++	      if (PREDICT_FALSE (nat44_ei_l4_csum_is_partial (b1)))
++		{
++		  ip_csum_t unused = 0;
++		  tcp1->checksum = nat44_ei_partial_l4_csum (
++		    tcp1->checksum, old_addr1, new_addr1);
++		  mss_clamping (nm->mss_clamping, tcp1, &unused);
++		}
++	      else
++		{
++		  sum1 = tcp1->checksum;
++		  sum1 = ip_csum_update (sum1, old_addr1, new_addr1,
++					 ip4_header_t,
++					 dst_address /* changed member */ );
++		  sum1 = ip_csum_update (sum1, old_port1, new_port1,
++					 ip4_header_t /* cheat */ ,
++					 length /* changed member */ );
++		  mss_clamping (nm->mss_clamping, tcp1, &sum1);
++		  tcp1->checksum = ip_csum_fold (sum1);
++		}
+ 	    }
+ 	  vlib_increment_simple_counter (is_slow_path ?
+ 					   &nm->counters.slowpath.in2out.tcp :
+@@ -1819,7 +1866,10 @@
+ 	  if (!vnet_buffer (b1)->ip.reass.is_non_first_fragment)
+ 	    {
+ 	      udp1->src_port = s1->out2in.port;
+-	      if (PREDICT_FALSE (udp1->checksum))
++	      if (PREDICT_FALSE (nat44_ei_l4_csum_is_partial (b1)))
++		udp1->checksum = nat44_ei_partial_l4_csum (
++		  udp1->checksum, old_addr1, new_addr1);
++	      else if (PREDICT_FALSE (udp1->checksum))
+ 		{
+ 		  old_port1 = vnet_buffer (b1)->ip.reass.l4_src_port;
+ 		  new_port1 = udp1->src_port;
+@@ -2057,16 +2107,26 @@
+ 	    {
+ 	      old_port0 = vnet_buffer (b0)->ip.reass.l4_src_port;
+ 	      new_port0 = udp0->src_port = s0->out2in.port;
+-	      sum0 = tcp0->checksum;
+-	      sum0 =
+-		ip_csum_update (sum0, old_addr0, new_addr0, ip4_header_t,
+-				dst_address /* changed member */ );
+-	      sum0 =
+-		ip_csum_update (sum0, old_port0, new_port0,
+-				ip4_header_t /* cheat */ ,
+-				length /* changed member */ );
+-	      mss_clamping (nm->mss_clamping, tcp0, &sum0);
+-	      tcp0->checksum = ip_csum_fold (sum0);
++	      if (PREDICT_FALSE (nat44_ei_l4_csum_is_partial (b0)))
++		{
++		  ip_csum_t unused = 0;
++		  tcp0->checksum = nat44_ei_partial_l4_csum (
++		    tcp0->checksum, old_addr0, new_addr0);
++		  mss_clamping (nm->mss_clamping, tcp0, &unused);
++		}
++	      else
++		{
++		  sum0 = tcp0->checksum;
++		  sum0 =
++		    ip_csum_update (sum0, old_addr0, new_addr0, ip4_header_t,
++				    dst_address /* changed member */ );
++		  sum0 =
++		    ip_csum_update (sum0, old_port0, new_port0,
++				    ip4_header_t /* cheat */ ,
++				    length /* changed member */ );
++		  mss_clamping (nm->mss_clamping, tcp0, &sum0);
++		  tcp0->checksum = ip_csum_fold (sum0);
++		}
+ 	    }
+ 	  vlib_increment_simple_counter (is_slow_path ?
+ 					   &nm->counters.slowpath.in2out.tcp :
+@@ -2078,7 +2138,10 @@
+ 	  if (!vnet_buffer (b0)->ip.reass.is_non_first_fragment)
+ 	    {
+ 	      udp0->src_port = s0->out2in.port;
+-	      if (PREDICT_FALSE (udp0->checksum))
++	      if (PREDICT_FALSE (nat44_ei_l4_csum_is_partial (b0)))
++		udp0->checksum = nat44_ei_partial_l4_csum (
++		  udp0->checksum, old_addr0, new_addr0);
++	      else if (PREDICT_FALSE (udp0->checksum))
+ 		{
+ 		  old_port0 = vnet_buffer (b0)->ip.reass.l4_src_port;
+ 		  new_port0 = udp0->src_port;
+--- a/src/plugins/nat/nat44-ei/nat44_ei_out2in.c
++++ b/src/plugins/nat/nat44-ei/nat44_ei_out2in.c
+@@ -869,15 +869,23 @@
+ 	    {
+ 	      old_port0 = vnet_buffer (b0)->ip.reass.l4_dst_port;
+ 	      new_port0 = udp0->dst_port = s0->in2out.port;
+-	      sum0 = tcp0->checksum;
+-	      sum0 = ip_csum_update (sum0, old_addr0, new_addr0,
+-				     ip4_header_t,
+-				     dst_address /* changed member */ );
++	      if (PREDICT_FALSE (nat44_ei_l4_csum_is_partial (b0)))
++		{
++		  tcp0->checksum = nat44_ei_partial_l4_csum (
++		    tcp0->checksum, old_addr0, new_addr0);
++		}
++	      else
++		{
++		  sum0 = tcp0->checksum;
++		  sum0 = ip_csum_update (sum0, old_addr0, new_addr0,
++					 ip4_header_t,
++					 dst_address /* changed member */ );
+ 
+-	      sum0 = ip_csum_update (sum0, old_port0, new_port0,
+-				     ip4_header_t /* cheat */ ,
+-				     length /* changed member */ );
+-	      tcp0->checksum = ip_csum_fold (sum0);
++		  sum0 = ip_csum_update (sum0, old_port0, new_port0,
++					 ip4_header_t /* cheat */ ,
++					 length /* changed member */ );
++		  tcp0->checksum = ip_csum_fold (sum0);
++		}
+ 	    }
+ 	  vlib_increment_simple_counter (&nm->counters.slowpath.out2in.tcp,
+ 					 thread_index, sw_if_index0, 1);
+@@ -888,7 +896,10 @@
+ 	    {
+ 	      old_port0 = vnet_buffer (b0)->ip.reass.l4_dst_port;
+ 	      new_port0 = udp0->dst_port = s0->in2out.port;
+-	      if (PREDICT_FALSE (udp0->checksum))
++	      if (PREDICT_FALSE (nat44_ei_l4_csum_is_partial (b0)))
++		udp0->checksum = nat44_ei_partial_l4_csum (
++		  udp0->checksum, old_addr0, new_addr0);
++	      else if (PREDICT_FALSE (udp0->checksum))
+ 		{
+ 		  sum0 = udp0->checksum;
+ 		  sum0 = ip_csum_update (sum0, old_addr0, new_addr0, ip4_header_t, dst_address	/* changed member */
+@@ -1046,15 +1057,23 @@
+ 	      old_port1 = vnet_buffer (b1)->ip.reass.l4_dst_port;
+ 	      new_port1 = udp1->dst_port = s1->in2out.port;
+ 
+-	      sum1 = tcp1->checksum;
+-	      sum1 = ip_csum_update (sum1, old_addr1, new_addr1,
+-				     ip4_header_t,
+-				     dst_address /* changed member */ );
++	      if (PREDICT_FALSE (nat44_ei_l4_csum_is_partial (b1)))
++		{
++		  tcp1->checksum = nat44_ei_partial_l4_csum (
++		    tcp1->checksum, old_addr1, new_addr1);
++		}
++	      else
++		{
++		  sum1 = tcp1->checksum;
++		  sum1 = ip_csum_update (sum1, old_addr1, new_addr1,
++					 ip4_header_t,
++					 dst_address /* changed member */ );
+ 
+-	      sum1 = ip_csum_update (sum1, old_port1, new_port1,
+-				     ip4_header_t /* cheat */ ,
+-				     length /* changed member */ );
+-	      tcp1->checksum = ip_csum_fold (sum1);
++		  sum1 = ip_csum_update (sum1, old_port1, new_port1,
++					 ip4_header_t /* cheat */ ,
++					 length /* changed member */ );
++		  tcp1->checksum = ip_csum_fold (sum1);
++		}
+ 	    }
+ 	  vlib_increment_simple_counter (&nm->counters.slowpath.out2in.tcp,
+ 					 thread_index, sw_if_index1, 1);
+@@ -1065,7 +1084,10 @@
+ 	    {
+ 	      old_port1 = vnet_buffer (b1)->ip.reass.l4_dst_port;
+ 	      new_port1 = udp1->dst_port = s1->in2out.port;
+-	      if (PREDICT_FALSE (udp1->checksum))
++	      if (PREDICT_FALSE (nat44_ei_l4_csum_is_partial (b1)))
++		udp1->checksum = nat44_ei_partial_l4_csum (
++		  udp1->checksum, old_addr1, new_addr1);
++	      else if (PREDICT_FALSE (udp1->checksum))
+ 		{
+ 
+ 		  sum1 = udp1->checksum;
+@@ -1258,15 +1280,23 @@
+ 	      old_port0 = vnet_buffer (b0)->ip.reass.l4_dst_port;
+ 	      new_port0 = udp0->dst_port = s0->in2out.port;
+ 
+-	      sum0 = tcp0->checksum;
+-	      sum0 = ip_csum_update (sum0, old_addr0, new_addr0,
+-				     ip4_header_t,
+-				     dst_address /* changed member */ );
++	      if (PREDICT_FALSE (nat44_ei_l4_csum_is_partial (b0)))
++		{
++		  tcp0->checksum = nat44_ei_partial_l4_csum (
++		    tcp0->checksum, old_addr0, new_addr0);
++		}
++	      else
++		{
++		  sum0 = tcp0->checksum;
++		  sum0 = ip_csum_update (sum0, old_addr0, new_addr0,
++					 ip4_header_t,
++					 dst_address /* changed member */ );
+ 
+-	      sum0 = ip_csum_update (sum0, old_port0, new_port0,
+-				     ip4_header_t /* cheat */ ,
+-				     length /* changed member */ );
+-	      tcp0->checksum = ip_csum_fold (sum0);
++		  sum0 = ip_csum_update (sum0, old_port0, new_port0,
++					 ip4_header_t /* cheat */ ,
++					 length /* changed member */ );
++		  tcp0->checksum = ip_csum_fold (sum0);
++		}
+ 	    }
+ 	  vlib_increment_simple_counter (&nm->counters.slowpath.out2in.tcp,
+ 					 thread_index, sw_if_index0, 1);
+@@ -1277,7 +1307,10 @@
+ 	    {
+ 	      old_port0 = vnet_buffer (b0)->ip.reass.l4_dst_port;
+ 	      new_port0 = udp0->dst_port = s0->in2out.port;
+-	      if (PREDICT_FALSE (udp0->checksum))
++	      if (PREDICT_FALSE (nat44_ei_l4_csum_is_partial (b0)))
++		udp0->checksum = nat44_ei_partial_l4_csum (
++		  udp0->checksum, old_addr0, new_addr0);
++	      else if (PREDICT_FALSE (udp0->checksum))
+ 		{
+ 		  sum0 = udp0->checksum;
+ 		  sum0 = ip_csum_update (sum0, old_addr0, new_addr0, ip4_header_t, dst_address	/* changed member */
+--- a/src/plugins/nat/nat44-ei/nat44_ei_inlines.h
++++ b/src/plugins/nat/nat44-ei/nat44_ei_inlines.h
+@@ -234,4 +234,26 @@
+   return 0;
+ }
+ 
++/* A packet from a TAP with checksum offload, Linux's own TCP or UDP, carries
++ * in its L4 checksum field only the uncomplemented sum of the pseudo-header;
++ * the TAP or the NIC adds the L4 bytes when it sends it. */
++static_always_inline int
++nat44_ei_l4_csum_is_partial (vlib_buffer_t *b)
++{
++  return (b->flags & VNET_BUFFER_F_OFFLOAD) &&
++	 (vnet_buffer (b)->oflags & (VNET_BUFFER_OFFLOAD_F_TCP_CKSUM |
++				     VNET_BUFFER_OFFLOAD_F_UDP_CKSUM));
++}
++
++/* Such a field takes only the address change, the opposite way round to a
++ * complete checksum; ports and the MSS option are L4 bytes the device sums
++ * itself. Zero is a sum there, not "no UDP checksum". */
++static_always_inline u16
++nat44_ei_partial_l4_csum (u16 field, u32 old_addr, u32 new_addr)
++{
++  ip_csum_t sum = field;
++  sum = ip_csum_update (sum, new_addr, old_addr, ip4_header_t, src_address);
++  return ip_csum_fold (sum);
++}
++
+ #endif /* __included_nat44_ei_inlines_h__ */

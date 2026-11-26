@@ -1,0 +1,393 @@
+nat44-ed: hairpinning on a LAN that is not an inside interface
+
+The NAT44-ED counterpart of 0043: "set interface nat44 hairpinning
+<intfc> [del]" (and "show nat44 hairpinning interfaces") puts
+nat44-ed-hairpin-classify on the interface after input ACLs, reassembly,
+dns-intercept and ABF. TCP and UDP to the external address and port of a
+static mapping (identity mappings excepted), and packets to a NAT address
+that match an existing flow (the inside service's replies on a hairpinned
+session, which no static mapping matches), go to nat44-ed-in2out, or to
+nat44-in2out-worker-handoff with more than one worker; the rest continues
+untouched.
+
+The same address array as 0043 (pool addresses and non-identity static
+mappings' external addresses) filters destinations first; it also keeps
+ordinary outbound sessions, whose packets match flows too, out of the flow
+lookup. ED's in2out rewrites both addresses of
+a hairpinned session itself (with 0040 also the reply's source port).
+
+nat44-ed-in2out continues to nat.arc_next, the next feature as seen from
+the node that took it, so the classify node is a sibling of nat-default
+and shares its next-node list; it sets arc_next the way nat-pre-in2out
+does, and the handoff sets it itself. Registering it with its own next
+nodes made in2out loop on a wrong index until the heap ran out.
+
+The interface's FIB is counted for per-VRF sessions as an inside
+interface's would be. Only the NAT plugin changes.
+
+Verified in an isolated VPP as for 0043. Test:
+tests/integration/integration_nat44_partial_checksum.py --nat ed --mode hairpin.
+
+--- a/src/plugins/nat/nat44-ed/nat44_ed.c
++++ b/src/plugins/nat/nat44-ed/nat44_ed.c
+@@ -30,6 +30,8 @@
+ 
+ snat_main_t snat_main;
+ 
++static void nat44_ed_hairpin_addrs_update (void);
++
+ static_always_inline void nat_validate_interface_counters (snat_main_t *sm,
+ 							   u32 sw_if_index);
+ 
+@@ -553,6 +555,7 @@
+       nat44_ed_add_del_interface_fib_reg_entries (*addr, 1);
+       nat44_ed_update_outside_if_addresses (ap);
+     }
++  nat44_ed_hairpin_addrs_update ();
+   return 0;
+ }
+ 
+@@ -625,6 +628,7 @@
+       vec_del1 (sm->twice_nat_addresses, j);
+     }
+ 
++  nat44_ed_hairpin_addrs_update ();
+   return 0;
+ }
+ 
+@@ -1167,6 +1171,7 @@
+ 
+   nat44_ed_add_del_interface_fib_reg_entries (e_addr, 1);
+ 
++  nat44_ed_hairpin_addrs_update ();
+   return 0;
+ }
+ 
+@@ -1265,6 +1270,7 @@
+       nat44_ed_add_del_interface_fib_reg_entries (e_addr, 0);
+     }
+ 
++  nat44_ed_hairpin_addrs_update ();
+   return 0;
+ }
+ 
+@@ -2706,6 +2712,7 @@
+ 
+   sm->forwarding_enabled = 0;
+   sm->enabled = 0;
++  nat44_ed_hairpin_addrs_update ();
+ 
+   return error;
+ }
+@@ -4183,4 +4190,311 @@
+       *original_dst_port = s->i2o.rewrite.sport;
+     }
+   return;
++}
++
++/* Hairpinning for a LAN that is not an inside interface; see the NAT44-EI
++ * nat44-ei-hairpin-classify. With "set interface nat44 hairpinning", only
++ * TCP and UDP to the external address and port of a static mapping (identity
++ * mappings excepted), and packets to a pool address that belong to an
++ * existing flow (the inside service's replies on a hairpinned session), go
++ * to in2out, which rewrites both source and destination; the rest continues
++ * untouched. The node is a sibling of
++ * nat-default: nat44-ed-in2out follows nat.arc_next, the next feature as
++ * seen from this node, so both must index the same next-node list. */
++
++typedef struct
++{
++  u32 hairpin;
++} nat44_ed_hairpin_classify_trace_t;
++
++static u8 *
++format_nat44_ed_hairpin_classify_trace (u8 *s, va_list *args)
++{
++  CLIB_UNUSED (vlib_main_t * vm) = va_arg (*args, vlib_main_t *);
++  CLIB_UNUSED (vlib_node_t * node) = va_arg (*args, vlib_node_t *);
++  nat44_ed_hairpin_classify_trace_t *t =
++    va_arg (*args, nat44_ed_hairpin_classify_trace_t *);
++
++  return format (s, "nat44-ed-hairpin-classify: %s",
++		 t->hairpin ? "to in2out" : "pass");
++}
++
++static char *nat44_ed_hairpin_classify_error_strings[] = {
++  "hairpinned",
++};
++
++static uword *nat44_ed_hairpin_interfaces;
++
++/* The destinations hairpinning can resolve are NAT addresses: pool
++ * addresses and the external addresses of static mappings (identity
++ * mappings excepted). Kept in a small array, rebuilt whenever they change,
++ * so that other traffic needs no hash lookup. A rebuild can run while
++ * workers read it (address changes from DHCP do not hold the barrier):
++ * the count is cleared first and set last, so a reader can at worst
++ * misclassify one packet, which in2out or the next feature still handles. */
++#define NAT44_ED_HAIRPIN_MAX_ADDRS 64
++static u32 nat44_ed_hairpin_addrs[NAT44_ED_HAIRPIN_MAX_ADDRS];
++/* ~0: more addresses than fit, look every packet up */
++static volatile u32 nat44_ed_hairpin_n_addrs;
++
++static_always_inline int
++nat44_ed_hairpin_addr_match (u32 addr)
++{
++  u32 i, n = nat44_ed_hairpin_n_addrs;
++
++  if (PREDICT_FALSE (n == ~0))
++    return 1;
++  for (i = 0; i < n; i++)
++    if (nat44_ed_hairpin_addrs[i] == addr)
++      return 1;
++  return 0;
++}
++
++static void
++nat44_ed_hairpin_addrs_update (void)
++{
++  snat_main_t *nm = &snat_main;
++  u32 addrs[NAT44_ED_HAIRPIN_MAX_ADDRS], n = 0, i;
++  snat_address_t *ap;
++  snat_static_mapping_t *m;
++
++#define _(a)                                                                  \
++  do                                                                          \
++    {                                                                         \
++      for (i = 0; i < n && addrs[i] != (a); i++)                              \
++	;                                                                     \
++      if (i == n)                                                             \
++	{                                                                     \
++	  if (n == NAT44_ED_HAIRPIN_MAX_ADDRS)                                 \
++	    goto overflow;                                                    \
++	  addrs[n++] = (a);                                                   \
++	}                                                                     \
++    }                                                                         \
++  while (0)
++
++  vec_foreach (ap, nm->addresses)
++    _ (ap->addr.as_u32);
++  pool_foreach (m, nm->static_mappings)
++    {
++      if (!is_sm_identity_nat (m->flags))
++	_ (m->external_addr.as_u32);
++    }
++#undef _
++
++  nat44_ed_hairpin_n_addrs = 0;
++  CLIB_MEMORY_STORE_BARRIER ();
++  clib_memcpy_fast (nat44_ed_hairpin_addrs, addrs, n * sizeof (addrs[0]));
++  CLIB_MEMORY_STORE_BARRIER ();
++  nat44_ed_hairpin_n_addrs = n;
++  return;
++
++overflow:
++  nat44_ed_hairpin_n_addrs = ~0;
++}
++
++static_always_inline int
++nat44_ed_hairpin_target (snat_main_t *sm, vlib_buffer_t *b, ip4_header_t *ip)
++{
++  snat_static_mapping_t *m;
++  clib_bihash_kv_16_8_t kv, value;
++  u16 dport = vnet_buffer (b)->ip.reass.l4_dst_port;
++
++  if (ip->protocol != IP_PROTOCOL_TCP && ip->protocol != IP_PROTOCOL_UDP)
++    return 0;
++  if (vnet_buffer (b)->ip.reass.is_non_first_fragment)
++    return 0;
++  /* also keeps ordinary outbound sessions, whose packets match flows too,
++   * out of the flow lookup below */
++  if (!nat44_ed_hairpin_addr_match (ip->dst_address.as_u32))
++    return 0;
++
++  m = nat44_ed_sm_o2i_lookup (sm, ip->dst_address, dport, 0, ip->protocol);
++  if (!m)
++    m = nat44_ed_sm_o2i_lookup (sm, ip->dst_address, 0, 0, 0);
++  if (m)
++    return !is_sm_identity_nat (m->flags);
++
++  init_ed_k (&kv, ip->src_address.as_u32,
++	     vnet_buffer (b)->ip.reass.l4_src_port, ip->dst_address.as_u32,
++	     dport,
++	     ip4_fib_table_get_index_for_sw_if_index (
++	       vnet_buffer (b)->sw_if_index[VLIB_RX]),
++	     ip->protocol);
++  return !clib_bihash_search_16_8 (&sm->flow_hash, &kv, &value);
++}
++
++VLIB_NODE_FN (nat44_ed_hairpin_classify_node)
++(vlib_main_t *vm, vlib_node_runtime_t *node, vlib_frame_t *frame)
++{
++  snat_main_t *sm = &snat_main;
++  u32 *from = vlib_frame_vector_args (frame), n_left = frame->n_vectors;
++  vlib_buffer_t *bufs[VLIB_FRAME_SIZE], **b = bufs;
++  u16 nexts[VLIB_FRAME_SIZE], *next = nexts;
++  int handoff = sm->num_workers > 1;
++  u32 n_hairpin = 0;
++
++  vlib_get_buffers (vm, from, bufs, n_left);
++  for (; n_left > 0; n_left--, b++, next++)
++    {
++      ip4_header_t *ip = vlib_buffer_get_current (b[0]);
++      int hairpin =
++	sm->enabled && PREDICT_FALSE (nat44_ed_hairpin_target (sm, b[0], ip));
++      u32 next0;
++
++      if (hairpin && handoff)
++	{
++	  /* the handoff takes the next feature itself */
++	  next[0] = NAT_NEXT_IN2OUT_CLASSIFY;
++	  n_hairpin++;
++	}
++      else
++	{
++	  vnet_feature_next (&next0, b[0]);
++	  if (hairpin)
++	    {
++	      /* as nat-pre-in2out does */
++	      vnet_buffer2 (b[0])->nat.arc_next = next0;
++	      next0 = NAT_NEXT_IN2OUT_ED_FAST_PATH;
++	      n_hairpin++;
++	    }
++	  next[0] = next0;
++	}
++
++      if (PREDICT_FALSE ((node->flags & VLIB_NODE_FLAG_TRACE) &&
++			 (b[0]->flags & VLIB_BUFFER_IS_TRACED)))
++	{
++	  nat44_ed_hairpin_classify_trace_t *t =
++	    vlib_add_trace (vm, node, b[0], sizeof (*t));
++	  t->hairpin = hairpin;
++	}
++    }
++
++  vlib_buffer_enqueue_to_next (vm, node, from, nexts, frame->n_vectors);
++  vlib_node_increment_counter (vm, node->node_index, 0, n_hairpin);
++  return frame->n_vectors;
+ }
++
++VLIB_REGISTER_NODE (nat44_ed_hairpin_classify_node) = {
++  .name = "nat44-ed-hairpin-classify",
++  .vector_size = sizeof (u32),
++  .format_trace = format_nat44_ed_hairpin_classify_trace,
++  .type = VLIB_NODE_TYPE_INTERNAL,
++  .n_errors = ARRAY_LEN (nat44_ed_hairpin_classify_error_strings),
++  .error_strings = nat44_ed_hairpin_classify_error_strings,
++  .sibling_of = "nat-default",
++};
++
++VNET_FEATURE_INIT (ip4_nat44_ed_hairpin_classify, static) = {
++  .arc_name = "ip4-unicast",
++  .node_name = "nat44-ed-hairpin-classify",
++  .runs_after = VNET_FEATURES ("acl-plugin-in-ip4-fa",
++			       "ip4-sv-reassembly-feature",
++			       "dns-intercept-ip4",
++			       "abf-input-ip4"),
++};
++
++static int
++nat44_ed_hairpin_interface_enable_disable (u32 sw_if_index, int enable)
++{
++  snat_main_t *sm = &snat_main;
++  snat_interface_t *i;
++  int rv;
++
++  fail_if_disabled ();
++
++  if (enable == clib_bitmap_get (nat44_ed_hairpin_interfaces, sw_if_index))
++    return enable ? VNET_API_ERROR_VALUE_EXIST : VNET_API_ERROR_NO_SUCH_ENTRY;
++
++  /* an inside interface already sends everything through in2out */
++  pool_foreach (i, sm->interfaces)
++    {
++      if (i->sw_if_index == sw_if_index && nat44_ed_is_interface_inside (i))
++	return VNET_API_ERROR_FEATURE_ALREADY_ENABLED;
++    }
++
++  if (enable)
++    nat_validate_interface_counters (sm, sw_if_index);
++  rv = ip4_sv_reass_enable_disable_with_refcnt (sw_if_index, enable);
++  if (rv)
++    return rv;
++  rv = vnet_feature_enable_disable ("ip4-unicast", "nat44-ed-hairpin-classify",
++				    sw_if_index, enable, 0, 0);
++  if (rv)
++    return rv;
++  /* sessions are counted per FIB, as for an inside interface */
++  update_per_vrf_sessions_pool (
++    fib_table_get_index_for_sw_if_index (FIB_PROTOCOL_IP4, sw_if_index),
++    !enable);
++
++  nat44_ed_hairpin_interfaces =
++    clib_bitmap_set (nat44_ed_hairpin_interfaces, sw_if_index, enable);
++  return 0;
++}
++
++static clib_error_t *
++nat44_ed_hairpin_command_fn (vlib_main_t *vm, unformat_input_t *input,
++			     vlib_cli_command_t *cmd)
++{
++  vnet_main_t *vnm = vnet_get_main ();
++  u32 sw_if_index = ~0;
++  int enable = 1, rv;
++
++  while (unformat_check_input (input) != UNFORMAT_END_OF_INPUT)
++    {
++      if (unformat (input, "%U", unformat_vnet_sw_interface, vnm,
++		    &sw_if_index))
++	;
++      else if (unformat (input, "del"))
++	enable = 0;
++      else
++	return clib_error_return (0, "unknown input '%U'",
++				  format_unformat_error, input);
++    }
++  if (sw_if_index == ~0)
++    return clib_error_return (0, "interface required");
++
++  rv = nat44_ed_hairpin_interface_enable_disable (sw_if_index, enable);
++  switch (rv)
++    {
++    case 0:
++      return 0;
++    case VNET_API_ERROR_VALUE_EXIST:
++      return clib_error_return (0, "hairpinning already enabled on %U",
++				format_vnet_sw_if_index_name, vnm,
++				sw_if_index);
++    case VNET_API_ERROR_NO_SUCH_ENTRY:
++      return clib_error_return (0, "hairpinning not enabled on %U",
++				format_vnet_sw_if_index_name, vnm,
++				sw_if_index);
++    case VNET_API_ERROR_FEATURE_ALREADY_ENABLED:
++      return clib_error_return (0, "%U is an inside interface",
++				format_vnet_sw_if_index_name, vnm,
++				sw_if_index);
++    default:
++      return clib_error_return (0, "failed: %d", rv);
++    }
++}
++
++VLIB_CLI_COMMAND (nat44_ed_hairpin_command, static) = {
++  .path = "set interface nat44 hairpinning",
++  .function = nat44_ed_hairpin_command_fn,
++  .short_help = "set interface nat44 hairpinning <intfc> [del]",
++};
++
++static clib_error_t *
++nat44_ed_show_hairpin_command_fn (vlib_main_t *vm, unformat_input_t *input,
++				  vlib_cli_command_t *cmd)
++{
++  u32 sw_if_index;
++
++  clib_bitmap_foreach (sw_if_index, nat44_ed_hairpin_interfaces)
++    vlib_cli_output (vm, " %U", format_vnet_sw_if_index_name,
++		     vnet_get_main (), sw_if_index);
++  return 0;
++}
++
++VLIB_CLI_COMMAND (nat44_ed_show_hairpin_command, static) = {
++  .path = "show nat44 hairpinning interfaces",
++  .function = nat44_ed_show_hairpin_command_fn,
++  .short_help = "show nat44 hairpinning interfaces",
++};

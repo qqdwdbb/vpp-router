@@ -1,0 +1,62 @@
+nat44-ei: let ip4-local find the hairpinning node
+
+With an inside interface, a packet from inside to the outside address and a
+mapped port is translated by in2out (source to the outside address), looked
+up, and lands on ip4-local, where nat44-ei-hairpinning should rewrite the
+destination to the inside service. EI enables that node on the ip4-local
+arc of local0, and ip4-local starts the arc on ip.rx_sw_if_index. But
+ip4-local sets that field only in its source check, which it skips for
+packets marked VNET_BUFFER_F_IS_NATED (IP_LOCAL_PACKET_TYPE_NAT), so for
+exactly these packets the field kept whatever the reassembly data that
+shares it left there, the arc ran on no real interface and the packet was
+punted ("ip4-local: unknown ip protocol"). Hairpinning never worked; VPP
+master has the same code.
+
+Set ip.rx_sw_if_index to local0 where in2out marks a packet NATed. Nothing
+after in2out reads the reassembly fields it overlaps. Only the NAT plugin
+changes.
+
+With the output feature alone (no inside interface), packets to the outside
+address never pass in2out and are not hairpinned; that is unchanged.
+
+Verified in an isolated VPP: from an inside host to the outside address and
+a static mapping that leads back to it, TCP connects and UDP gets its answer
+from the mapped port, with in/out interfaces and with the output feature plus
+an inside interface; without this patch the SYN is punted. Test:
+tests/integration/integration_nat44_partial_checksum.py --nat ei.
+
+--- a/src/plugins/nat/nat44-ei/nat44_ei_in2out.c
++++ b/src/plugins/nat/nat44-ei/nat44_ei_in2out.c
+@@ -1577,6 +1577,10 @@
+ 				nat_value_get_session_index (&value0));
+ 
+       b0->flags |= VNET_BUFFER_F_IS_NATED;
++      /* ip4-local skips its source check for NATed packets and so never
++       * sets rx_sw_if_index, which picks the ip4-local features; set it to
++       * local0, where nat44-ei-hairpinning is enabled */
++      vnet_buffer (b0)->ip.rx_sw_if_index = 0;
+ 
+       old_addr0 = ip0->src_address.as_u32;
+       ip0->src_address = s0->out2in.addr;
+@@ -1818,6 +1822,10 @@
+ 				nat_value_get_session_index (&value1));
+ 
+       b1->flags |= VNET_BUFFER_F_IS_NATED;
++      /* ip4-local skips its source check for NATed packets and so never
++       * sets rx_sw_if_index, which picks the ip4-local features; set it to
++       * local0, where nat44-ei-hairpinning is enabled */
++      vnet_buffer (b1)->ip.rx_sw_if_index = 0;
+ 
+       old_addr1 = ip1->src_address.as_u32;
+       ip1->src_address = s1->out2in.addr;
+@@ -2089,6 +2097,10 @@
+ 				nat_value_get_session_index (&value0));
+ 
+       b0->flags |= VNET_BUFFER_F_IS_NATED;
++      /* ip4-local skips its source check for NATed packets and so never
++       * sets rx_sw_if_index, which picks the ip4-local features; set it to
++       * local0, where nat44-ei-hairpinning is enabled */
++      vnet_buffer (b0)->ip.rx_sw_if_index = 0;
+ 
+       old_addr0 = ip0->src_address.as_u32;
+       ip0->src_address = s0->out2in.addr;

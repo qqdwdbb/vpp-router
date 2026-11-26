@@ -1,0 +1,71 @@
+nat44-ed: translate inside traffic after ABF and dns-intercept
+
+The NAT44-ED counterpart of 0041: on an inside interface nat-pre-in2out
+(and the other in2out-side features) ran before abf-input-ip4 and
+dns-intercept-ip4, so policies matching the LAN source never saw it.
+
+Order nat-pre-in2out, nat44-ed-in2out, nat44-in2out-worker-handoff,
+nat44-ed-classify and nat44-handoff-classify after both. Out2in is
+unchanged.
+
+Verified in an isolated VPP: with in/out interfaces a redirected query now
+reaches its ABF next hop from the client's own address; without this patch
+it leaves through the outside interface translated. With the output feature
+plus an inside interface ED left the redirected query alone even without
+this patch (its in2out does not translate traffic for an output-feature
+exit), and still does with it. Test:
+tests/integration/integration_nat44_partial_checksum.py --nat ed.
+
+--- a/src/plugins/nat/nat44-ed/nat44_ed.c
++++ b/src/plugins/nat/nat44-ed/nat44_ed.c
+@@ -70,7 +70,9 @@
+   .arc_name = "ip4-unicast",
+   .node_name = "nat-pre-in2out",
+   .runs_after = VNET_FEATURES ("acl-plugin-in-ip4-fa",
+-			       "ip4-sv-reassembly-feature"),
++			       "ip4-sv-reassembly-feature",
++			       "dns-intercept-ip4",
++			       "abf-input-ip4"),
+ };
+ VNET_FEATURE_INIT (nat_pre_out2in, static) = {
+   .arc_name = "ip4-unicast",
+@@ -83,18 +85,24 @@
+   .arc_name = "ip4-unicast",
+   .node_name = "nat44-ed-classify",
+   .runs_after = VNET_FEATURES ("acl-plugin-in-ip4-fa",
+-			       "ip4-sv-reassembly-feature"),
++			       "ip4-sv-reassembly-feature",
++			       "dns-intercept-ip4",
++			       "abf-input-ip4"),
+ };
+ VNET_FEATURE_INIT (ip4_nat_handoff_classify, static) = {
+   .arc_name = "ip4-unicast",
+   .node_name = "nat44-handoff-classify",
+   .runs_after = VNET_FEATURES ("acl-plugin-in-ip4-fa",
+-			       "ip4-sv-reassembly-feature"),
++			       "ip4-sv-reassembly-feature",
++			       "dns-intercept-ip4",
++			       "abf-input-ip4"),
+ };
+ VNET_FEATURE_INIT (snat_in2out_worker_handoff, static) = {
+   .arc_name = "ip4-unicast",
+   .node_name = "nat44-in2out-worker-handoff",
+-  .runs_after = VNET_FEATURES ("acl-plugin-in-ip4-fa"),
++  .runs_after = VNET_FEATURES ("acl-plugin-in-ip4-fa",
++			       "dns-intercept-ip4",
++			       "abf-input-ip4"),
+ };
+ VNET_FEATURE_INIT (snat_out2in_worker_handoff, static) = {
+   .arc_name = "ip4-unicast",
+@@ -105,7 +113,10 @@
+ VNET_FEATURE_INIT (ip4_nat44_ed_in2out, static) = {
+   .arc_name = "ip4-unicast",
+   .node_name = "nat44-ed-in2out",
+-  .runs_after = VNET_FEATURES ("acl-plugin-in-ip4-fa","ip4-sv-reassembly-feature"),
++  .runs_after = VNET_FEATURES ("acl-plugin-in-ip4-fa",
++			       "ip4-sv-reassembly-feature",
++			       "dns-intercept-ip4",
++			       "abf-input-ip4"),
+ };
+ VNET_FEATURE_INIT (ip4_nat44_ed_out2in, static) = {
+   .arc_name = "ip4-unicast",
