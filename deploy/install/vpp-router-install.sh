@@ -2464,6 +2464,10 @@ bind() {
 }
 
 prep() {
+	# 在启动收包之前恢复最低频率保护，避免开机或重启后的第一个突发仍从过低频率起步
+	if [ -r "$CONF/system.json" ] && grep -q '"frequency_floors"' "$CONF/system.json"; then
+		"$PREFIX/bin/vpp-system" frequency-guard --config "$CONF/system.json" || return 1
+	fi
 	modprobe tun 2>/dev/null || true
 	modprobe vhost_net 2>/dev/null || true
 	# VPP 在命名空间里建 IPsec 的 TAP，命名空间要先存在
@@ -2991,6 +2995,7 @@ EOF
 	cat >"$UNIT_DIR/vpp-system.service" <<EOF
 [Unit]
 Description=VPP system settings and maintenance: threads, DPDK cards, RX modes and placement, NAT44, CPU governors, services, logs, network tests, backup
+After=cpufrequtils.service rc-local.service
 # 改线程、加网卡和改 NAT 会话表时重启 VPP 并等待确认，所以不随 VPP 停止；VPP 重启后由它恢复收包设置
 # 加的网卡写进 router.env 的 NICS（vpp-router-ctl prep 绑定），原驱动记入 nics.orig（--restore 交还）
 

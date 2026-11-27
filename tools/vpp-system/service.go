@@ -158,7 +158,15 @@ func NewService(opts Options, dial func() (vppAPI, error)) (*Service, error) {
 func (s *Service) Start() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// Establish the guard before selecting a governor that can lower the clock.
+	floorError := applyFrequencyFloors(s.host, s.cfg.FrequencyFloors)
+	if floorError != nil {
+		log.Printf("frequency floor: %v", floorError)
+	}
 	for policy, governor := range s.cfg.Governors {
+		if _, guarded := s.cfg.FrequencyFloors[policy]; guarded && floorError != nil {
+			continue
+		}
 		if err := s.host.setGovernor(policy, governor); err != nil {
 			log.Printf("governor: %v", err)
 		} else {
@@ -1215,6 +1223,11 @@ func (s *Service) SetGovernor(policy, governor, user string) (*State, error) {
 	if governor == "" {
 		delete(cfg.Governors, policy)
 	} else {
+		if floor, guarded := cfg.FrequencyFloors[policy]; guarded {
+			if _, err := s.host.setFrequencyFloor(policy, floor.MinKHz); err != nil {
+				return nil, err
+			}
+		}
 		if err := s.host.setGovernor(policy, governor); err != nil {
 			return nil, err
 		}
@@ -1297,6 +1310,7 @@ type State struct {
 	CPUs             []cpuInfo         `json:"cpus"`
 	Governors        []policyInfo      `json:"governors"`
 	GovernorSettings map[string]string `json:"governor_settings"`
+	FrequencyFloors  map[string]int    `json:"frequency_floors"`
 	Threads          ThreadsView       `json:"threads"`
 	Interfaces       []RxView          `json:"interfaces"`
 	NAT              NATView           `json:"nat"`
@@ -1357,10 +1371,14 @@ func (s *Service) devices(conf *startConf, hw []hardware) []DeviceView {
 func (s *Service) stateLocked() *State {
 	state := &State{
 		StartConf: s.opts.StartConf, CLIFile: s.opts.CLIFile, CanRestart: s.opts.VPPUnit != "",
-		ApplyError: s.applyError, Warnings: s.warnings, Pending: s.pending, Last: s.last,
+		ApplyError: s.applyError, Warnings: append([]string(nil), s.warnings...), Pending: s.pending, Last: s.last,
 		GovernorSettings: s.cfg.Governors, Interfaces: []RxView{},
 		Threads: ThreadsView{MaxWorkers: s.opts.MaxWorkers, Policies: schedulerPolicies, Devices: []DeviceView{}},
 		NAT:     NATView{Defaults: defaultTimeouts},
+	}
+	state.FrequencyFloors = map[string]int{}
+	for policy, floor := range s.cfg.FrequencyFloors {
+		state.FrequencyFloors[policy] = floor.MinKHz
 	}
 	if s.pending != nil {
 		state.SecondsRemaining = max(0, s.pending.Deadline.Sub(s.now()).Seconds())
@@ -1371,6 +1389,12 @@ func (s *Service) stateLocked() *State {
 	}
 	var errs []string
 	state.Governors = s.host.policies()
+	for policy, floor := range s.cfg.FrequencyFloors {
+		i := slices.IndexFunc(state.Governors, func(p policyInfo) bool { return p.Name == policy })
+		if i < 0 || state.Governors[i].ScalingMinKHz < floor.MinKHz {
+			state.Warnings = append(state.Warnings, fmt.Sprintf("%s 的最低频率保护未生效，要求 %d kHz", policy, floor.MinKHz))
+		}
+	}
 	cpus, err := s.host.cpus(state.Governors)
 	if err != nil {
 		errs = append(errs, err.Error())

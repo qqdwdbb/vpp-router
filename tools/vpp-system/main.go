@@ -22,6 +22,13 @@ import (
 const maxBody = 1 << 16
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "frequency-guard" {
+		if err := runFrequencyGuard(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
 	if len(os.Args) > 1 && os.Args[1] == "nat-mode" {
 		if err := runNATMode(os.Args[2:]); err != nil {
 			fmt.Fprintln(os.Stderr, err)
@@ -61,6 +68,7 @@ func (s *Service) Handler(maint *Maint) http.Handler {
 		Thread    *int   `json:"thread"`
 		Policy    string `json:"policy"`
 		Governor  string `json:"governor"`
+		MinKHz    int    `json:"min_khz"`
 		AddNICRequest
 	}
 	mux := http.NewServeMux()
@@ -79,11 +87,12 @@ func (s *Service) Handler(maint *Maint) http.Handler {
 			}
 			return s.SetRxPlacement(q.Interface, q.Queue, *q.Thread, u)
 		},
-		"governor":    func(q request, u string) (*State, error) { return s.SetGovernor(q.Policy, q.Governor, u) },
-		"nics/add":    func(q request, u string) (*State, error) { return s.AddNIC(q.AddNICRequest, u) },
-		"nics/retire": func(q request, u string) (*State, error) { return s.RetireNIC(q.AddNICRequest.Name, u) },
-		"confirm":     func(_ request, u string) (*State, error) { return s.Confirm(u) },
-		"rollback":    func(_ request, u string) (*State, error) { return s.Rollback(u) },
+		"governor":        func(q request, u string) (*State, error) { return s.SetGovernor(q.Policy, q.Governor, u) },
+		"frequency-floor": func(q request, u string) (*State, error) { return s.SetFrequencyFloor(q.Policy, q.MinKHz, u) },
+		"nics/add":        func(q request, u string) (*State, error) { return s.AddNIC(q.AddNICRequest, u) },
+		"nics/retire":     func(q request, u string) (*State, error) { return s.RetireNIC(q.AddNICRequest.Name, u) },
+		"confirm":         func(_ request, u string) (*State, error) { return s.Confirm(u) },
+		"rollback":        func(_ request, u string) (*State, error) { return s.Rollback(u) },
 	}
 	for path, action := range actions {
 		mux.HandleFunc("POST /system/"+path, func(w http.ResponseWriter, r *http.Request) {

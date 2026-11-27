@@ -340,8 +340,8 @@
       </section>
       <section class="card route-card">
         <h2>CPU 频率</h2>
-        <p class="note section-help">Linux 的 cpufreq 调速器，每组共用频率的 CPU 一个。performance 固定最高频率，VPP 轮询时延迟最稳；ondemand、schedutil 按负载升降频，省电，但流量突然增大时升频要几毫秒，可能少量丢包。修改立即生效，开机时由 vpp-system 重新设置；“缺省”是系统自己的设置，选它时现在的调速器不变。</p>
-        <div class="scroll"><table id="sys-governors"><thead><tr><th class="text">CPU</th><th class="text">当前频率</th><th class="text">范围</th><th class="text">当前调速器</th><th class="text">设置</th><th>操作</th></tr></thead><tbody></tbody></table></div>
+        <p class="note section-help">Linux 的 cpufreq 调速器，每组共用频率的 CPU 一个。performance 固定最高频率；ondemand、schedutil 按负载升降频。流量突然增大时，升频可能需要几毫秒；设置经过突发压测的最低频率，可以在升频期间保留足够的处理能力，下限低于最高频率时仍能降频省电。下限影响同组所有 CPU，需要按实际转发负载验证。修改立即生效，开机时重新设置；调速器“缺省”保留现在的方式，“恢复下限”恢复启用保护前的下限。</p>
+        <div class="scroll"><table id="sys-governors"><thead><tr><th class="text">CPU</th><th class="text">当前频率</th><th class="text">当前范围</th><th class="text">当前调速器</th><th class="text">设置</th><th>操作</th><th class="text">最低频率保护</th></tr></thead><tbody></tbody></table></div>
         <p class="note" id="sys-governors-empty" hidden>这台机器没有 cpufreq（虚拟机或固定频率），不能设置调速器。</p>
       </section>
       <section class="card route-card">

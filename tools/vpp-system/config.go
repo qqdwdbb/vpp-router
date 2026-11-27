@@ -18,6 +18,13 @@ type Config struct {
 	RxPlacement map[string]map[uint32]uint32 `json:"rx_placement,omitempty"`
 	// Governors is the cpufreq governor by policy, such as "policy4": "ondemand".
 	Governors map[string]string `json:"governors,omitempty"`
+	// FrequencyFloors retain the original limit so disabling a guard restores it.
+	FrequencyFloors map[string]frequencyFloor `json:"frequency_floors,omitempty"`
+}
+
+type frequencyFloor struct {
+	MinKHz      int `json:"min_khz"`
+	OriginalKHz int `json:"original_khz"`
 }
 
 func loadConfig(path string) (*Config, error) {

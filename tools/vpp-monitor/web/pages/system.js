@@ -40,7 +40,7 @@ async function apply(path, body, description, restart) {
     if (!confirm(description + note)) return false;
   }
   page.busy = true;
-  for (const element of document.querySelectorAll('#page-system select[data-dirty]')) delete element.dataset.dirty;
+  for (const element of document.querySelectorAll('#page-system select[data-dirty], #page-system input[data-dirty]')) delete element.dataset.dirty;
   message(restart ? '正在重启 VPP，等它按新设置运行…' : '正在应用…');
   render();
   try {
@@ -89,6 +89,7 @@ function row(tr, values, ...elements) {
     const cell = tr.children[values.length + i];
     /* Keep a select the user is changing or has changed. */
     const old = cell.firstChild;
+    if (old === element) return;
     if (old && old.nodeName === 'SELECT' && element && element.nodeName === 'SELECT' && (old.dataset.dirty || cell.contains(document.activeElement))) return;
     cell.replaceChildren(...(element ? [element] : []));
   });
@@ -357,7 +358,44 @@ function renderGovernors() {
         : `CPU ${p.cpus.join('、')} 的调速器改回缺省（系统的设置）：现在的 ${p.governor} 不变`);
     }, page.busy);
     const current = p.governor + (setting && setting !== p.governor ? `（设置的是 ${setting}）` : '');
-    row(tr, [`CPU ${p.cpus.join('、')}${big}`, mhz(p.cur_khz), `${mhz(p.min_khz)} – ${mhz(p.max_khz)}`, current], choice, go);
+    const floorSetting = s.frequency_floors?.[p.name] || 0;
+    let floor = tr.querySelector(`[data-floor-policy="${p.name}"]`);
+    let input = floor?.querySelector('input');
+    if (!floor) {
+      floor = document.createElement('div');
+      floor.className = 'form-row';
+      floor.dataset.floorPolicy = p.name;
+      input = document.createElement('input');
+      input.type = 'number';
+      input.step = '1';
+      input.dataset.policy = p.name;
+      input.oninput = () => { input.dataset.dirty = '1'; };
+      const choices = document.createElement('datalist');
+      choices.id = `frequency-floor-${p.name}`;
+      input.setAttribute('list', choices.id);
+      floor.append(input, choices, document.createTextNode('MHz '), button('设置下限'), button('恢复下限'));
+    }
+    floor.querySelector('datalist').replaceChildren(...(p.frequencies || []).map(khz => new Option(String(khz / 1000), String(khz / 1000))));
+    if (!input.dataset.dirty && input !== document.activeElement) input.value = (floorSetting || p.scaling_min_khz) / 1000;
+    input.min = p.min_khz / 1000;
+    input.max = p.scaling_max_khz / 1000;
+    input.setAttribute('aria-label', `CPU ${p.cpus.join('、')} 最低频率（MHz）`);
+    const canSetFloor = p.scaling_min_khz > 0 && p.scaling_max_khz > 0;
+    input.disabled = page.busy || !canSetFloor;
+    const [setFloor, restoreFloor] = floor.querySelectorAll('button');
+    setFloor.disabled = page.busy || !canSetFloor;
+    setFloor.onclick = () => {
+      if (!input.reportValidity() || !input.value) return;
+      const khz = Math.round(Number(input.value) * 1000);
+      apply('frequency-floor', { policy: p.name, min_khz: khz },
+        `CPU ${p.cpus.join('、')} 的最低频率设为 ${mhz(khz)}，开机时也保持；调速器保持 ${p.governor}`);
+    };
+    restoreFloor.disabled = page.busy || !floorSetting;
+    restoreFloor.onclick = () => {
+      apply('frequency-floor', { policy: p.name, min_khz: 0 },
+        `恢复 CPU ${p.cpus.join('、')} 启用最低频率保护前的下限，并取消这项开机设置`);
+    };
+    row(tr, [`CPU ${p.cpus.join('、')}${big}`, mhz(p.cur_khz), `${mhz(p.scaling_min_khz)} – ${mhz(p.scaling_max_khz)}`, current], choice, go, floor);
   });
 }
 

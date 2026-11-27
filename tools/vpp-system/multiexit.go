@@ -15,7 +15,7 @@ import (
 // 0008) pins A's receive route to IF. NAT44-ED needs none of them: it takes the pool address bound
 // to the exit (patch 0034 binds an address to the outside interface that has it), goes on along
 // the output arc, and each exit's own address is received by its interface. Checked on a test
-// router with a WAN, a bridged loopback exit and a WireGuard exit, the R6S's layout: every client
+// router with a WAN, a bridged loopback exit and a WireGuard exit, the RK3588 board's layout: every client
 // left every exit with that exit's address, with the same MSS clamping, also after the WireGuard
 // exit was restarted.
 //

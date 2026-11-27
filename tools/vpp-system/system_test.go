@@ -279,7 +279,7 @@ func TestNATModeTranslation(t *testing.T) {
 	}
 }
 
-// The R6S's multi-exit lines: a bridged loopback exit with its context VRF, the WAN's output
+// The RK3588 board's multi-exit lines: a bridged loopback exit with its context VRF, the WAN's output
 // chain and the pool receive lines.
 const multiExitEI = `nat44 ei add interface address wan0.100
 set interface nat44 ei out wan0.100 output-feature
@@ -341,7 +341,7 @@ func TestMultiExitNATMode(t *testing.T) {
 	}
 }
 
-// The R6S's layout through the service: its multi-exit file and a WireGuard exit with a context.
+// The RK3588 board's layout through the service: its multi-exit file and a WireGuard exit with a context.
 func TestSetNATModeMultiExit(t *testing.T) {
 	s, fake := natTestService(t)
 	dir := filepath.Dir(s.opts.CLIFile)

@@ -1,5 +1,6 @@
 [Unit]
 Description=VPP system settings and maintenance: thread layout, RX modes and placement, NAT44-EI, CPU governors, services, logs, network tests, backup
+After=cpufrequtils.service rc-local.service
 # RX settings are put back after VPP restarts, which this watches for on its own, so it needs
 # no ordering on VPP.
 

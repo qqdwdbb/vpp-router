@@ -52,6 +52,7 @@ sudo systemctl enable --now vpp-system
 | 接口的收包方式（轮询、中断、自适应） | `system.json` | 立即，VPP 每次启动后装回 | 不需要 |
 | 队列由哪个线程处理 | `system.json` | 立即，VPP 每次启动后装回 | 不需要 |
 | cpufreq 调速器 | `system.json` | 立即，本服务启动时（开机）再设一次 | 不需要 |
+| cpufreq 最低频率保护 | `system.json` | 立即，管理服务和 VPP 启动前恢复 | 不需要 |
 
 ### 启动文件
 
@@ -78,7 +79,7 @@ VPP 运行两种 NAT44 插件之一，启动文件加载哪个就是哪种：
 
 离线改写：`vpp-system nat-mode -mode ei|ed [-check] [-vpp-config F] [-cli-file F] [-wireguard-store F] [-backup-dir D]` 不碰启动文件和 VPP，只把 CLI 文件和它 exec 的文件里的 NAT44 命令按上面的规则改成所选插件的写法，已经是这种写法的不动；`-check` 只检查。不能改时和系统页一样拒绝，什么都不改。安装器重新运行时换了 NAT 模式就用它改写保留下来的 exec 文件。
 
-多出口：EI 按内侧路由表而不是按出口选地址池，所以本项目的多出口配置用 `nat_ei_context` 插件给每个出口一个自己的池：`nat44 ei context 出口 loopN` 让从出口出去的流量算作 loopN 所在路由表 N 的，池地址写成 `nat44 ei add address A tenant-vrf N`；`nat44 ei output-chain 出口` 让 EI 之后继续走输出功能链；`nat44 ei pool receive A 出口`（补丁 0008）把 A 的接收路由固定在出口上。ED 都不需要：它按出口选绑定在该出口上的地址（补丁 0034），NAT 之后本来就继续走输出功能链，各出口自己的地址由接口接收。切到 ED 时这几行改成 `#ei-only: 原命令` 的注释留在原处，路由表 N 的池地址在注释下面另起一行不带 tenant-vrf 的 ED 写法；切回 EI 时注释恢复成原命令，紧跟的那行 ED 写法删掉，所以 EI 到 ED 再到 EI 后文件逐字节不变（那行 ED 写法被手工改过则保留，改成 EI 写法）。前提是每个出口的池地址就是出口接口自己的地址（`set interface ip address` 或 WireGuard 配置的地址；`pool receive` 的出口也可以用 `add interface address` 取地址），切换前检查，不满足、或找不到 loopN 的路由表（`set interface ip table`）时拒绝。在 137 上按 R6S 的布局（WAN、桥接的 loop10、WireGuard 出口）测过：每个客户端经每个出口用的都是该出口的地址，MSS 钳制相同，WireGuard 出口重启后也一样。ED 还需要补丁 0036，否则 VPP 自己从出口地址发出的 ICMP（比如别人 ping 路由器出口地址时的回复）会被转换，对方收不到。WireGuard 配置的附加命令和停止前命令（`--wireguard-store`，默认 `/etc/vpp/wireguard/wireguard.json`）不改：vpp-wireguard 执行时自己换成 VPP 运行的插件的写法，这里只按上面同样的规则检查，有不能换的就拒绝，页面只指出是哪个 VPN 的第几条（文件里有私钥，不引用命令）。备份按文件名存放，两个要改的文件同名时也拒绝。重启后所有 NAT 会话重建；端口转发、本机端口和 WireGuard 的监听端口由各自的服务按 VPP 运行的插件装回。
+多出口：EI 按内侧路由表而不是按出口选地址池，所以本项目的多出口配置用 `nat_ei_context` 插件给每个出口一个自己的池：`nat44 ei context 出口 loopN` 让从出口出去的流量算作 loopN 所在路由表 N 的，池地址写成 `nat44 ei add address A tenant-vrf N`；`nat44 ei output-chain 出口` 让 EI 之后继续走输出功能链；`nat44 ei pool receive A 出口`（补丁 0008）把 A 的接收路由固定在出口上。ED 都不需要：它按出口选绑定在该出口上的地址（补丁 0034），NAT 之后本来就继续走输出功能链，各出口自己的地址由接口接收。切到 ED 时这几行改成 `#ei-only: 原命令` 的注释留在原处，路由表 N 的池地址在注释下面另起一行不带 tenant-vrf 的 ED 写法；切回 EI 时注释恢复成原命令，紧跟的那行 ED 写法删掉，所以 EI 到 ED 再到 EI 后文件逐字节不变（那行 ED 写法被手工改过则保留，改成 EI 写法）。前提是每个出口的池地址就是出口接口自己的地址（`set interface ip address` 或 WireGuard 配置的地址；`pool receive` 的出口也可以用 `add interface address` 取地址），切换前检查，不满足、或找不到 loopN 的路由表（`set interface ip table`）时拒绝。在 137 上按 RK3588 开发板的布局（WAN、桥接的 loop10、WireGuard 出口）测过：每个客户端经每个出口用的都是该出口的地址，MSS 钳制相同，WireGuard 出口重启后也一样。ED 还需要补丁 0036，否则 VPP 自己从出口地址发出的 ICMP（比如别人 ping 路由器出口地址时的回复）会被转换，对方收不到。WireGuard 配置的附加命令和停止前命令（`--wireguard-store`，默认 `/etc/vpp/wireguard/wireguard.json`）不改：vpp-wireguard 执行时自己换成 VPP 运行的插件的写法，这里只按上面同样的规则检查，有不能换的就拒绝，页面只指出是哪个 VPN 的第几条（文件里有私钥，不引用命令）。备份按文件名存放，两个要改的文件同名时也拒绝。重启后所有 NAT 会话重建；端口转发、本机端口和 WireGuard 的监听端口由各自的服务按 VPP 运行的插件装回。
 
 ### 加入 DPDK 网卡
 
@@ -134,6 +135,19 @@ NAT 会话表太大、主堆内存不够时插件启用失败，VPP 照常启动
 ### 调速器
 
 写 `/sys/devices/system/cpu/cpufreq/policyN/scaling_governor`，只接受该策略 `scaling_available_governors` 里的值，写后读回。本服务启动时把 `system.json` 里的设置都写一次；别的程序（比如 rc.local）之后再改的，页面上显示“设置的是 X”。没有 cpufreq 的机器（虚拟机、固定频率）这一节为空。
+
+最低频率保护写同组的 `scaling_min_freq`，保留 governor 和 `scaling_max_freq`，让动态调频在经过验证的下限和原上限之间运行。
+下限须在硬件最低频率与当前上限之间；提供离散频率表的平台只接受表内数值，连续调频驱动接受范围内数值。写后在有界时间内读回；内核可能异步更新限制，也可能暂时施加更高的有效下限，实际下限不低于请求值即满足保护。
+保存失败时恢复运行中的旧下限。第一次启用时保存原下限，更新保护值不覆盖它；`min_khz: 0` 恢复原下限并删除持久设置。
+设置按 cpufreq 调频组保存，影响该组所有 CPU；切换 worker 后需要验证新调频组的保护值，程序不自动推算未测试硬件的安全频率。
+
+管理服务启动时先恢复保护下限，再恢复 governor；保护失败时保留相应组原来的 governor 并显示警告。
+安装器生成的 `vpp-router-ctl prep` 在启动 VPP 之前执行 `vpp-system frequency-guard --config /etc/vpp/system.json`，
+使重启后的第一个突发也有保护。该子命令不连接 VPP 或启动管理服务，多个调频组部分失败时恢复已经写入的旧下限。
+它需要同步更新控制脚本和管理程序。面板显示当前实际频率范围，并以 MHz 输入下限；API 和配置使用 kHz。
+
+安全下限取决于 CPU、转发路径、包长和峰值 PPS，必须逐包压测；零丢包的短测不能替代长测。
+冷启动突发的实测和容量边界见 [动态调频保护](../../docs/rk3588/rk3588-adaptive-switch-timing.md#动态调频与冷启动突发2026-11-27)。
 
 ## 维护
 
@@ -210,6 +224,7 @@ NAT 会话表太大、主堆内存不够时插件启用失败，VPP 照常启动
 | `POST /system/nics/add` | `{"address","port","name","accept"}`，`port` 是同一 PCI 设备上的口（`dev_port`，一般是 0），`accept` 表示已确认页面上的提示，重启 VPP |
 | `POST /system/nics/retire` | `{"name"}`，VPP 接口名，重启 VPP |
 | `POST /system/governor` | `{"policy","governor"}`，`governor` 为空时是缺省：不再设置，回到系统的设置 |
+| `POST /system/frequency-floor` | `{"policy","min_khz"}`，正数为保护下限，0 恢复启用前的下限并取消持久设置 |
 | `POST /system/confirm`、`/rollback` | `{}` |
 
 面板从 `/api/system/*` 转发过来，出错时返回 409 和 `{"error": "原因"}`。

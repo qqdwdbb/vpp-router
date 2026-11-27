@@ -1,0 +1,515 @@
+dpdk: request asynchronous CPUFreq boost from RX bursts
+
+Opt-in single-policy controller; >=16 packets or consecutive >=8 within
+1 ms requests a boost, held until 100 ms after the last qualifying burst.
+Packet workers only publish timestamps and wake a nonblocking eventfd.
+
+--- a/src/plugins/dpdk/CMakeLists.txt
++++ b/src/plugins/dpdk/CMakeLists.txt
+@@ -135,6 +135,8 @@
+   device/common.c
+   device/device.c
+   device/driver.c
++  device/dvfs.c
++  device/dvfs_control.c
+   device/flow.c
+   device/format.c
+   device/init.c
+--- /dev/null
++++ b/src/plugins/dpdk/device/dvfs.c
+@@ -0,0 +1,143 @@
++/* SPDX-License-Identifier: Apache-2.0 */
++#include <vlib/vlib.h>
++#include <vlib/threads.h>
++#include <dpdk/device/dvfs.h>
++#include <ctype.h>
++#include <errno.h>
++#include <stdio.h>
++#include <string.h>
++
++static char selected_policy[32];
++
++static clib_error_t *
++dvfs_set (vlib_main_t *vm, unformat_input_t *input,
++          vlib_cli_command_t *cmd)
++{
++  (void) cmd;
++  u8 *policy = 0;
++  u32 idle, boost;
++  if (unformat (input, "disable") && unformat_check_input (input) == UNFORMAT_END_OF_INPUT)
++    {
++      vlib_worker_thread_barrier_sync (vm);
++      int err = dpdk_dvfs_stop ();
++      vlib_worker_thread_barrier_release (vm);
++      if (err)
++        return clib_error_return (0, "restore floor: %s", strerror (err));
++      selected_policy[0] = 0;
++      return 0;
++    }
++  int parsed = unformat (input, "policy %s idle %u boost %u", &policy, &idle, &boost);
++  if (!parsed ||
++      unformat_check_input (input) != UNFORMAT_END_OF_INPUT)
++    {
++      vec_free (policy);
++      return clib_error_return (0, "expected policy policyN idle <kHz> boost <kHz> | disable");
++    }
++  int valid = vec_len (policy) > 7 && vec_len (policy) < sizeof (selected_policy) &&
++    !strncmp ((char *) policy, "policy", 6);
++  for (u32 i = 6; valid && i + 1 < vec_len (policy); ++i)
++    valid = isdigit (policy[i]);
++  if (!valid)
++    {
++      vec_free (policy);
++      return clib_error_return (0, "expected policyN");
++    }
++  char path[256];
++  snprintf (path, sizeof (path), "/sys/devices/system/cpu/cpufreq/%s/related_cpus", policy);
++  FILE *f = fopen (path, "r");
++  if (!f)
++    {
++      vec_free (policy);
++      return clib_error_return (0, "open related_cpus: %s", strerror (errno));
++    }
++  unsigned n = vlib_thread_main.n_vlib_mains, matched = 0, cpu;
++  u8 *enabled = 0;
++  vec_validate (enabled, n - 1);
++  while (fscanf (f, "%u", &cpu) == 1)
++    for (unsigned i = 0; i < n; ++i)
++      if (vlib_worker_threads[i].cpu_id == (int) cpu && !enabled[i])
++        { enabled[i] = 1; matched++; }
++  fclose (f);
++  if (!matched)
++    {
++      vec_free (enabled);
++      vec_free (policy);
++      return clib_error_return (0, "policy has no VPP packet threads");
++    }
++  snprintf (path, sizeof (path), "/sys/devices/system/cpu/cpufreq/%s/scaling_available_frequencies", policy);
++  f = fopen (path, "r");
++  if (f)
++    {
++      unsigned khz;
++      int supported = 0, idle_supported = 0;
++      while (fscanf (f, "%u", &khz) == 1)
++        { supported |= khz == boost; idle_supported |= khz == idle; }
++      fclose (f);
++      if (!supported || !idle_supported)
++        {
++          vec_free (enabled);
++          vec_free (policy);
++          return clib_error_return (0, "idle/boost is not an available frequency");
++        }
++    }
++  snprintf (path, sizeof (path), "/sys/devices/system/cpu/cpufreq/%s", policy);
++  vlib_worker_thread_barrier_sync (vm);
++  int err = dpdk_dvfs_start (path, idle, boost, enabled, n);
++  vlib_worker_thread_barrier_release (vm);
++  if (!err)
++    snprintf (selected_policy, sizeof (selected_policy), "%s", policy);
++  vec_free (enabled);
++  vec_free (policy);
++  if (err)
++    return clib_error_return (0, "start DVFS: %s", strerror (err));
++  return 0;
++}
++
++VLIB_CLI_COMMAND (dpdk_dvfs_set_command, static) = {
++  .path = "set dpdk dvfs",
++  .short_help = "set dpdk dvfs policy policyN idle <kHz> boost <kHz> | disable",
++  .function = dvfs_set,
++};
++
++static clib_error_t *
++dvfs_show (vlib_main_t *vm, unformat_input_t *input,
++           vlib_cli_command_t *cmd)
++{
++  (void) input;
++  (void) cmd;
++  dpdk_dvfs_stats_t s;
++  dpdk_dvfs_snapshot (&s);
++  vlib_cli_output (vm, "policy %s hold 100ms boosts %u releases %u failures %u active %d",
++                   selected_policy[0] ? selected_policy : "disabled",
++                   s.boosts, s.releases, s.failures, s.active);
++  vlib_cli_output (vm, "idle_khz %u boost_khz %u original_khz %u", s.idle_khz, s.boost_khz, s.original_khz);
++  vlib_cli_output (vm, "id trigger_ns wake_us write_begin_us write_end_us hold_us error");
++  unsigned begin = s.count > DPDK_DVFS_SAMPLES ? s.count - DPDK_DVFS_SAMPLES : 0;
++  for (unsigned i = begin; i < s.count; ++i)
++    {
++      dpdk_dvfs_sample_t *p = &s.samples[i % DPDK_DVFS_SAMPLES];
++      vlib_cli_output (vm, "%u %llu %.3f %.3f %.3f %.3f %d", i,
++                       (unsigned long long) p->trigger,
++                       (p->wake - p->trigger) / 1e3,
++                       (p->write_begin - p->trigger) / 1e3,
++                       (p->write_end - p->trigger) / 1e3,
++                       (p->released - p->latest) / 1e3,
++                       p->error);
++    }
++  return 0;
++}
++
++VLIB_CLI_COMMAND (dpdk_dvfs_show_command, static) = {
++  .path = "show dpdk dvfs",
++  .short_help = "show dpdk dvfs",
++  .function = dvfs_show,
++};
++
++static clib_error_t *
++dvfs_exit (vlib_main_t *vm)
++{
++  (void) vm;
++  int err = dpdk_dvfs_stop ();
++  return err ? clib_error_return (0, "restore DVFS floor: %s", strerror (err)) : 0;
++}
++VLIB_MAIN_LOOP_EXIT_FUNCTION (dvfs_exit);
+--- /dev/null
++++ b/src/plugins/dpdk/device/dvfs.h
+@@ -0,0 +1,96 @@
++/* SPDX-License-Identifier: Apache-2.0 */
++#ifndef included_dpdk_dvfs_h
++#define included_dpdk_dvfs_h
++
++#include <errno.h>
++#include <stdint.h>
++#include <time.h>
++#include <unistd.h>
++
++#define DPDK_DVFS_HOLD_NS 100000000ULL
++#define DPDK_DVFS_PAIR_NS 1000000ULL
++#define DPDK_DVFS_SAMPLES 256
++
++/* One producer per slot; only last/first cross the controller boundary. */
++typedef struct
++{
++  _Alignas (64) uint64_t last;
++  uint64_t first;
++  uint64_t previous_small;
++  int enabled;
++} dpdk_dvfs_slot_t;
++
++typedef struct
++{
++  uint64_t trigger, latest, wake, write_begin, write_end, released;
++  int error;
++} dpdk_dvfs_sample_t;
++
++typedef struct
++{
++  unsigned count, boosts, releases, failures;
++  unsigned idle_khz, boost_khz, original_khz;
++  int active;
++  dpdk_dvfs_sample_t samples[DPDK_DVFS_SAMPLES];
++} dpdk_dvfs_stats_t;
++
++extern dpdk_dvfs_slot_t *dpdk_dvfs_slots;
++extern int dpdk_dvfs_event_fd;
++
++static inline uint64_t
++dpdk_dvfs_now (void)
++{
++  struct timespec ts;
++  clock_gettime (CLOCK_MONOTONIC, &ts);
++  return (uint64_t) ts.tv_sec * 1000000000ULL + ts.tv_nsec;
++}
++
++static inline void
++dpdk_dvfs_wake (void)
++{
++  uint64_t one = 1;
++  ssize_t result;
++  do
++    result = write (dpdk_dvfs_event_fd, &one, sizeof (one));
++  while (result < 0 && errno == EINTR);
++}
++
++/* No sysfs, allocation, lock or frequency wait on the packet thread. The
++ * nonblocking eventfd is written only at the start of a new busy episode. */
++static inline void
++dpdk_dvfs_rx_burst (unsigned thread, unsigned packets)
++{
++  dpdk_dvfs_slot_t *slots = dpdk_dvfs_slots;
++  if (__builtin_expect (slots == 0, 1) || !slots[thread].enabled)
++    return;
++  dpdk_dvfs_slot_t *s = slots + thread;
++  if (packets < 8)
++    {
++      s->previous_small = 0;
++      return;
++    }
++  uint64_t now = dpdk_dvfs_now ();
++  int request = packets >= 16 ||
++    (s->previous_small && now - s->previous_small <= DPDK_DVFS_PAIR_NS);
++  s->previous_small = now;
++  if (!request)
++    return;
++  uint64_t last = __atomic_load_n (&s->last, __ATOMIC_RELAXED);
++  int notify = last == 0 || now - last >= DPDK_DVFS_HOLD_NS;
++  if (notify)
++    __atomic_store_n (&s->first, now, __ATOMIC_RELAXED);
++  __atomic_store_n (&s->last, now, __ATOMIC_RELEASE);
++  if (notify)
++    {
++      /* EAGAIN means another pending wake already makes the fd readable. */
++      dpdk_dvfs_wake ();
++    }
++}
++
++/* Called with packet workers quiescent. start installs idle; stop restores
++ * the effective floor recorded before enable. */
++int dpdk_dvfs_start (const char *directory, unsigned idle_khz, unsigned boost_khz,
++                     const unsigned char *enabled, unsigned n_threads);
++int dpdk_dvfs_stop (void);
++void dpdk_dvfs_snapshot (dpdk_dvfs_stats_t *out);
++#endif
+--- /dev/null
++++ b/src/plugins/dpdk/device/dvfs_control.c
+@@ -0,0 +1,232 @@
++/* SPDX-License-Identifier: Apache-2.0 */
++#define _GNU_SOURCE
++#include "dvfs.h"
++#include <errno.h>
++#include <fcntl.h>
++#include <limits.h>
++#include <poll.h>
++#include <pthread.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <sys/eventfd.h>
++
++/* Single explicitly selected CPUFreq policy. All its workers share one lease. */
++dpdk_dvfs_slot_t *dpdk_dvfs_slots;
++int dpdk_dvfs_event_fd = -1;
++static dpdk_dvfs_slot_t *slots;
++static unsigned n_slots, boost, idle, original;
++static int min_fd = -1, stopping;
++static pthread_t controller;
++static pthread_mutex_t stats_lock = PTHREAD_MUTEX_INITIALIZER;
++static dpdk_dvfs_stats_t stats;
++
++static int
++read_khz (int fd, unsigned *value)
++{
++  char buf[64], *end;
++  ssize_t n = pread (fd, buf, sizeof (buf) - 1, 0);
++  if (n <= 0)
++    return n < 0 ? errno : EIO;
++  buf[n] = 0;
++  errno = 0;
++  unsigned long v = strtoul (buf, &end, 10);
++  if (errno || end == buf || v == 0 || v > UINT_MAX)
++    return EINVAL;
++  *value = v;
++  return 0;
++}
++
++static int
++write_floor (unsigned value)
++{
++  char buf[32];
++  int n = snprintf (buf, sizeof (buf), "%u\n", value);
++  ssize_t written = pwrite (min_fd, buf, n, 0);
++  return written == n ? 0 : written < 0 ? errno : EIO;
++}
++
++static int
++open_attribute (const char *directory, const char *name, int flags)
++{
++  char path[PATH_MAX];
++  int length = snprintf (path, sizeof (path), "%s/%s", directory, name);
++  if (length < 0 || (size_t) length >= sizeof (path))
++    {
++      errno = ENAMETOOLONG;
++      return -1;
++    }
++  return open (path, flags | O_CLOEXEC);
++}
++
++static void *
++control_loop (void *unused)
++{
++  (void) unused;
++  dpdk_dvfs_sample_t sample = { 0 };
++  int active = 0;
++  struct pollfd event = { .fd = dpdk_dvfs_event_fd, .events = POLLIN };
++  while (!__atomic_load_n (&stopping, __ATOMIC_ACQUIRE))
++    {
++      uint64_t now = dpdk_dvfs_now (), last = 0, first = UINT64_MAX;
++      for (unsigned i = 0; i < n_slots; ++i)
++        {
++          uint64_t t = __atomic_load_n (&slots[i].last, __ATOMIC_ACQUIRE);
++          if (t && (t > now || now - t < DPDK_DVFS_HOLD_NS))
++            {
++              if (t > last)
++                last = t;
++              uint64_t f = __atomic_load_n (&slots[i].first, __ATOMIC_RELAXED);
++              if (f < first)
++                first = f;
++            }
++        }
++      if (last && !active)
++        {
++          sample = (dpdk_dvfs_sample_t) { .trigger = first, .wake = dpdk_dvfs_now () };
++          sample.write_begin = dpdk_dvfs_now ();
++          sample.error = write_floor (boost);
++          sample.write_end = dpdk_dvfs_now ();
++          /* Even a failed request owns a lease, so it is not retried per burst. */
++          active = 1;
++          pthread_mutex_lock (&stats_lock);
++          stats.active = 1;
++          stats.boosts++;
++          pthread_mutex_unlock (&stats_lock);
++        }
++      if (active && last)
++        sample.latest = last;
++      if (active && !last)
++        {
++          int err = write_floor (idle);
++          if (!sample.error)
++            sample.error = err;
++          sample.released = dpdk_dvfs_now ();
++          pthread_mutex_lock (&stats_lock);
++          stats.samples[stats.count++ % DPDK_DVFS_SAMPLES] = sample;
++          stats.releases++;
++          stats.failures += sample.error != 0;
++          stats.active = 0;
++          pthread_mutex_unlock (&stats_lock);
++          active = 0;
++        }
++      /* Sleep until lease expiry or a new episode. Requests during the lease
++       * extend it via slot timestamps; no frequency sampling is needed. */
++      struct timespec timeout, *wait = 0;
++      if (active)
++        {
++          now = dpdk_dvfs_now ();
++          uint64_t deadline = last + DPDK_DVFS_HOLD_NS;
++          uint64_t ns = deadline > now ? deadline - now : 0;
++          timeout = (struct timespec) { .tv_sec = ns / 1000000000ULL,
++                                       .tv_nsec = ns % 1000000000ULL };
++          wait = &timeout;
++        }
++      int rv = ppoll (&event, 1, wait, 0);
++      if (rv > 0 && (event.revents & POLLIN))
++        {
++          uint64_t value;
++          ssize_t ignored = read (event.fd, &value, sizeof (value));
++          (void) ignored;
++        }
++    }
++  return 0;
++}
++
++void
++dpdk_dvfs_snapshot (dpdk_dvfs_stats_t *out)
++{
++  pthread_mutex_lock (&stats_lock);
++  *out = stats;
++  pthread_mutex_unlock (&stats_lock);
++}
++
++int
++dpdk_dvfs_stop (void)
++{
++  if (!slots)
++    return 0;
++  dpdk_dvfs_slots = 0;
++  __atomic_store_n (&stopping, 1, __ATOMIC_RELEASE);
++  dpdk_dvfs_wake ();
++  pthread_join (controller, 0);
++  pthread_mutex_lock (&stats_lock);
++  stats.active = 0;
++  pthread_mutex_unlock (&stats_lock);
++  int err = write_floor (original);
++  close (min_fd);
++  close (dpdk_dvfs_event_fd);
++  free (slots);
++  slots = 0;
++  dpdk_dvfs_event_fd = -1;
++  return err;
++}
++
++int
++dpdk_dvfs_start (const char *directory, unsigned idle_khz, unsigned boost_khz,
++                 const unsigned char *enabled, unsigned n_threads)
++{
++  if (slots)
++    return EBUSY;
++  int err;
++  unsigned minimum = 0, maximum = 0;
++  int hw_min = open_attribute (directory, "cpuinfo_min_freq", O_RDONLY);
++  int max = open_attribute (directory, "scaling_max_freq", O_RDONLY);
++  if (hw_min < 0 || max < 0)
++    {
++      err = errno;
++      if (hw_min >= 0) close (hw_min);
++      if (max >= 0) close (max);
++      return err;
++    }
++  err = read_khz (hw_min, &minimum);
++  if (!err) err = read_khz (max, &maximum);
++  close (hw_min);
++  close (max);
++  if (err) return err;
++  if (idle_khz < minimum || idle_khz > boost_khz ||
++      boost_khz > maximum || !n_threads)
++    return EINVAL;
++  min_fd = open_attribute (directory, "scaling_min_freq", O_RDWR);
++  dpdk_dvfs_event_fd = eventfd (0, EFD_NONBLOCK | EFD_CLOEXEC);
++  if (min_fd < 0 || dpdk_dvfs_event_fd < 0)
++    { err = errno; goto fail; }
++  err = read_khz (min_fd, &original);
++  if (err) goto fail;
++  if (posix_memalign ((void **) &slots, 64, sizeof (*slots) * n_threads))
++    { slots = 0; err = ENOMEM; goto fail; }
++  memset (slots, 0, sizeof (*slots) * n_threads);
++  for (unsigned i = 0; i < n_threads; ++i)
++    slots[i].enabled = enabled[i];
++  n_slots = n_threads;
++  boost = boost_khz;
++  idle = idle_khz;
++  stopping = 0;
++  memset (&stats, 0, sizeof (stats));
++  stats.idle_khz = idle;
++  stats.boost_khz = boost;
++  stats.original_khz = original;
++  err = write_floor (idle);
++  if (err) goto fail;
++  /* Never inherit the packet threads' possible RT scheduling policy. */
++  pthread_attr_t attr;
++  pthread_attr_init (&attr);
++  pthread_attr_setinheritsched (&attr, PTHREAD_EXPLICIT_SCHED);
++  pthread_attr_setschedpolicy (&attr, SCHED_OTHER);
++  struct sched_param sp = { .sched_priority = 0 };
++  pthread_attr_setschedparam (&attr, &sp);
++  err = pthread_create (&controller, &attr, control_loop, 0);
++  pthread_attr_destroy (&attr);
++  if (err)
++    { write_floor (original); goto fail; }
++  pthread_setname_np (controller, "dpdk-dvfs");
++  dpdk_dvfs_slots = slots;
++  return 0;
++fail:
++  if (min_fd >= 0) close (min_fd);
++  if (dpdk_dvfs_event_fd >= 0) close (dpdk_dvfs_event_fd);
++  free (slots);
++  slots = 0;
++  dpdk_dvfs_event_fd = -1;
++  return err;
++}
+--- a/src/plugins/dpdk/device/node.c
++++ b/src/plugins/dpdk/device/node.c
+@@ -20,6 +20,7 @@
+ #include <vnet/tcp/tcp_packet.h>
+ 
+ #include <dpdk/device/dpdk_priv.h>
++#include <dpdk/device/dvfs.h>
+ 
+ static char *dpdk_error_strings[] = {
+ #define _(n,s) s,
+@@ -361,6 +362,7 @@
+ 
+       n = rte_eth_rx_burst (xd->port_id, queue_id, ptd->mbufs + n_rx_packets,
+ 			    n_to_rx);
++      dpdk_dvfs_rx_burst (thread_index, n);
+       n_rx_packets += n;
+ 
+       if (n < n_to_rx)

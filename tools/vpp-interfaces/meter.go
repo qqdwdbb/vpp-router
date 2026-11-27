@@ -26,7 +26,7 @@ import (
 // counts bytes per rule in the stats segment, which vpp-monitor reads without stopping the
 // workers. Without a bridge the gateway interface itself is used.
 //
-// Each packet on those ports costs an ACL lookup: on the R6S's little core, saturated with
+// Each packet on those ports costs an ACL lookup: on the RK3588 board's A55 core, saturated with
 // 64-byte packets, 1–2.5% of forwarding with the rules alone and 3–5% with the counters,
 // however many devices (it is a hash lookup), so it is a switch, off by default.
 

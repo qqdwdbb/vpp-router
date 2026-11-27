@@ -147,7 +147,7 @@ sudo systemctl enable --now vpp-interfaces
 
 - 计数的地址：有效租约和静态分配的 IPv4 地址，加上 VPP 在这个接口上的邻居表里的全局地址（手机自己生成的 IPv6 地址就是这样找到的）。每分钟、修改 DHCP 后各检查一次，地址变了就原地替换规则（计数从零开始，`generation` 跟着变）；VPP 重启后 ACL 没了，或编号被别人占了，就重新建、重新挂。挂载用 `acl_interface_add_del`，不动接口上别人的 ACL。
 - 规则顺序写进 `--meter-file`，ACL 先列出 `local_prefixes`，然后与 `rules` 逐项对应。状态写进 `--meter-state`，本程序重启后照旧。
-- 代价：经过网关的每个包多一次 ACL 查找。往局域网发的包（下载）还会从 BVI 以二层方式经过入方向 ACL，所以下载方向查两次。R6S 的 A55 小核用 64 字节小包打满时，上传方向转发能力约降 2.5%（只有规则）到 5%（加计数），下载方向估计约 10%；平时的流量下只是多占一点 CPU。
+- 代价：经过网关的每个包多一次 ACL 查找。往局域网发的包（下载）还会从 BVI 以二层方式经过入方向 ACL，所以下载方向查两次。RK3588 开发板的 A55 小核用 64 字节小包打满时，上传方向转发能力约降 2.5%（只有规则）到 5%（加计数），下载方向估计约 10%；平时的流量下只是多占一点 CPU。
 - VPP 26.06 对 `acl_stats_intf_counters_enable` 回的是 `acl_del_reply`（acl.c 的 `REPLY_MACRO (VL_API_ACL_DEL_REPLY)`），所以按它接收回复，再从 `show acl-plugin tables mask` 读回开关状态确认。
 
 ## 测试

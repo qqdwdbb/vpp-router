@@ -103,6 +103,12 @@ IPv6 包都显示成一次 WireGuard `congestion drop`。2026-11-26 在 RK3588 �
 字符串，只改 abf_plugin。在 ConnectX-3 主机上验证：从局域网 ping6 路由器 200 次，修补前计到
 `wg4-output-tun-handoff congestion drop`，修补后计到 `abf-input-ip6 missed`。
 
+VPP 0049 在每次 DPDK RX burst 后提交异步升频请求：一次 ≥16 包，或 1 ms 内连续两次 ≥8 包；
+独立 SCHED_OTHER 控制线程按 policy 合并请求，最后一次高负载后保持 100 ms，再恢复指定空闲下限。
+收包线程不操作 sysfs；默认关闭，显式配置一个 policy。记录请求和写入时间，通过内核 CPUFreq 事件
+测量实际生效延迟，不同步采样频率。实现、CLI、观测开销和 RK3588 开发板实测见
+[RX burst 异步升频](../docs/rk3588/rk3588-rx-burst-dvfs.md)。
+
 VPP 0037（NAT44-ED）和 0038（NAT44-EI）让 NAT 正确改写"校验和未完成"的包。TAP 打开
 `csum-offload` 或 `gso` 时，Linux 自己发出的 TCP/UDP 带 `NEEDS_CSUM` 进入 VPP，L4 校验和
 字段里只有伪首部的和（未取反），由下一个 TAP 或网卡补全。NAT 原来把它当完整校验和做增量

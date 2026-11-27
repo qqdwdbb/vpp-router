@@ -182,3 +182,29 @@ def test_post_runs_both_after_vpp_answers():
     assert 'if [ "${SYSTEM_CPUS+x}" = x ]; then isolate_workers || return 1; fi' in post
     # the panel can switch NICs to interrupt receive at run time, so not only when RX_MODE says so
     assert "\tintr_fifo || true\n" in post
+
+
+@pytest.mark.parametrize("fail", ["0", "1"])
+def test_prep_establishes_frequency_guard_before_device_setup(tmp_path, fail):
+    conf = tmp_path / "conf"
+    conf.mkdir()
+    (conf / "system.json").write_text('{"frequency_floors":{"policy2":{"min_khz":1200000}}}')
+    prefix = tmp_path / "prefix"
+    (prefix / "bin").mkdir(parents=True)
+    helper = prefix / "bin/vpp-system"
+    helper.write_text('#!/bin/sh\nprintf "guard %s\\n" "$*" >>"$CALLS"\nexit "$FAIL"\n')
+    helper.chmod(0o755)
+    calls = tmp_path / "calls"
+    script = r'''
+set -e
+log() { :; }
+has_kind() { return 1; }
+modprobe() { echo "device $*" >>"$CALLS"; }
+HUGEPAGES=0 NICS=()
+''' + function("prep") + r'''
+if prep; then test "$FAIL" = 0; else test "$FAIL" = 1; fi
+'''
+    run(script, CONF=str(conf), PREFIX=str(prefix), CALLS=str(calls), FAIL=fail)
+    lines = calls.read_text().splitlines()
+    assert lines[0] == f"guard frequency-guard --config {conf}/system.json"
+    assert (len(lines) == 1) == (fail == "1")

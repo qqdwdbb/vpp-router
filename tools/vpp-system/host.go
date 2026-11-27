@@ -21,14 +21,17 @@ type cpuInfo struct {
 }
 
 type policyInfo struct {
-	Name      string   `json:"name"`
-	CPUs      []int    `json:"cpus"`
-	Governor  string   `json:"governor"`
-	Available []string `json:"available"`
-	CurKHz    int      `json:"cur_khz"`
-	MinKHz    int      `json:"min_khz"`
-	MaxKHz    int      `json:"max_khz"`
-	Driver    string   `json:"driver"`
+	Name          string   `json:"name"`
+	CPUs          []int    `json:"cpus"`
+	Governor      string   `json:"governor"`
+	Available     []string `json:"available"`
+	CurKHz        int      `json:"cur_khz"`
+	MinKHz        int      `json:"min_khz"`
+	MaxKHz        int      `json:"max_khz"`
+	ScalingMinKHz int      `json:"scaling_min_khz"`
+	ScalingMaxKHz int      `json:"scaling_max_khz"`
+	Frequencies   []int    `json:"frequencies"`
+	Driver        string   `json:"driver"`
 }
 
 type host struct {
@@ -73,6 +76,14 @@ func (h host) policies() []policyInfo {
 		p.CurKHz = readInt(filepath.Join(dir, "scaling_cur_freq"))
 		p.MinKHz = readInt(filepath.Join(dir, "cpuinfo_min_freq"))
 		p.MaxKHz = readInt(filepath.Join(dir, "cpuinfo_max_freq"))
+		p.ScalingMinKHz = readInt(filepath.Join(dir, "scaling_min_freq"))
+		p.ScalingMaxKHz = readInt(filepath.Join(dir, "scaling_max_freq"))
+		for _, value := range strings.Fields(readTrim(filepath.Join(dir, "scaling_available_frequencies"))) {
+			if n, err := strconv.Atoi(value); err == nil && n > 0 {
+				p.Frequencies = append(p.Frequencies, n)
+			}
+		}
+		slices.Sort(p.Frequencies)
 		p.Driver = readTrim(filepath.Join(dir, "scaling_driver"))
 		list = append(list, p)
 	}
