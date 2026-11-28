@@ -137,6 +137,8 @@ VPP 在用户态轮询网卡，一次处理一批包（向量处理），按节�
 
 **i5-9300H + ConnectX-3**（mlx4，2 worker，64B VLAN 小包，8 个源地址，NAT44-EI）：超载时 7.4–7.9 Mpps。打开 `no-multi-seg` 并关闭以太网流控之前，只有 5.2 Mpps。打开 `no-multi-seg` 后的 7.1 Mpps 与同一网卡上 testpmd 单队列纯收发的结果相同，说明这里的上限在 ConnectX-3 网卡，而不是 CPU 性能不足。
 
+**同一台机器跑 Proxmox VE、VPP 在虚拟机里**：ConnectX-3 直通约 6.1 Mpps；经 PVE 默认的 virtio + vhost-net 虚拟网卡只有约 0.6 Mpps，超载后转发跌到接近 0，瓶颈在宿主机的 vhost-net，见 [docs/pve-virtio-nat.md](docs/pve-virtio-nat.md)。
+
 ## 安装部署
 
 ### 要求
