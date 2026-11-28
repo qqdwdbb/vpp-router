@@ -74,7 +74,10 @@ HOST_TAP=vpp-host
 # 和 VPP 一起编译的本仓库插件（plugins/ 下的目录）。ipsec-ike-punt 是 strongSwan + VPP 做 IPsec 服务器时
 # 用的：把 UDP 4500 上的 IKE 报文交给 Linux、解密后的流量换接收接口再走 NAT、处理隧道 PMTU。
 # 装上但默认不启用，加载它就会接管发给 VPP 的 ICMPv6 Packet Too Big
-REPO_PLUGINS="ipsec-ike-punt"
+REPO_PLUGINS="ipsec-ike-punt pppoeclient"
+# PPPoE 拨号时 VPP 的三层 WAN 接口：插件为每个客户端建一个 PPPoX 接口，名字由 create pppoe client 的
+# name 指定（默认的 pppoxN 随创建顺序变化，NAT、IPsec 等按名字找接口，所以固定下来）
+PPPOE_IF=pppoe0
 # 可选的额外插件，逗号分隔；项目插件目录使用连字符，VPP 名称使用下划线。
 EXTRA_PLUGINS=${VPP_EXTRA_PLUGINS:-}
 if [ -z "${VPP_EXTRA_PLUGINS+x}" ] && [ -r "$STATE/extra-plugins" ]; then
@@ -749,21 +752,64 @@ ask_lan_ula() {
 	fi
 }
 
+# 已有 router.vpp 里 PPPoE 拨号的某一项（username、password），没有时为空
+prev_pppoe() {
+	awk -v key="$1" '$1 == "create" && $2 == "pppoe" && $3 == "client" {
+		for (i = 4; i < NF; i++) if ($i == key) { print $(i + 1); exit }
+	}' "$CONF/router.vpp" 2>/dev/null || true
+}
+
+# PPPoE 的账号和密码由插件的 CLI 按空白分词读取，不能含空白，最长 255 字节
+pppoe_word() {
+	[ -n "$1" ] && [ "${#1}" -le 255 ] && [[ "$1" != *[[:space:]]* ]]
+}
+
+ask_pppoe() {
+	local prev pw
+	prev=$(prev_pppoe username)
+	while :; do
+		ask PPPOE_USER "PPPoE 账号" "$prev"
+		pppoe_word "$PPPOE_USER" && break
+		warn "账号不能为空，不能含空格，最长 255 个字符"
+	done
+	prev=$(prev_pppoe password)
+	while :; do
+		if [ -n "$prev" ]; then
+			read -r -s -p "PPPoE 密码（直接回车沿用上次的）: " pw </dev/tty || pw=
+			pw=${pw:-$prev}
+		else
+			read -r -s -p "PPPoE 密码: " pw </dev/tty || pw=
+		fi
+		echo
+		pppoe_word "$pw" && break
+		warn "密码不能为空，不能含空格，最长 255 个字符"
+	done
+	PPPOE_PASS=$pw
+}
+
 ask_network() {
-	local reply cand existing
+	local reply cand existing def=1
 	echo
 	info "WAN 地址"
+	# 重新运行时默认沿用上次的方式
+	if [ -n "$(prev_pppoe username)" ]; then def=3
+	elif grep -q '^ip route add 0.0.0.0/0 via ' "$CONF/router.vpp" 2>/dev/null; then def=2; fi
 	while :; do
-		ask reply "1) DHCP  2) 静态地址" 1
-		case $reply in 1|2) break ;; esac
+		ask reply "1) DHCP  2) 静态地址  3) PPPoE 拨号" "$def"
+		case $reply in 1|2|3) break ;; esac
 	done
-	WAN_MODE=dhcp WAN_CIDR= WAN_GW=
+	WAN_MODE=dhcp WAN_CIDR= WAN_GW= PPPOE_USER= PPPOE_PASS=
 	if [ "$reply" = 2 ]; then
 		WAN_MODE=static
 		while :; do ask WAN_CIDR "WAN 地址/前缀，例如 203.0.113.10/24" ""; ipv4 cidr "$WAN_CIDR" && break; warn "地址无效"; done
 		while :; do ask WAN_GW "WAN 网关" ""; ipv4 in "$WAN_CIDR" "$WAN_GW" && break; warn "网关必须在 $WAN_CIDR 网段内"; done
+	elif [ "$reply" = 3 ]; then
+		WAN_MODE=pppoe
+		note "VPP 的 PPPoE 客户端插件在 WAN 口上拨号，拨通后 ${PPPOE_IF} 得到地址和默认路由，NAT 从它出去。"
+		note "光猫要改成桥接模式（由路由器拨号）；VLAN 由 WAN 口或子接口决定，账号密码保存在 $CONF/router.vpp（只有 root 能读）。"
+		ask_pppoe
 	fi
-	note "PPPoE 不在本脚本范围内。IPv6-PD 需要运营商提供前缀及 IPv6 RA 默认路由。"
+	note "IPv6-PD 需要运营商提供前缀及 IPv6 RA 默认路由。"
 	if ask_yn "启用 IPv6-PD，并通过 SLAAC 向 LAN 宣告前缀？" n; then IPV6_PD=1; fi
 	ask_lan_ula
 
@@ -1103,6 +1149,7 @@ ask_panel() {
 # VPP 里的 WAN 接口名，与 assign_names、gen_router_vpp 的规则相同（此时 V_NAME 可能还没分配）
 ipsec_wan_name() {
 	local base
+	[ "${WAN_MODE:-}" = pppoe ] && { echo "$PPPOE_IF"; return 0; }
 	if [ "${N_KIND[WAN_NIC]}" = afp ]; then base=host-${N_IF[WAN_NIC]}
 	elif [ "$SINGLE" = 1 ]; then base=port0
 	else base=wan0; fi
@@ -1480,7 +1527,7 @@ summary() {
 		note "WAN      ${N_IF[WAN_NIC]} (${N_PCI[WAN_NIC]})"
 		for i in "${LAN[@]}"; do note "LAN      ${N_IF[i]} (${N_PCI[i]})"; done
 	fi
-	note "WAN 地址 $([ "$WAN_MODE" = dhcp ] && echo DHCP || echo "$WAN_CIDR 网关 $WAN_GW")，$([ "${NAT_MODE:-ei}" = ed ] && echo NAT44-ED || echo NAT44-EI)$([ "${HAIRPIN:-0}" = 1 ] && echo "，NAT 回流")"
+	note "WAN 地址 $(case $WAN_MODE in dhcp) echo DHCP ;; pppoe) echo "PPPoE 拨号（账号 $PPPOE_USER，接口 $PPPOE_IF）" ;; *) echo "$WAN_CIDR 网关 $WAN_GW" ;; esac)，$([ "${NAT_MODE:-ei}" = ed ] && echo NAT44-ED || echo NAT44-EI)$([ "${HAIRPIN:-0}" = 1 ] && echo "，NAT 回流")"
 	note "LAN 网关 $LAN_CIDR"
 	[ "$IPV6_PD" = 1 ] && note "IPv6     WAN DHCPv6-PD，LAN RA/SLAAC"
 	[ -n "$LAN_ULA" ] && note "IPv6     LAN 固定 ULA $LAN_ULA（RA/SLAAC）"
@@ -1837,7 +1884,7 @@ build_vpp() {
 	local args
 	args=(-G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$PREFIX"
 		-DCMAKE_INSTALL_LIBDIR="$VPP_LIBDIR_REL" -DCMAKE_PREFIX_PATH="$DEPS" -DCMAKE_INSTALL_RPATH="$LIBDIR"
-		-DVPP_PLUGINS=dpdk,af_packet,tap,nat,nat44_ei,wireguard,acl,abf,dhcp,mss_clamp,ping,ipsec_ike_punt,vxlan,gre${EXTRA_PLUGINS:+,$EXTRA_PLUGINS}
+		-DVPP_PLUGINS=dpdk,af_packet,tap,nat,nat44_ei,wireguard,acl,abf,dhcp,mss_clamp,ping,ipsec_ike_punt,pppoeclient,vxlan,gre${EXTRA_PLUGINS:+,$EXTRA_PLUGINS}
 		-DVPP_DRIVERS=none -DVPP_CRYPTO_ENGINES=native,openssl -DVPP_USE_SYSTEM_DPDK=OFF
 		-DVPP_USE_LTO=OFF -DVPP_TESTS=none -DVPP_TOOLS=vppctl)
 	# arm64 只编通用版本：每个 CPU 变体都要把 vnet 和插件的热点代码再编一遍（N1 上占四分之一时间），
@@ -2104,14 +2151,15 @@ record_orig() {
 }
 
 gen_startup() {
-	local plugins rxq i q a enabled=(tap ping "$([ "${NAT_MODE:-ei}" = ed ] && echo nat || echo nat44_ei)" dhcp acl abf mss_clamp wireguard vxlan gre af_packet) has_pci=0 has_plat=0 heap extras=${EXTRA_PLUGINS:-}
+	local plugins rxq i q a enabled=(tap ping "$([ "${NAT_MODE:-ei}" = ed ] && echo nat || echo nat44_ei)" dhcp acl abf mss_clamp wireguard vxlan gre af_packet pppoeclient) has_pci=0 has_plat=0 heap extras=${EXTRA_PLUGINS:-}
 	for i in ${extras//,/ }; do enabled+=("$i"); done
 	plugins=$LIBDIR/vpp_plugins
 	for i in "${SEL[@]}"; do
 		case ${N_KIND[i]} in dpdk|mlx) has_pci=1 ;; plat) has_plat=1 ;; esac
 	done
 	[ $has_pci = 1 ] || [ $has_plat = 1 ] && enabled+=(dpdk)
-	# af_packet 总是启用：面板可以把 Linux 网卡接进 VPP（AF_PACKET 接口）
+	# af_packet 总是启用：面板可以把 Linux 网卡接进 VPP（AF_PACKET 接口）；pppoeclient 也是，
+	# 面板可以把接口的 IPv4 改成 PPPoE 拨号。没有客户端时它只有一个空闲的 process 节点
 	[ "$IPSEC" = 1 ] && enabled+=(ipsec_ike_punt)
 	rxq=$((WORKERS > 0 ? WORKERS : 1))
 	heap=1G
@@ -2204,6 +2252,11 @@ wan_if() {
 	if { [ "$SINGLE" = 1 ] || [ "${WAN_TRUNK:-0}" = 1 ]; } && [ "$WAN_VLAN" != 1 ]; then echo "$base.$WAN_VLAN"; else echo "$base"; fi
 }
 
+# 三层的 WAN 接口（NAT 的外侧、IPv6-PD 的上游）：PPPoE 时是拨号建的 PPPoX 接口
+wan_l3() {
+	if [ "$WAN_MODE" = pppoe ]; then echo "$PPPOE_IF"; else wan_if; fi
+}
+
 # WAN 网卡在 VPP 里的 MAC。没有 ROM MAC 的网卡（如 RK3588 开发板的 RTL8125）每次启动 DPDK 都随机生成一个，
 # DHCPv6 的 DUID 取自它：DUID 一变，上游每次重启都另分一个委派前缀，直到地址池用完。
 # 优先用上次生成的 router.vpp 里固定的值（WAN_MAC），其次是安装时内核看到的 MAC，最后按机器生成。
@@ -2225,7 +2278,7 @@ pinned_wan_mac() {
 }
 
 gen_router_vpp() {
-	local i base wan lans=() pop= loop_mac tap_mac
+	local i base wan l3 lans=() pop= loop_mac tap_mac
 	loop_mac=$(stable_mac loop0)
 	tap_mac=$(stable_mac tap0)
 	echo "# 由 vpp-router-install.sh 生成于 $(date -Is)；重新运行 --config-only 会覆盖"
@@ -2289,7 +2342,13 @@ gen_router_vpp() {
 	fi
 	echo
 	echo "# WAN"
-	if [ "$WAN_MODE" = dhcp ]; then
+	# 三层的 WAN：PPPoE 时是拨号建的 PPPoX 接口，NAT、IPv6 和 IPsec 都在它上面
+	l3=$wan
+	if [ "$WAN_MODE" = pppoe ]; then
+		l3=$PPPOE_IF
+		echo "# PPPoE 拨号：$wan 承载 PPPoE，拨通后 $l3 得到 IPv4 地址和默认路由（MTU 1492，插件自己修正 TCP MSS）"
+		echo "create pppoe client $wan host-uniq 1 name $l3 username $PPPOE_USER password $PPPOE_PASS use-peer-dns add-default-route4"
+	elif [ "$WAN_MODE" = dhcp ]; then
 		echo "set dhcp client intfc $wan hostname $(hostname -s)"
 	else
 		echo "set interface ip address $wan $WAN_CIDR"
@@ -2298,10 +2357,10 @@ gen_router_vpp() {
 	if [ "${IPV6_PD:-0}" = 1 ]; then
 		echo
 		echo "# IPv6：WAN 自动获取地址、默认路由及委派前缀；LAN 使用前缀的 /64"
-		echo "enable ip6 interface $wan"
-		echo "ip6 nd $wan ra-suppress"
-		echo "ip6 nd address autoconfig $wan default-route"
-		echo "dhcp6 pd client $wan prefix group wan-pd"
+		echo "enable ip6 interface $l3"
+		echo "ip6 nd $l3 ra-suppress"
+		echo "ip6 nd address autoconfig $l3 default-route"
+		echo "dhcp6 pd client $l3 prefix group wan-pd"
 		echo "enable ip6 interface loop0"
 		echo "set ip6 address loop0 prefix group wan-pd ::1/64"
 		echo "ip6 nd loop0 ra-interval 10 7"
@@ -2333,13 +2392,13 @@ gen_router_vpp() {
 	else
 		echo "set nat44 ei timeout tcp-established 1800 tcp-transitory 120"
 	fi
-	echo "$(nat44) add interface address $wan"
-	echo "set interface $(nat44) out $wan output-feature"
+	echo "$(nat44) add interface address $l3"
+	echo "set interface $(nat44) out $l3 output-feature"
 	if [ "${HAIRPIN:-0}" = 1 ]; then
 		echo "# NAT 回流：局域网用 WAN 地址访问端口转发时转回局域网"
 		echo "set interface $(nat44) hairpinning loop0"
 	fi
-	[ "$IPSEC" = 1 ] && gen_ipsec_vpp "$wan"
+	[ "$IPSEC" = 1 ] && gen_ipsec_vpp "$l3"
 	return 0
 }
 
@@ -2975,7 +3034,7 @@ Description=VPP WireGuard configurations
 # VPP 重启后由它恢复已启动的配置，它自己发现 VPP 重启
 
 [Service]
-ExecStart=$PREFIX/bin/vpp-wireguard --vpp-unit $SERVICE.service --nat-interface $(wan_if)
+ExecStart=$PREFIX/bin/vpp-wireguard --vpp-unit $SERVICE.service --nat-interface $(wan_l3)
 Restart=always
 RestartSec=2
 
@@ -3300,6 +3359,10 @@ write_config() {
 	local keep=
 	[ -e "$CONF/router.vpp" ] && keep=$(grep -E '^exec[[:space:]]' "$CONF/router.vpp" || true)
 	[ -n "${WAN_MAC:-}" ] || WAN_MAC=$(pinned_wan_mac "$CONF/router.vpp")
+	# PPPoE 的账号密码写在里面，只给 root 读（面板改它时保留文件权限）；备份也一样
+	(umask 077; : >>"$CONF/router.vpp")
+	chmod 600 "$CONF/router.vpp"
+	[ ! -e "$STATE/router.vpp.bak" ] || chmod 600 "$STATE/router.vpp.bak"
 	gen_router_vpp >"$CONF/router.vpp"
 	if [ -n "$keep" ]; then
 		printf '\n# 其他程序加入的命令，重新生成时保留\n%s\n' "$keep" >>"$CONF/router.vpp"
@@ -3324,7 +3387,7 @@ write_config() {
 		install -m 644 "$REPO/tools/ipsec/ipsec-prefix-sync.py" "$LIBEXEC/ipsec/ipsec-prefix-sync.py"
 		install -m 644 "$REPO/tools/vpp-egress-nat.py" "$LIBEXEC/vpp-egress-nat.py"
 		manifest_add "$LIBEXEC/ipsec/ipsec-prefix-sync.py" "$LIBEXEC/vpp-egress-nat.py"
-		python3 -I - "$CONF/router-pd-sync.json" "$(wan_if)" "$IPSEC" "$CTL" <<'PY'
+		python3 -I - "$CONF/router-pd-sync.json" "$(wan_l3)" "$IPSEC" "$CTL" <<'PY'
 import json, sys
 from pathlib import Path
 path = Path(sys.argv[1])

@@ -108,10 +108,17 @@ func (s *Service) Handler() http.Handler {
 		"ipv6": func(q request, u string) (*State, error) {
 			return s.SetFamily(q.Interface, true, Family{Mode: q.Mode, Addresses: q.Addresses, Gateway: q.Gateway, Hostname: q.Hostname}, u)
 		},
-		"state":         func(q request, u string) (*State, error) { return s.SetState(q.Interface, q.Up, u) },
-		"nat":           func(q request, u string) (*State, error) { return s.SetNAT(q.Interface, q.NAT, u) },
-		"hairpin":       func(q request, u string) (*State, error) { return s.SetHairpin(q.Interface, q.Hairpin, u) },
-		"create":        func(q request, u string) (*State, error) { return s.CreateDevice(q.DeviceRequest, u) },
+		"state":   func(q request, u string) (*State, error) { return s.SetState(q.Interface, q.Up, u) },
+		"nat":     func(q request, u string) (*State, error) { return s.SetNAT(q.Interface, q.NAT, u) },
+		"hairpin": func(q request, u string) (*State, error) { return s.SetHairpin(q.Interface, q.Hairpin, u) },
+		"create": func(q request, u string) (*State, error) {
+			// "parent" is the request's own field, the sub-interface's, which shadows the device's.
+			q.DeviceRequest.Parent = q.Parent
+			return s.CreateDevice(q.DeviceRequest, u)
+		},
+		"pppoe": func(q request, u string) (*State, error) {
+			return s.SetPPPoE(PPPoERequest{Interface: q.Interface, Username: q.Username, Password: q.Password}, u)
+		},
 		"delete":        func(q request, u string) (*State, error) { return s.DeleteDevice(q.Interface, u) },
 		"mtu":           func(q request, u string) (*State, error) { return s.SetMTU(q.Interface, q.MTU, u) },
 		"subif":         func(q request, u string) (*State, error) { return s.CreateSubif(q.Parent, q.SubID, q.VLAN, u) },

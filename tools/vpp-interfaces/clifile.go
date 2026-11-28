@@ -33,6 +33,7 @@ const (
 	lineNATOutput           // set interface nat44 [ei] out IF output-feature
 	lineNATHairpin          // set interface nat44 [ei] hairpinning IF
 	lineCreate              // create tap|vxlan tunnel|gre tunnel|ipip tunnel|host-interface, see device
+	linePPPoE               // create pppoe client BASE host-uniq N name IF ..., see pppoe.go
 )
 
 type cliLine struct {
@@ -53,6 +54,7 @@ type cliLine struct {
 	via    netip.Addr   // lineGateway
 	device string       // lineCreate: tap, vxlan, gre, ipip or af_packet
 	nat    natMode      // lineNATEnable, lineNATAddress, lineNATOutput, lineNATHairpin: which NAT44 plugin's command
+	pppoe  *pppoeConfig // linePPPoE; base is the interface it dials on
 	words  []string     // lineOther, to find the interfaces it refers to
 }
 
@@ -169,6 +171,12 @@ func parseLine(text string) *cliLine {
 			line.kind, line.device = lineCreate, f[1]
 			line.iface = map[string]string{"vxlan": "vxlan_tunnel", "gre": "gre", "ipip": "ipip"}[f[1]] + instance
 		}
+	case words(f, "create", "pppoe", "client"):
+		// Without a name the plugin calls it pppoxN by the order of creation, which the file
+		// cannot be matched with; such a line, and a deletion, stay other lines.
+		if c, ok := parsePPPoE(f); ok {
+			line.kind, line.iface, line.base, line.pppoe = linePPPoE, c.name, c.base, c
+		}
 	case words(f, "create", "host-interface"):
 		if name, ok := option(f, "name"); ok {
 			line.kind, line.device, line.iface = lineCreate, "af_packet", "host-"+name
@@ -206,7 +214,7 @@ func option(f []string, key string) (string, bool) {
 // refersTo tells whether a line names an interface without being one of the lines that
 // configure it, such as a NAT, route or DHCP command.
 func (l *cliLine) refersTo(iface string) bool {
-	if l.kind == lineSubif && l.base == iface {
+	if (l.kind == lineSubif || l.kind == linePPPoE) && l.base == iface {
 		return true
 	}
 	if l.kind != lineOther {

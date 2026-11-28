@@ -118,6 +118,13 @@ VPP 0050 让 dpdk 插件按 PMD 报告的 `max_mtu` 限制最大帧长。`dpdk_d
 `host_mtu` 设成 9000 这类大值时 `no-multi-seg` 仍会失败：VPP 按 26 字节算帧开销，virtio 按 30 字节，
 MTU 2022 的帧比 2 KB 的 buffer 多 4 字节。见 [PVE 虚拟网卡上的 NAT](../docs/pve-virtio-nat.md)。
 
+VPP 0051 改接口名时只给有发送函数的设备类改 `<名字>-tx`、`<名字>-output` 节点的名字。没有发送函数的
+设备类注册接口时不建这对节点，`tx_node_index` 是 0，`output_node_index` 是 0 或者共用的输出节点，
+`vnet_rename_interface` 原来照样改名，改掉的是 0 号节点或共用节点。PPPoE 客户端插件
+（[plugins/pppoeclient](../plugins/pppoeclient/README.md)）的 PPPoX 接口就是这种设备类，每建一个都会改名
+（`pppoxN` 或 `create pppoe client ... name` 给的名字）。取自插件作者 VPP 分支 `feat/pr-pppoeclient`
+的提交 50476c3c8，只改 libvnet。
+
 VPP 0037（NAT44-ED）和 0038（NAT44-EI）让 NAT 正确改写"校验和未完成"的包。TAP 打开
 `csum-offload` 或 `gso` 时，Linux 自己发出的 TCP/UDP 带 `NEEDS_CSUM` 进入 VPP，L4 校验和
 字段里只有伪首部的和（未取反），由下一个 TAP 或网卡补全。NAT 原来把它当完整校验和做增量

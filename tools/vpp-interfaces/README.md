@@ -49,6 +49,7 @@ sudo systemctl enable --now vpp-interfaces
 | `dhcp6 client 接口`（加上一行） | IPv6 DHCPv6 |
 | `create sub-interface 父接口 编号 dot1q VLAN [exact-match]` | 新建、删除子接口，改 VLAN ID |
 | `create bridge-domain 编号`、`create loopback interface ... instance N` | 新建桥域，可选同时建一个 loopback 作为 BVI |
+| `create pppoe client 接口 host-uniq N name pppoeN username 账号 password 密码 ...` | PPPoE 拨号，见下文 |
 | `set interface l2 bridge 接口 桥 [bvi]`、`set interface l2 tag-rewrite 接口 pop 1` | 加入、移出、换桥 |
 | `set interface state 接口 up/down`、`set interface mtu packet N 接口` | 状态、MTU |
 | `nat44 ei add interface address 接口`、`set interface nat44 ei out 接口 output-feature`（NAT44-ED 为 `nat44 add interface address 接口`、`set interface nat44 out 接口 output-feature`） | 出口（NAT）：从这个口出去的流量转换成它自己的地址 |
@@ -83,9 +84,29 @@ sudo systemctl enable --now vpp-interfaces
 - 开着回流的接口不能做出口、不能改网桥、不能删除，要先关闭。
 - 系统页切换 EI/ED 时这一行跟着改写。
 
+## PPPoE 拨号
+
+“新建其他接口”里的 PPPoE 拨号在一个以太网口或 VLAN 子接口上建 PPPoE 客户端（插件
+[plugins/pppoeclient](../../plugins/pppoeclient/README.md)），写一行
+`create pppoe client 接口 host-uniq N name pppoeN username 账号 password 密码 use-peer-dns add-default-route4`。
+
+- pppoeN 是点对点的接口，IPv4 方式显示为 PPPoE：地址、默认路由和对端 DNS 由拨号得到，不能改成别的方式；
+  它可以做出口，IPv6 可以设 SLAAC 或 DHCPv6。名字和 Host-Uniq 取没用过的最小值，名字总是写进这一行，
+  插件默认的 pppoxN 随创建顺序变化，配置文件对不上。
+- 拨号用的接口是出口时，pppoeN 同时设为出口。原来接口的 DHCP 和出口不动，确认拨通后再自己改掉；
+  按接口名写的端口转发、WireGuard 监听端口也要改到 pppoeN。
+- 编辑 pppoeN 能看拨号状态（`show pppoe client`、`show pppoe client debug`：寻找服务器、请求会话、已连接，
+  重拨次数、上次断开的原因、连续认证失败次数），改账号和密码：`set pppoe client` 后 `pppoe client restart`
+  重拨，60 秒内不确认就换回原来的账号再重拨。密码留空表示不改。
+- 账号和密码不能含空白（插件的 CLI 按空白分词）。密码不出现在页面数据、错误信息和日志里：引用这一行的提示、
+  VPP 的报错都把它换成 `******`，待确认改动的撤销命令不发给页面。配置文件改写时保持原来的权限，安装器
+  生成的是 0600。
+- 拨号用的接口不能加入网桥，在它上面拨号时不能删除；删除 pppoeN 前要先取消出口和 IPv6，删除时插件给
+  接入服务器发 PADT。
+
 ## 多个默认路由
 
-每个设了网关的接口都写一条 `ip route add 0.0.0.0/0`（或 `::/0`），每个 DHCP、SLAAC 接口也各自装一条，这里不限制数量。VPP 把同一来源的几条合成等价多路径，按流分到各个口；静态网关（CLI 来源）优先于 DHCP，两者都有时只有静态的生效。要指定走哪个口，在面板路由页的 default 行选默认出口：启动时和每次修改后，这些接口写进 `--exits-file`，静态网关的接口是普通出口，DHCP 接口只能做默认出口（下一跳由 Gate 从租约读取）。选中的口要是出口（NAT），见上一节。
+每个设了网关的接口都写一条 `ip route add 0.0.0.0/0`（或 `::/0`），每个 DHCP、SLAAC 接口也各自装一条，这里不限制数量。VPP 把同一来源的几条合成等价多路径，按流分到各个口；静态网关（CLI 来源）优先于 DHCP，两者都有时只有静态的生效；PPPoE 拨通后装的默认路由是 API 来源，又优先于这两种。要指定走哪个口，在面板路由页的 default 行选默认出口：启动时和每次修改后，这些接口写进 `--exits-file`，静态网关的接口是普通出口，DHCP 接口只能做默认出口（下一跳由 Gate 从租约读取）。选中的口要是出口（NAT），见上一节。
 
 ## 确认和恢复
 
@@ -109,6 +130,8 @@ sudo systemctl enable --now vpp-interfaces
 | `POST /interfaces/nat` | `{"interface","nat"}`，`nat` 为 `true` 设为出口，`false` 取消 |
 | `POST /interfaces/hairpin` | `{"interface","hairpin"}`，`hairpin` 为 `true` 开启 NAT 回流，`false` 关闭 |
 | `POST /interfaces/subif` | `{"parent","vlan","sub_id"}`，`sub_id` 为 0 时同 VLAN ID |
+| `POST /interfaces/create` | `{"kind",...}`，PPPoE 拨号是 `{"kind":"pppoe","parent","username","password"}` |
+| `POST /interfaces/pppoe` | `{"interface","username","password"}`，改 PPPoE 账号并重拨，`password` 为空时不改 |
 | `POST /interfaces/subif/delete`、`/vlan` | `{"interface"}`、`{"interface","vlan"}` |
 | `POST /interfaces/bridge-domain` | `{"bridge","bvi","addresses":[...]}` |
 | `POST /interfaces/confirm`、`/rollback` | `{}` |

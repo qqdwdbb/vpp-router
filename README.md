@@ -72,7 +72,7 @@ VPP 在用户态轮询网卡，一次处理一批包（向量处理），按节�
 - 下载、打补丁、编译 DPDK 和 VPP。小内存机器自动限制并行数并临时启用 zram。
 - 生成 VPP 配置和 systemd 单元，不与发行版的 vpp 软件包冲突。
 - 收包方式可选自适应中断：流量小时 worker 休眠，由网卡中断唤醒，CPU 可以降频；流量大时自动转为轮询。r8169、mlx4 和 N1 平台网卡的中断支持来自本项目的补丁。
-- WAN 支持 DHCP 或静态地址，出口做 NAT44-EI（全锥形 NAT）；LAN 用网桥。支持单臂（VLAN 区分 WAN/LAN）、多网卡和 WAN trunk。
+- WAN 支持 DHCP、静态地址或 PPPoE 拨号（VPP 里的 PPPoE 客户端插件，光猫改成桥接），出口做 NAT44-EI（全锥形 NAT）；LAN 用网桥。支持单臂（VLAN 区分 WAN/LAN）、多网卡和 WAN trunk。
 - 可选：dnsmasq 提供 LAN DHCP/DNS（已有系统 dnsmasq 时导入它的配置并替换它），IPv6-PD，IPsec 服务器（strongSwan + VPP），sing-box 代理入口，Gate 策略路由。
 - 承载当前 SSH 的网卡交给 VPP 时，可以启用 10 分钟自动回退，没有确认就还原网卡。
 - `--restore` 把网卡还给内核，`--uninstall` 删除程序但保留配置。
@@ -101,7 +101,7 @@ VPP 在用户态轮询网卡，一次处理一批包（向量处理），按节�
 **VPP/DPDK 补丁和插件**
 - 32 个 VPP 补丁：NAT44-EI 批量查找和若干修复、ACL 缓存、FIB 删除接口时的路径复制、WireGuard 和 IPv6 ND/RA 修复、worker 休眠与唤醒、mlx4 收包中断、多口设备命名等，见 [patches/README.md](patches/README.md)。
 - DPDK 补丁：r8169 多队列收包中断；RTL8125 非一致性 DMA PMD 和 RSS 配置。
-- 树外插件：NAPT66、NAT 映射域（`nat-ei-context`）、DNS 拦截、WireGuard 与 NAT 的顺序调整、IPsec IKE 转交，以及 strongSwan 的 VPP 后端。
+- 树外插件：NAPT66、NAT 映射域（`nat-ei-context`）、DNS 拦截、WireGuard 与 NAT 的顺序调整、IPsec IKE 转交，strongSwan 的 VPP 后端，以及 PPPoE 客户端（取自 [vpp-pppoeclient](https://github.com/Hi-Jiajun/vpp-pppoeclient)，移植到 VPP 26.06 并修正了几处问题，见 [plugins/pppoeclient](plugins/pppoeclient/README.md)）。
 
 ## 实际运行截图
 
@@ -162,7 +162,7 @@ git clone https://github.com/qqdwdbb/vpp-router.git && cd vpp-router
 sudo deploy/install/vpp-router-install.sh  # 检测、选网卡、编译、安装、配置
 ```
 
-脚本会依次询问：交给 VPP 的网卡，WAN/LAN 分配，WAN 的 DHCP 或静态地址，收包方式（轮询或自适应中断），以及 dnsmasq、IPv6-PD、IPsec、sing-box、Gate 这些可选项。首次安装面板时，还会要求设置 `admin` 用户的密码（至少 8 位）；后续安装保留已设置的密码。面板账号与 SSH 账号独立。
+脚本会依次询问：交给 VPP 的网卡，WAN/LAN 分配，WAN 的 DHCP、静态地址或 PPPoE 账号，收包方式（轮询或自适应中断），以及 dnsmasq、IPv6-PD、IPsec、sing-box、Gate 这些可选项。首次安装面板时，还会要求设置 `admin` 用户的密码（至少 8 位）；后续安装保留已设置的密码。面板账号与 SSH 账号独立。
 
 ### 首次使用与检查
 
@@ -267,6 +267,7 @@ python3 -m pytest tests/unit
 |---|---|
 | `platforms/rtl8125-noncoherent` 的 DPDK r8169 补丁 | 随原文件，BSD-3-Clause |
 | `tools/vpp-monitor/web/uPlot.*` | MIT，见 `uPlot.LICENSE` |
+| `plugins/pppoeclient/pppox/pppd/` 下从 pppd 移植的文件 | 随原文件，BSD 类许可，见 `plugins/pppoeclient/THIRD_PARTY_LICENSES.md`；分发时带上该目录的 `LICENSE`、`NOTICE` |
 
 `plugins/strongswan-vpp` 修改的是 VPP 自带的 `vpp_sswan`（Apache-2.0）。构建出的插件由 strongSwan（GPL-2.0-or-later）加载运行，分发编译产物时要同时遵守 strongSwan 的许可证。
 
@@ -283,5 +284,6 @@ python3 -m pytest tests/unit
 - [WireGuard](https://www.wireguard.com)：VPN 协议
 - [uPlot](https://github.com/leeoniya/uPlot)：面板的图表
 - [TRex](https://trex-tgn.cisco.com)：性能测试发包
+- [vpp-pppoeclient](https://github.com/Hi-Jiajun/vpp-pppoeclient)（Jiajun Liang，[@Hi-Jiajun](https://github.com/Hi-Jiajun)）：PPPoE 客户端插件，`plugins/pppoeclient` 取自这里；它最初移植自 RaydoNetworks 的 vpp-pppoeclient，PPP 协议部分来自 [pppd](https://github.com/ppp-project/ppp)（Paul Mackerras 等）
 
 开发过程中得到了 [Codex](https://openai.com/codex) 和 [Claude Code](https://claude.com/claude-code) 的强力支持。

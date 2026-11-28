@@ -160,7 +160,11 @@
             <option value="ipip">IPIP</option>
             <option value="loopback">Loopback</option>
             <option value="af_packet">AF_PACKET</option>
+            <option value="pppoe">PPPoE 拨号</option>
           </select></label>
+          <label data-dev="pppoe">拨号用的接口 <select id="dev-parent"></select></label>
+          <label data-dev="pppoe">账号 <input id="dev-username" autocomplete="off" spellcheck="false"></label>
+          <label data-dev="pppoe">密码 <input id="dev-password" type="password" autocomplete="new-password"></label>
           <label data-dev="tap af_packet"><span id="dev-host-label">Linux 接口名</span> <input id="dev-host" autocomplete="off" spellcheck="false"></label>
           <label data-dev="tap">Linux 一侧地址 <input id="dev-host-addresses" autocomplete="off" spellcheck="false" placeholder="10.20.0.2/24，可留空"></label>
           <label data-dev="vxlan gre ipip">本端地址 <input id="dev-local" autocomplete="off" spellcheck="false"></label>
@@ -696,7 +700,7 @@
       <legend>IPv4</legend>
       <p class="note" id="ip4-reason" hidden></p>
       <div class="form-row">
-        <label>方式 <select id="ip4-mode"><option value="none">不配置</option><option value="static">静态</option><option value="dhcp">DHCP</option></select></label>
+        <label>方式 <select id="ip4-mode"><option value="none">不配置</option><option value="static">静态</option><option value="dhcp">DHCP</option><option value="pppoe" disabled>PPPoE</option></select></label>
         <button id="ip4-apply" class="close strong">应用 IPv4</button>
       </div>
       <div id="ip4-static-part">
@@ -708,6 +712,16 @@
       </div>
       <p class="note" id="ip4-help"></p>
       <p class="note" id="ip4-current"></p>
+    </fieldset>
+    <fieldset id="iface-pppoe-part">
+      <legend>PPPoE</legend>
+      <p class="note" id="pppoe-status"></p>
+      <div class="form-row">
+        <label>账号 <input id="pppoe-username" autocomplete="off" spellcheck="false"></label>
+        <label>密码 <input id="pppoe-password" type="password" autocomplete="new-password" placeholder="不改就留空"></label>
+        <button id="pppoe-apply" class="close strong">应用并重新拨号</button>
+      </div>
+      <p class="note">账号和密码不能含空格。改了会断开当前会话重新拨号。</p>
     </fieldset>
     <fieldset>
       <legend>IPv6</legend>

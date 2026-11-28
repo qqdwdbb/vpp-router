@@ -1,0 +1,49 @@
+interface: skip tx node rename for device classes without output nodes
+
+Device classes with no tx_function or tx_fn_registrations take the
+no_output_nodes path in vnet_register_interface and get no per-interface
+"<name>-tx"/"<name>-output" node pair: tx_node_index stays 0 and
+output_node_index is 0 or a shared output node. vnet_rename_interface
+renamed both nodes anyway, so renaming such an interface renamed node 0
+or the shared output node.
+
+The PPPoE client plugin (plugins/pppoeclient) has such a device class
+and renames every PPPoX interface it creates (to pppoxN or the name
+given with `create pppoe client ... name`). Rename the nodes only when
+the class registered a TX function.
+
+Backport of the fork commit 50476c3c8 ("interface: skip tx node rename
+for no-output device classes") on Hi-Jiajun/vpp feat/pr-pppoeclient.
+
+diff --git a/src/vnet/interface.c b/src/vnet/interface.c
+index 0efd69c90..e2964bc45 100644
+--- a/src/vnet/interface.c
++++ b/src/vnet/interface.c
+@@ -1544,6 +1544,7 @@ vnet_rename_interface (vnet_main_t * vnm, u32 hw_if_index, char *new_name)
+   vnet_interface_main_t *im = &vnm->interface_main;
+   vlib_main_t *vm = vnm->vlib_main;
+   vnet_hw_interface_t *hw;
++  vnet_device_class_t *dev_class;
+   u8 *old_name;
+   clib_error_t *error = 0;
+ 
+@@ -1564,9 +1565,16 @@ vnet_rename_interface (vnet_main_t * vnm, u32 hw_if_index, char *new_name)
+   hash_unset_mem (im->hw_interface_by_name, old_name);
+   hash_set_mem (im->hw_interface_by_name, hw->name, hw_if_index);
+ 
+-  /* rename tx/output nodes */
+-  vlib_node_rename (vm, hw->tx_node_index, "%v-tx", hw->name);
+-  vlib_node_rename (vm, hw->output_node_index, "%v-output", hw->name);
++  /* Rename tx/output nodes only for device classes that registered a
++   * per-interface pair.  Tunnel classes (L2TPv3, VXLAN, PPPoX, ...) create
++   * none and either leave the indices zeroed or point output_node_index at
++   * a shared node, which must keep its canonical name. */
++  dev_class = vnet_get_device_class (vnm, hw->dev_class_index);
++  if (dev_class->tx_function || dev_class->tx_fn_registrations)
++    {
++      vlib_node_rename (vm, hw->tx_node_index, "%v-tx", hw->name);
++      vlib_node_rename (vm, hw->output_node_index, "%v-output", hw->name);
++    }
+ 
+   /* free the old name vector */
+   vec_free (old_name);

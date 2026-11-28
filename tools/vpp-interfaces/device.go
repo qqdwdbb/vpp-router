@@ -18,7 +18,7 @@ import (
 
 // DeviceRequest says what to create. Which fields count depends on Kind.
 type DeviceRequest struct {
-	Kind  string `json:"kind"`  // loopback, tap, vxlan, gre, ipip, af_packet
+	Kind  string `json:"kind"`  // loopback, tap, vxlan, gre, ipip, af_packet, pppoe
 	Local string `json:"local"` // tunnels: this end, an address VPP has
 	Peer  string `json:"peer"`  // tunnels: the other end
 	VNI   uint32 `json:"vni"`   // vxlan
@@ -26,9 +26,13 @@ type DeviceRequest struct {
 	Host  string `json:"host"`  // tap: the Linux name; af_packet: the Linux interface
 	// HostAddresses go on the Linux end of a TAP, at most one per family.
 	HostAddresses []string `json:"host_addresses"`
+	// pppoe: the interface it dials on, and the account
+	Parent   string `json:"parent"`
+	Username string `json:"username"`
+	Password string `json:"password"`
 }
 
-var deviceKinds = map[string]string{"loopback": "loopback", "tap": "TAP", "vxlan": "VXLAN", "gre": "GRE", "ipip": "IPIP", "af_packet": "AF_PACKET"}
+var deviceKinds = map[string]string{"loopback": "loopback", "tap": "TAP", "vxlan": "VXLAN", "gre": "GRE", "ipip": "IPIP", "af_packet": "AF_PACKET", "pppoe": "PPPoE 拨号"}
 
 var linuxName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,14}$`)
 
@@ -132,12 +136,21 @@ func (s *Service) deviceCommand(file *cliFile, live *liveState, q DeviceRequest)
 			return "", "", fmt.Errorf("%s 已经接入 VPP", host)
 		}
 		return "create host-interface name " + host, name, nil
+	case "pppoe":
+		c, err := pppoeCreate(file, live, q)
+		if err != nil {
+			return "", "", err
+		}
+		return c.command(), c.name, nil
 	}
 	return "", "", fmt.Errorf("不支持的接口类型 %q", q.Kind)
 }
 
 // deleteCommand removes what a creation line made, for an interface VPP has now.
 func deleteCommand(line *cliLine, iface *liveInterface) string {
+	if line.kind == linePPPoE {
+		return line.pppoe.deleteCommand()
+	}
 	if line.kind == lineLoopback {
 		return "delete loopback interface intfc " + line.iface
 	}
@@ -197,6 +210,23 @@ func (s *Service) CreateDevice(q DeviceRequest, user string) (*State, error) {
 		if q.Kind == "tap" {
 			c.description += "，Linux 一侧是 " + strings.TrimSpace(q.Host)
 		}
+		if q.Kind == "pppoe" {
+			// The plugin brings the interface up itself; a state line would only race it.
+			base := strings.TrimSpace(q.Parent)
+			c.description = fmt.Sprintf("在 %s 上新建 PPPoE 拨号接口 %s，账号 %s", base, name, strings.TrimSpace(q.Username))
+			c.steps = []step{{command, undo}}
+			file.insert(file.insertionPoint(base), command)
+			// A new uplink on an exit takes over its role: what leaves by it is translated too.
+			if natEnabled(file, base) {
+				mode, err := natModeOf(file, s.opts.CLIFile, live)
+				if err != nil {
+					return nil, err
+				}
+				addExit(file, c, mode, name)
+				c.description += "，和 " + base + " 一样设为出口（NAT）"
+			}
+			return c, nil
+		}
 		c.steps = []step{{command, undo}, {stateCommand(name, true), ""}}
 		// At the end: a tunnel's local address, and anything else it needs, comes first.
 		file.insert(len(file.lines), command, stateCommand(name, true))
@@ -206,7 +236,7 @@ func (s *Service) CreateDevice(q DeviceRequest, user string) (*State, error) {
 
 // createdBy returns the line of the file that created iface, other than a sub-interface's.
 func createdBy(file *cliFile, iface string) *cliLine {
-	for _, i := range file.own(iface, lineCreate, lineLoopback) {
+	for _, i := range file.own(iface, lineCreate, lineLoopback, linePPPoE) {
 		return file.lines[i]
 	}
 	return nil
@@ -221,7 +251,7 @@ func deviceDeleteReason(file *cliFile, iface *liveInterface) string {
 		return "这个接口不是配置文件创建的"
 	case iface.Bridge != 0 || iface.BVI || bd != 0 || bvi:
 		return "接口在网桥里，先移出网桥"
-	case fileFamily(file, name, false).dynamic() || fileFamily(file, name, true).dynamic() || len(file.own(name, lineGateway)) > 0:
+	case (fileFamily(file, name, false).dynamic() && fileFamily(file, name, false).mode != modePPPoE) || fileFamily(file, name, true).dynamic() || len(file.own(name, lineGateway)) > 0:
 		return "还在用 DHCP、SLAAC 或网关，先把 IPv4 和 IPv6 设为不配置"
 	case len(file.own(name, lineNATAddress, lineNATOutput)) > 0:
 		return "还是出口（NAT），先取消"
@@ -229,7 +259,7 @@ func deviceDeleteReason(file *cliFile, iface *liveInterface) string {
 		return "开着 NAT 回流，先关闭"
 	}
 	if refs := file.references(name); len(refs) > 0 {
-		return "配置文件里还有引用它的命令：" + strings.TrimSpace(refs[0].text)
+		return "配置文件里还有引用它的命令：" + refs[0].shownText()
 	}
 	return ""
 }
@@ -250,11 +280,14 @@ func (s *Service) DeleteDevice(name string, user string) (*State, error) {
 		line := createdBy(file, name)
 		c := &change{file: file, description: "删除接口 " + name}
 		// Undo runs in reverse: the interface is recreated from its lines, then gets its addresses back.
+		// A PPPoX interface's addresses are the session's, which deleting the client ends.
 		for _, prefix := range iface.Addresses {
-			c.steps = append(c.steps, step{addressCommand(name, prefix, true), addressCommand(name, prefix, false)})
+			if line.kind != linePPPoE {
+				c.steps = append(c.steps, step{addressCommand(name, prefix, true), addressCommand(name, prefix, false)})
+			}
 		}
 		var recreate []string
-		for _, i := range file.own(name, lineCreate, lineLoopback, lineState, lineMTU) {
+		for _, i := range file.own(name, lineCreate, lineLoopback, linePPPoE, lineState, lineMTU) {
 			recreate = append(recreate, strings.TrimSpace(file.lines[i].text))
 		}
 		c.steps = append(c.steps, step{deleteCommand(line, iface), strings.Join(recreate, "\n")})

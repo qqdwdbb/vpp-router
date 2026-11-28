@@ -113,32 +113,39 @@ func (s *Service) SetNAT(name string, enable bool, user string) (*State, error) 
 			return nil, errors.New(reason)
 		}
 		c := &change{file: file, description: "把 " + name + " 设为出口（NAT）"}
-		enableLine := -1
-		for i, line := range file.lines {
-			if line.kind == lineNATEnable {
-				enableLine = i
-				break
-			}
-		}
-		if enableLine < 0 {
-			// The file is what VPP ran, so without the line the plugin is off.
-			at := file.insertionPoint(name)
-			file.insert(at, natEnableCommand(mode), natTimeoutCommand(mode))
-			enableLine = at + 1
-			c.steps = append(c.steps, step{natEnableCommand(mode), natDisableCommand(mode)}, step{natTimeoutCommand(mode), ""})
-		}
-		var texts []string
-		if len(pool) == 0 {
-			texts = append(texts, natAddressCommand(mode, name, false))
-			c.steps = append(c.steps, step{natAddressCommand(mode, name, false), natAddressCommand(mode, name, true)})
-		}
-		if len(output) == 0 {
-			texts = append(texts, natOutputCommand(mode, name, false))
-			c.steps = append(c.steps, step{natOutputCommand(mode, name, false), natOutputCommand(mode, name, true)})
-		}
-		file.insert(file.insertionPoint(name, append(append([]int{enableLine}, pool...), output...)...), texts...)
+		addExit(file, c, mode, name)
 		return c, nil
 	})
+}
+
+// addExit adds the lines and commands making name an exit to a change: the plugin's enable
+// line if the file has none, the address pool and the output feature.
+func addExit(file *cliFile, c *change, mode natMode, name string) {
+	pool, output := natLines(file, name)
+	enableLine := -1
+	for i, line := range file.lines {
+		if line.kind == lineNATEnable {
+			enableLine = i
+			break
+		}
+	}
+	if enableLine < 0 {
+		// The file is what VPP ran, so without the line the plugin is off.
+		at := file.insertionPoint(name)
+		file.insert(at, natEnableCommand(mode), natTimeoutCommand(mode))
+		enableLine = at + 1
+		c.steps = append(c.steps, step{natEnableCommand(mode), natDisableCommand(mode)}, step{natTimeoutCommand(mode), ""})
+	}
+	var texts []string
+	if len(pool) == 0 {
+		texts = append(texts, natAddressCommand(mode, name, false))
+		c.steps = append(c.steps, step{natAddressCommand(mode, name, false), natAddressCommand(mode, name, true)})
+	}
+	if len(output) == 0 {
+		texts = append(texts, natOutputCommand(mode, name, false))
+		c.steps = append(c.steps, step{natOutputCommand(mode, name, false), natOutputCommand(mode, name, true)})
+	}
+	file.insert(file.insertionPoint(name, append(append([]int{enableLine}, pool...), output...)...), texts...)
 }
 
 // Hairpinning lets hosts on a LAN reach a port forward, or another NAT mapping, by the exit's

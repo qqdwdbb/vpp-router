@@ -6,7 +6,7 @@ import { $, fetchJSON, postJSON, fillBody, setCells } from '../lib.js';
 const API = 'api/interfaces';
 const page = { state: null, labels: new Map(), timer: 0, tick: 0, deadline: 0, busy: false, editing: '', bridge: 0 };
 
-const KIND = { physical: '物理口', sub: 'VLAN 子接口', loopback: '环回', tap: 'TAP', vxlan: 'VXLAN', gre: 'GRE', ipip: 'IPIP', other: '其他' };
+const KIND = { physical: '物理口', sub: 'VLAN 子接口', loopback: '环回', tap: 'TAP', vxlan: 'VXLAN', gre: 'GRE', ipip: 'IPIP', pppoe: 'PPPoE', other: '其他' };
 const OUTCOMES = { confirmed: '已保留', 'rolled-back': '已恢复', 'rollback-failed': '恢复失败' };
 
 function message(text, isError) {
@@ -112,12 +112,29 @@ function stateText(iface) {
   return iface.link ? '● up' : '◐ up，无链路';
 }
 
-const MODE = { none: '不配置', static: '静态', dhcp: 'DHCP', slaac: 'SLAAC', dhcpv6: 'DHCPv6' };
+const MODE = { none: '不配置', static: '静态', dhcp: 'DHCP', slaac: 'SLAAC', dhcpv6: 'DHCPv6', pppoe: 'PPPoE' };
+
+/* A PPPoE client's state, as the plugin has it, and why its last session ended. */
+const PPPOE_STATE = { discovery: '寻找接入服务器', request: '请求会话', session: '已连接' };
+const PPPOE_LAST = {
+  padt: '服务器断开（PADT）', 'echo-timeout': '链路检测超时', admin: '手动重拨', 'ppp-dead': 'PPP 协商结束', 'auth-fail': '认证失败，检查账号和密码',
+};
+
+function pppoeText(pppoe) {
+  if (!pppoe.state) return 'VPP 里没有这个客户端';
+  let text = PPPOE_STATE[pppoe.state] || pppoe.state;
+  if (pppoe.state === 'session') text += `，会话 ${pppoe.session}，接入服务器 ${pppoe.ac_mac}`;
+  if (pppoe.reconnects) text += `；重拨过 ${pppoe.reconnects} 次`;
+  if (pppoe.last_disconnect) text += `，上次断开：${PPPOE_LAST[pppoe.last_disconnect] || pppoe.last_disconnect}`;
+  if (pppoe.auth_failures) text += `，连续认证失败 ${pppoe.auth_failures} 次`;
+  return text;
+}
 
 /* The addresses it has, and where dynamic ones come from. */
 function addressText(iface) {
   const ways = [];
-  if (iface.ipv4 && ['dhcp'].includes(iface.ipv4.mode)) ways.push('IPv4 ' + MODE[iface.ipv4.mode]);
+  if (iface.pppoe && !iface.addresses.length) return `${PPPOE_STATE[iface.pppoe.state] || '未运行'}（PPPoE）`;
+  if (iface.ipv4 && ['dhcp', 'pppoe'].includes(iface.ipv4.mode)) ways.push('IPv4 ' + MODE[iface.ipv4.mode]);
   if (iface.ipv6 && ['slaac', 'dhcpv6'].includes(iface.ipv6.mode)) ways.push('IPv6 ' + MODE[iface.ipv6.mode]);
   const text = iface.addresses.join(' ') || (ways.length ? '获取中' : '—');
   return ways.length ? `${text}（${ways.join('，')}）` : text;
@@ -349,6 +366,8 @@ function openEditor(name) {
     $(`ip${v}-gateway`).value = family.gateway || '';
   }
   $('ip4-hostname').value = iface.ipv4.hostname || '';
+  $('pppoe-username').value = iface.pppoe ? iface.pppoe.username : '';
+  $('pppoe-password').value = '';
   $('iface-bridge').dataset.options = '';
   $('iface-state').value = iface.up ? 'up' : 'down';
   $('iface-mtu').value = iface.mtu || '';
@@ -368,6 +387,12 @@ function renderEditor() {
   const reason = (id, text) => { $(id).textContent = text || ''; $(id).hidden = !text; };
 
   for (const v of ['4', '6']) renderFamily(iface, v, locked, reason);
+
+  $('iface-pppoe-part').hidden = !iface.pppoe;
+  if (iface.pppoe) {
+    $('pppoe-status').textContent = `在 ${shown(iface.pppoe.access)} 上拨号。${pppoeText(iface.pppoe)}`;
+    $('pppoe-apply').disabled = locked;
+  }
 
   reason('iface-bridge-reason', iface.bridge_reason);
   setOptions($('iface-bridge'), [{ value: '0', label: '不在网桥里' }, ...page.state.bridges.filter(bridge => bridge.in_file).map(bridge => ({ value: String(bridge.id), label: `网桥 ${bridge.id}` }))]);
@@ -400,9 +425,11 @@ const FAMILY_HELP = {
 function renderFamily(iface, v, locked, reason) {
   const mode = $(`ip${v}-mode`).value;
   const loopback = iface.kind === 'loopback';
-  const why = iface.address_reason || (loopback && ['dhcp', 'slaac', 'dhcpv6'].includes(mode) ? 'loopback 没有链路，只能用静态地址。' : '');
+  const pppoe = v === '4' && !!iface.pppoe;
+  const why = iface.address_reason || (pppoe ? 'IPv4 地址和默认路由由 PPPoE 拨号获得；不用了就删除这个接口。' : '') ||
+    (loopback && ['dhcp', 'slaac', 'dhcpv6'].includes(mode) ? 'loopback 没有链路，只能用静态地址。' : '');
   reason(`ip${v}-reason`, why);
-  $(`ip${v}-mode`).disabled = !!iface.address_reason;
+  $(`ip${v}-mode`).disabled = !!iface.address_reason || pppoe;
   $(`ip${v}-static-part`).hidden = mode !== 'static';
   if (v === '4') $('ip4-dhcp-part').hidden = mode !== 'dhcp';
   $(`ip${v}-apply`).disabled = locked || !!why;
@@ -443,6 +470,13 @@ function startEditor() {
       editorApply('ipv' + v, body, `把 ${name} 的 IPv${v} 改成 ${text}`, warning);
     };
   }
+  $('pppoe-apply').onclick = () => {
+    const name = page.editing;
+    const username = $('pppoe-username').value.trim();
+    const password = $('pppoe-password').value;
+    editorApply('pppoe', { interface: name, username, password }, password ? `修改 ${name} 的 PPPoE 账号和密码，账号 ${username}` : `把 ${name} 的 PPPoE 账号改成 ${username}`,
+      '会断开当前会话重新拨号，外网中断到重新拨通为止；账号或密码不对时拨不通，60 秒内不确认会自动恢复原来的账号。');
+  };
   $('iface-bridge-apply').onclick = () => {
     const name = page.editing;
     const bridge = Number($('iface-bridge').value);
@@ -478,7 +512,11 @@ const DEVICE_HELP = {
   ipip: '三层隧道（IP-in-IP），名字是 ipipN，在“编辑”里给它设地址。',
   loopback: '名字是 loopN，没有链路，只能设静态地址，常用作路由器自己的地址。',
   af_packet: '把一块 Linux 网卡接进 VPP，名字是 host-网卡名。Linux 不要再用这块网卡（不设地址、不让 NetworkManager 管理），开机时网卡要已经存在。经过它连到面板时，接错了会断开，60 秒内不确认会自动恢复。',
+  pppoe: '在以太网口或 VLAN 子接口上拨号（光猫设成桥接），新建的接口是 pppoeN，拨通后得到 IPv4 地址和默认路由，MTU 1492，TCP MSS 自动修正。拨号用的接口是出口时，pppoeN 也设为出口。IPv6 在 pppoeN 的“编辑”里设置 SLAAC 或 DHCPv6。',
 };
+
+const PPPOE_WARNING = '拨通后 PPPoE 的默认路由优先于 DHCP 给的默认路由，经默认出口的流量改走 pppoeN。原来接口的 DHCP 和出口不会自动取消，确认能上网后再在它的“编辑”里改掉。'
+  + '端口转发、WireGuard 监听端口如果写的是原来接口的名字，要改到 pppoeN。';
 
 function renderDevice() {
   const kind = $('dev-kind').value;
@@ -487,6 +525,10 @@ function renderDevice() {
   $('dev-host').placeholder = kind === 'tap' ? '比如 vpp-lab，最多 15 个字符' : '比如 enp3s0';
   $('dev-local').placeholder = 'VPP 上的地址';
   $('dev-help').textContent = DEVICE_HELP[kind] || '';
+  if (page.state) {
+    const access = page.state.interfaces.filter(iface => !iface.reason && !iface.pppoe_reason && !iface.bvi);
+    setOptions($('dev-parent'), access.map(iface => ({ value: iface.name, label: shown(iface.name) })));
+  }
   $('dev-add').disabled = !page.state || !!page.state.pending || page.busy;
 }
 
@@ -505,8 +547,15 @@ function addDevice() {
   if (kind === 'vxlan') { body.vni = Number($('dev-vni').value); text += `，VNI ${body.vni}`; }
   if (kind === 'gre') { body.l2 = $('dev-l2').checked; if (body.l2) text += '，二层'; }
   if (body.host) text += kind === 'tap' ? `，Linux 一侧 ${body.host}` : `：${body.host}`;
-  apply('create', body, text, kind === 'af_packet' ? DEVICE_HELP.af_packet : '').then(done => {
-    if (done) for (const id of ['dev-host', 'dev-host-addresses', 'dev-local', 'dev-peer', 'dev-vni']) $(id).value = '';
+  if (kind === 'pppoe') {
+    body.parent = $('dev-parent').value;
+    body.username = $('dev-username').value.trim();
+    body.password = $('dev-password').value;
+    text = `在 ${shown(body.parent)} 上新建 PPPoE 拨号，账号 ${body.username}`;
+  }
+  const warning = kind === 'af_packet' ? DEVICE_HELP.af_packet : kind === 'pppoe' ? PPPOE_WARNING : '';
+  apply('create', body, text, warning).then(done => {
+    if (done) for (const id of ['dev-host', 'dev-host-addresses', 'dev-local', 'dev-peer', 'dev-vni', 'dev-username', 'dev-password']) $(id).value = '';
   });
 }
 

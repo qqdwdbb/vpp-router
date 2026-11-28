@@ -48,3 +48,4 @@
 0048-abf-ip6-error-counters.patch
 0049-dpdk-rx-burst-async-dvfs.patch
 0050-dpdk-clamp-frame-size-to-max-mtu.patch
+0051-interface-rename-no-output-class.patch

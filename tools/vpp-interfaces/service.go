@@ -205,7 +205,7 @@ func (s *Service) settle() error {
 	}
 	var created []string
 	for _, line := range file.lines {
-		if line.kind == lineSubif || line.kind == lineLoopback || line.kind == lineCreate {
+		if line.kind == lineSubif || line.kind == lineLoopback || line.kind == lineCreate || line.kind == linePPPoE {
 			created = append(created, line.iface)
 		}
 	}
@@ -238,7 +238,7 @@ func (s *Service) undo(commands []string) error {
 			_, err = s.sys.cli(command)
 		}
 		if err != nil {
-			log.Printf("undo %q: %v", command, err)
+			log.Printf("undo %q: %v", redact(command), err)
 			if first == nil {
 				first = err
 			}
@@ -433,6 +433,9 @@ type InterfaceView struct {
 	HairpinLive   bool     `json:"hairpin_live"`
 	HairpinReason string   `json:"hairpin_reason"`
 	References    []string `json:"references"`
+	// PPPoE is the client of a PPPoX interface; PPPoEReason why one cannot dial on this one.
+	PPPoE       *PPPoEView `json:"pppoe,omitempty"`
+	PPPoEReason string     `json:"pppoe_reason"`
 }
 
 type BridgeView struct {
@@ -462,6 +465,10 @@ func (s *Service) State() *State {
 func (s *Service) stateLocked() *State {
 	state := &State{File: s.opts.CLIFile, CanRestart: s.opts.VPPUnit != "", Interfaces: []InterfaceView{}, Bridges: []BridgeView{}, Pending: s.pending, Last: s.last}
 	if s.pending != nil {
+		// The undo commands can hold a PPPoE password; the page needs none of them.
+		shown := *s.pending
+		shown.Undo = nil
+		state.Pending = &shown
 		state.SecondsRemaining = max(0, s.pending.Deadline.Sub(s.now()).Seconds())
 	}
 	file, err := s.load()
@@ -484,12 +491,14 @@ func (s *Service) stateLocked() *State {
 	return state
 }
 
-var virtualPrefixes = []string{"tap", "tun", "wg", "loop", "ipip", "gre", "vxlan", "memif", "pg", "ipsec", "lcp", "pipe", "geneve", "gtpu", "srv6", "lisp", "nat", "mpls"}
+var virtualPrefixes = []string{"tap", "tun", "wg", "loop", "ipip", "gre", "vxlan", "memif", "pg", "ipsec", "lcp", "pipe", "geneve", "gtpu", "srv6", "lisp", "nat", "mpls", "pppo"}
 
 func kindOf(iface *liveInterface) string {
 	switch {
 	case iface.Sub:
 		return "sub"
+	case iface.PPPoE != nil || strings.HasPrefix(iface.Name, "pppoe") || strings.HasPrefix(iface.Name, "pppox"):
+		return "pppoe"
 	case strings.HasPrefix(iface.Name, "loop"):
 		return "loopback"
 	case strings.HasPrefix(iface.Name, "vxlan_tunnel"):
@@ -551,7 +560,7 @@ func (s *Service) view(file *cliFile, live *liveState, iface *liveInterface) Int
 		v.SubID, v.VLAN = iface.SubID, iface.VLAN
 	}
 	for _, line := range file.references(iface.Name) {
-		v.References = append(v.References, strings.TrimSpace(line.text))
+		v.References = append(v.References, line.shownText())
 	}
 	v.NAT = natEnabled(file, iface.Name)
 	v.Hairpin, v.HairpinLive = hairpinEnabled(file, iface.Name), live.Hairpin[iface.Name]
@@ -561,10 +570,17 @@ func (s *Service) view(file *cliFile, live *liveState, iface *liveInterface) Int
 	if iface.IPv6Router.IsValid() {
 		v.IPv6Gateway = iface.IPv6Router.String()
 	}
+	if line := pppoeLine(file, iface.Name); line != nil {
+		v.PPPoE = pppoeView(line.pppoe, iface.PPPoE)
+	}
 	v.Reason = managed(file, iface)
 	if v.Reason != "" {
-		v.AddressReason, v.BridgeReason, v.VLANReason, v.DeleteReason, v.NATReason, v.HairpinReason = v.Reason, v.Reason, v.Reason, v.Reason, v.Reason, v.Reason
+		v.AddressReason, v.BridgeReason, v.VLANReason, v.DeleteReason, v.NATReason, v.HairpinReason, v.PPPoEReason = v.Reason, v.Reason, v.Reason, v.Reason, v.Reason, v.Reason, v.Reason
 		return v
+	}
+	v.PPPoEReason = pppoeAccessReason(file, live, iface)
+	if len(pppoeClients(file, iface.Name)) > 0 || v.PPPoE != nil {
+		v.BridgeReason = "用于 PPPoE 拨号，不能加入网桥"
 	}
 	v.NATReason = natReason(file, live, iface)
 	if !v.Hairpin {
@@ -773,6 +789,9 @@ func (s *Service) SetBridge(name string, bd uint32, bvi bool, user string) (*Sta
 		if bd != 0 && len(file.own(name, lineNATAddress, lineNATOutput)) > 0 {
 			return nil, fmt.Errorf("%s 是出口（NAT），先取消才能加入网桥", name)
 		}
+		if bd != 0 && (len(pppoeClients(file, name)) > 0 || pppoeLine(file, name) != nil) {
+			return nil, fmt.Errorf("%s 用于 PPPoE 拨号，不能加入网桥", name)
+		}
 		if hairpinEnabled(file, name) {
 			return nil, fmt.Errorf("%s 开着 NAT 回流，先关闭才能改网桥", name)
 		}
@@ -929,7 +948,7 @@ func (s *Service) DeleteSubif(name string, user string) (*State, error) {
 			return nil, fmt.Errorf("%s 不是配置文件创建的 VLAN 子接口", name)
 		}
 		if refs := file.references(name); len(refs) > 0 {
-			return nil, fmt.Errorf("配置文件里还有引用 %s 的命令，先删掉：%s", name, strings.TrimSpace(refs[0].text))
+			return nil, fmt.Errorf("配置文件里还有引用 %s 的命令，先删掉：%s", name, refs[0].shownText())
 		}
 		if fileFamily(file, name, false).dynamic() || fileFamily(file, name, true).dynamic() || len(file.own(name, lineGateway)) > 0 {
 			return nil, fmt.Errorf("%s 还在用 DHCP、SLAAC 或网关，先把 IPv4 和 IPv6 设为不配置", name)

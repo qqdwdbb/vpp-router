@@ -19,6 +19,8 @@ const (
 	modeDHCP   = "dhcp"
 	modeSLAAC  = "slaac"
 	modeDHCP6  = "dhcpv6"
+	// modePPPoE is the IPv4 of a PPPoX interface, which its creating line gives it; see pppoe.go.
+	modePPPoE = "pppoe"
 )
 
 // Family is one family's addressing, as the file has it and as a change asks for it.
@@ -34,7 +36,7 @@ func familyKinds(v6 bool) []lineKind {
 	if v6 {
 		return []lineKind{lineAddress, lineSLAAC, lineDHCP6, lineGateway}
 	}
-	return []lineKind{lineAddress, lineDHCP4, lineGateway}
+	return []lineKind{lineAddress, lineDHCP4, lineGateway, linePPPoE}
 }
 
 // familyLines are the indexes of iface's lines for one family.
@@ -79,7 +81,7 @@ func (c familyConfig) view() Family {
 // fileFamily reads one family's addressing of iface from the file.
 func fileFamily(file *cliFile, iface string, v6 bool) familyConfig {
 	c := familyConfig{mode: modeNone}
-	var dhcp4, slaac, dhcp6 bool
+	var dhcp4, slaac, dhcp6, pppoe bool
 	for _, i := range familyLines(file, iface, v6) {
 		line := file.lines[i]
 		switch line.kind {
@@ -93,9 +95,13 @@ func fileFamily(file *cliFile, iface string, v6 bool) familyConfig {
 			slaac = true
 		case lineDHCP6:
 			dhcp6 = true
+		case linePPPoE:
+			pppoe = true
 		}
 	}
 	switch {
+	case pppoe:
+		c.mode = modePPPoE
 	case dhcp4:
 		c.mode = modeDHCP
 	case dhcp6:
@@ -110,7 +116,7 @@ func fileFamily(file *cliFile, iface string, v6 bool) familyConfig {
 
 // dynamic tells whether a family's addresses come from the network.
 func (c familyConfig) dynamic() bool {
-	return c.mode == modeDHCP || c.mode == modeSLAAC || c.mode == modeDHCP6
+	return c.mode == modeDHCP || c.mode == modeSLAAC || c.mode == modeDHCP6 || c.mode == modePPPoE
 }
 
 // addressed tells whether the file gives iface any addressing.
@@ -120,7 +126,7 @@ func addressed(file *cliFile, iface string) bool {
 
 var hostnameText = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?$`)
 
-var modeNames = map[string]string{modeNone: "不配置", modeStatic: "静态", modeDHCP: "DHCP", modeSLAAC: "SLAAC", modeDHCP6: "DHCPv6"}
+var modeNames = map[string]string{modeNone: "不配置", modeStatic: "静态", modeDHCP: "DHCP", modeSLAAC: "SLAAC", modeDHCP6: "DHCPv6", modePPPoE: "PPPoE"}
 
 // parseFamily checks what a change asks for one family.
 func parseFamily(request Family, v6 bool) (familyConfig, error) {
@@ -173,6 +179,8 @@ func parseFamily(request Family, v6 bool) (familyConfig, error) {
 		if !v6 {
 			return c, errors.New("SLAAC 和 DHCPv6 只用于 IPv6")
 		}
+	case modePPPoE:
+		return c, errors.New("PPPoE 拨号在“新建接口”里选 PPPoE，在以太网口或 VLAN 子接口上新建拨号接口")
 	default:
 		return c, fmt.Errorf("不认识的方式 %q", c.mode)
 	}
@@ -214,6 +222,9 @@ func (s *Service) SetFamily(name string, v6 bool, request Family, user string) (
 			}
 		}
 		old := fileFamily(file, name, v6)
+		if old.mode == modePPPoE {
+			return nil, fmt.Errorf("%s 的 IPv4 由 PPPoE 拨号获得；改账号在 PPPoE 一栏，不用了就删除这个接口", name)
+		}
 		if old.equal(wanted) {
 			return nil, fmt.Errorf("%s 没有变化", family)
 		}

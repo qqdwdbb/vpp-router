@@ -45,6 +45,8 @@ type liveInterface struct {
 	DHCPRouter netip.Addr
 	// IPv6Router is ::/0's next hop through the interface: from router advertisements, or static.
 	IPv6Router netip.Addr
+	// PPPoE is the client of a PPPoX interface, as the plugin has it.
+	PPPoE *livePPPoE
 }
 
 type liveState struct {
@@ -96,7 +98,7 @@ func (s *realSystem) connect() (*core.Connection, api.Channel, error) {
 
 // cliError recognises VPP's report of a failed command, which comes back as text: the
 // command's path, a colon and the reason, or "unknown input".
-var cliError = regexp.MustCompile(`(?m)^(?:set|create|delete|ip|ip6|dhcp6|enable)\b[^:\n]*: |unknown input`)
+var cliError = regexp.MustCompile(`(?m)^(?:set|create|delete|ip|ip6|dhcp6|enable|pppoe)\b[^:\n]*: |unknown input`)
 
 func (s *realSystem) cli(command string) (string, error) {
 	conn, channel, err := s.connect()
@@ -110,9 +112,29 @@ func (s *realSystem) cli(command string) (string, error) {
 		return "", fmt.Errorf("%s: %w", command, err)
 	}
 	if cliError.MatchString(reply.Reply) {
-		return reply.Reply, fmt.Errorf("%s: %s", command, strings.TrimSpace(reply.Reply))
+		return reply.Reply, fmt.Errorf("%s: %s", redact(command), redact(strings.TrimSpace(reply.Reply)))
 	}
 	return reply.Reply, nil
+}
+
+// readPPPoE asks the PPPoE client plugin for its clients, by their PPPoX interfaces. VPP
+// without the plugin does not know the command, and has no PPPoX interface either.
+func readPPPoE(ch api.Channel, byIndex map[uint32]*liveInterface) {
+	ask := func(command string) string {
+		reply := &vlib.CliInbandReply{}
+		if ch.SendRequest(&vlib.CliInband{Cmd: command}).ReceiveReply(reply) != nil || reply.Retval != 0 || cliError.MatchString(reply.Reply) {
+			return ""
+		}
+		return reply.Reply
+	}
+	for index, client := range parsePPPoEClients(ask("show pppoe client")) {
+		iface := byIndex[index]
+		if iface == nil {
+			continue
+		}
+		iface.PPPoE = client
+		parsePPPoEDebug(ask("show pppoe client debug "+iface.Name), client)
+	}
 }
 
 // readHairpin asks the NAT plugin which interfaces hairpin. A plugin without the patches does not
@@ -233,6 +255,7 @@ func (s *realSystem) read() (*liveState, error) {
 			}
 		}
 	}
+	readPPPoE(ch, byIndex)
 	// Only the loaded plugins' messages are in VPP's table.
 	switch {
 	case ch.CheckCompatiblity((*nat44_ed.Nat44ShowRunningConfig)(nil), (*nat44_ed.Nat44ShowRunningConfigReply)(nil)) == nil:
