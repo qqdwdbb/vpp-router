@@ -2600,8 +2600,14 @@ release() {
 
 post() {
 	local i
+	# VPP 已经退出（如找不到配置文件）时立即失败：否则每次重启都空等 30 秒，
+	# 开机时 network-pre.target 一直等它，启动次数限制也永远达不到，开机卡死
 	for i in $(seq 60); do
 		$VPPCTL show version >/dev/null 2>&1 && break
+		if [ -n "${MAINPID:-}" ] && ! kill -0 "$MAINPID" 2>/dev/null; then
+			log "VPP 启动后立即退出，原因见本服务日志"
+			return 1
+		fi
 		sleep 0.5
 	done
 	$VPPCTL show version >/dev/null 2>&1 || { log "VPP 30 秒内没有响应"; return 1; }
