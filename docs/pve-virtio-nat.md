@@ -83,6 +83,18 @@ CX3 ← mlx4_en ← Linux 网桥 ← tap ← vhost 线程从虚拟机内存拷�
 
 要在虚拟机里跑高包速率的 VPP，网卡应当直通（整卡或 SR-IOV VF）。vhost-user 可以绕开内核，但宿主机要另跑一个 DPDK 程序（OVS-DPDK、VPP 等）驱动物理网卡，并占用宿主机的 CPU 核做轮询。
 
+0.6 Mpps 是 64 字节小包的数字。按平均包长约 1000 字节算约 4–5 Gbps，千兆、2.5G 宽带的家用 NAT 一般够用。不推荐的是把这类网卡用在高包速率的转发入口上（小包多、攻击流量、多台设备压满），因为超载后不是停在上限，而是转发跌到接近 0。
+
+## 其他虚拟化平台
+
+下面几种没有实测，按数据路径推断和 vhost-net 属于同一类：每个包都经宿主机（或根分区）里的软件交换转发、拷贝，包速率上限低，超载时宿主机 CPU 会先被占满。
+
+- **Hyper-V 的合成网卡（NetVSC）**：包经根分区里的 Hyper-V 虚拟交换机和 VMBus 送进虚拟机。DPDK 的 netvsc PMD 只是换掉了虚拟机里的驱动，没开加速网络时宿主机这一段不变。开了加速网络（SR-IOV VF，Azure 和 Windows Server 都支持）时，数据走 VF，性能接近直通，这是 Hyper-V 上应当使用的方式。本项目的安装器目前不认 NetVSC 设备，只能以 AF_PACKET 接入，性能还会更低。
+- **VMware ESXi 的 vmxnet3**：经 ESXi 的虚拟交换机转发，同样是宿主机软件交换。要高包速率应使用 SR-IOV 或 PCI 直通（DirectPath I/O）。
+- **其他 KVM 平台**（libvirt、OpenStack 未用 OVS-DPDK 时等）：默认也是 virtio + vhost-net，和本文测的相同。
+
+在这些平台上部署时：转发网卡用直通或 SR-IOV VF；软件虚拟网卡只用来做管理口，或者只用在低速、测试环境。
+
 ## 配置中遇到的问题
 
 - **IOMMU 组**：这台机器上 ConnectX-3 和 SATA 控制器挂在 CPU 的两个 PCIe 根端口下，根端口没有 ACS，二者在同一个 IOMMU 组。直通 SATA 控制器（虚拟机系统盘所在）时 PVE 会把整组设备交给 vfio-pci，宿主机就用不了 ConnectX-3。测试 vhost-net 时把系统盘改成整盘 virtio-scsi 透传（`scsi0: /dev/disk/by-id/...`），SATA 控制器留给宿主机。

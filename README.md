@@ -146,6 +146,7 @@ VPP 在用户态轮询网卡，一次处理一批包（向量处理），按节�
 - Debian 或 Ubuntu，x86_64 或 aarch64，root 权限，能访问网络（下载 DPDK、VPP 源码和 Go 工具链）。
 - 编译每个并行进程约需 800 MB 内存（含 swap）。内存不够时脚本会减少并行数，小内存设备编译要一个小时以上。
 - 至少一个交给 VPP 的网口。单网口时 WAN 和 LAN 用 VLAN 区分（WAN 默认 VLAN 100，LAN 不打标签），需要支持 VLAN 的交换机。
+- 在虚拟机里运行时，转发用的网卡应当直通（整卡或 SR-IOV VF）。由宿主机软件交换的虚拟网卡（PVE/KVM 的 virtio + vhost-net，没开加速网络的 Hyper-V 合成网卡，经 vSwitch 的 vmxnet3 等）包速率上限低，超载后转发会跌到接近 0，只适合低速或测试。PVE 的 virtio + vhost-net 实测 64 字节小包约 0.6 Mpps（直通约 6.1 Mpps），见 [docs/pve-virtio-nat.md](docs/pve-virtio-nat.md)。
 - 不需要额外的管理网口。只有运行安装脚本时（包括之后的重新配置和升级），交给 VPP 的网口会被重新绑定，经过它的 SSH 会断开，这时要从屏幕、串口调试口或一个不交给 VPP 的网口操作。首次安装只能经这个网口 SSH 时，记得启用自动回退。
 
 ### 从源码安装
