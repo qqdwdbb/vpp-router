@@ -98,6 +98,6 @@ CX3 ← mlx4_en ← Linux 网桥 ← tap ← vhost 线程从虚拟机内存拷�
 ## 配置中遇到的问题
 
 - **IOMMU 组**：这台机器上 ConnectX-3 和 SATA 控制器挂在 CPU 的两个 PCIe 根端口下，根端口没有 ACS，二者在同一个 IOMMU 组。直通 SATA 控制器（虚拟机系统盘所在）时 PVE 会把整组设备交给 vfio-pci，宿主机就用不了 ConnectX-3。测试 vhost-net 时把系统盘改成整盘 virtio-scsi 透传（`scsi0: /dev/disk/by-id/...`），SATA 控制器留给宿主机。
-- **virtio 网卡的 MTU**：PVE 给 virtio 网卡设 `host_mtu` 为网桥的 MTU（默认 1500）。VPP 配置 DPDK 网卡时没有按网卡报告的最大 MTU 压低，`rte_eth_dev_set_mtu` 失败，网卡初始化失败（`pmd-init-fail`）。测试时把网桥和网卡的 MTU 都设成 9000 绕过。这个问题还没有修。
-- **`no-multi-seg`**：DPDK 段里的 `no-multi-seg` 对所有 DPDK 网卡生效。它关掉 RX scatter 后，virtio PMD 拒绝建立收包队列（`rte_eth_rx_queue_setup` 返回 -22）。安装器和面板在有 mlx4 网卡时会自动加这一行，所以 mlx4 和 virtio 网卡同时交给 VPP 时，virtio 网卡起不来。这个问题还没有修。
+- **virtio 网卡的 MTU**：PVE 给 virtio 网卡设 `host_mtu` 为网桥的 MTU（默认 1500）。virtio PMD 报告的 `max_rx_pktlen` 固定是 9728，真正的上限在 `max_mtu`；VPP 原来只按前者配置 MTU（8996），`rte_eth_dev_configure` 拒绝，网卡初始化失败（`pmd-init-fail`）。本文的测试是把网桥和网卡的 MTU 都设成 9000 绕过的。VPP 补丁 0050 已修复：最大帧长不超过 PMD 报告的 `max_mtu` 加帧开销，PVE 默认的 `host_mtu=1500` 下网卡直接可用（最大帧长 1526）。
+- **`no-multi-seg`**：DPDK 段里的 `no-multi-seg` 对所有 DPDK 网卡生效，安装器和面板在有 mlx4 网卡时会自动加这一行。修补前它和上一条叠加，virtio PMD 拒绝建立收包队列（`rte_eth_rx_queue_setup` 返回 -22）。0050 之后，`host_mtu=1500` 时加着 `no-multi-seg` 也能启动和转发（实测 0.3 Mpps 丢包 0.004%）。`host_mtu` 设成 9000 这类大值时仍会失败：VPP 按 26 字节算帧开销，virtio 按 30 字节，MTU 2022 的帧比 2 KB 的 buffer 多 4 字节。
 - **固定 MAC**：直通时 `router.vpp` 把 port0 的 MAC 设成 ConnectX-3 的 MAC。改用网桥后宿主机的 `vmbr1` 自己就用这个 MAC，虚拟机再用它，发给它的包会被宿主机截下。虚拟机网卡要用 PVE 分配的 MAC。

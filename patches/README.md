@@ -109,6 +109,15 @@ VPP 0049 在每次 DPDK RX burst 后提交异步升频请求：一次 ≥16 包�
 测量实际生效延迟，不同步采样频率。实现、CLI、观测开销和 RK3588 开发板实测见
 [RX burst 异步升频](../docs/rk3588/rk3588-rx-burst-dvfs.md)。
 
+VPP 0050 让 dpdk 插件按 PMD 报告的 `max_mtu` 限制最大帧长。`dpdk_device_setup` 原来只看
+`max_rx_pktlen`；virtio 的 `max_rx_pktlen` 固定是 9728，真正的上限是宿主机给的 `host_mtu`（Proxmox VE
+默认取网桥的 MTU，1500）。VPP 按 8996 的 MTU（`no-multi-seg` 时 2022）配置，`rte_eth_dev_configure`
+拒绝，所有队列建立失败，网卡一直是 `pmd-init-fail`。现在 PMD 报了 `max_mtu`（不是 UINT16_MAX）时，
+最大帧长不超过 `max_mtu` 加驱动帧开销；两个值一致的 PMD 不受影响。只改 dpdk_plugin。在 PVE 的 virtio
+网卡（`host_mtu=1500`）上验证：修补前起不来，修补后最大帧长 1526，加不加 `no-multi-seg` 都能启动和转发。
+`host_mtu` 设成 9000 这类大值时 `no-multi-seg` 仍会失败：VPP 按 26 字节算帧开销，virtio 按 30 字节，
+MTU 2022 的帧比 2 KB 的 buffer 多 4 字节。见 [PVE 虚拟网卡上的 NAT](../docs/pve-virtio-nat.md)。
+
 VPP 0037（NAT44-ED）和 0038（NAT44-EI）让 NAT 正确改写"校验和未完成"的包。TAP 打开
 `csum-offload` 或 `gso` 时，Linux 自己发出的 TCP/UDP 带 `NEEDS_CSUM` 进入 VPP，L4 校验和
 字段里只有伪首部的和（未取反），由下一个 TAP 或网卡补全。NAT 原来把它当完整校验和做增量

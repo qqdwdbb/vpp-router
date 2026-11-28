@@ -1,0 +1,33 @@
+dpdk: cap the frame size at the MTU limit the PMD reports
+
+dpdk_device_setup sizes the port from dev_info.max_rx_pktlen only. Some
+PMDs report a fixed value there and the real limit in max_mtu: virtio
+always gives 9728, while max_mtu comes from the host's host_mtu, which
+Proxmox VE sets to the bridge MTU (1500 by default). VPP then asks for
+an MTU of 8996 (2022 with no-multi-seg), rte_eth_dev_configure refuses
+it, every queue setup fails with -EINVAL and the port stays in
+pmd-init-fail.
+
+Also cap max_supported_frame_size at max_mtu plus the driver frame
+overhead when the PMD reports a max_mtu. PMDs that leave max_mtu at
+UINT16_MAX are not affected, and for PMDs whose two values agree the
+cap is not lower than max_rx_pktlen.
+
+--- a/src/plugins/dpdk/device/common.c
++++ b/src/plugins/dpdk/device/common.c
+@@ -227,6 +227,15 @@
+   else
+     xd->max_supported_frame_size = dev_info.max_rx_pktlen;
+ 
++  /* Some PMDs report a fixed max_rx_pktlen and the real limit in max_mtu.
++     virtio gives 9728 while the host caps the MTU with host_mtu (1500 on
++     Proxmox VE); a larger MTU then fails rte_eth_dev_configure and the
++     port never comes up. */
++  if (dev_info.max_mtu != UINT16_MAX)
++    xd->max_supported_frame_size =
++      clib_min (xd->max_supported_frame_size,
++		(u32) dev_info.max_mtu + xd->driver_frame_overhead);
++
+   max_frame_size = clib_min (xd->max_supported_frame_size,
+ 			     ethernet_main.default_mtu + hi->frame_overhead);
+ 
