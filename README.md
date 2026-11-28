@@ -147,6 +147,12 @@ VPP 在用户态轮询网卡，一次处理一批包（向量处理），按节�
 - 编译每个并行进程约需 800 MB 内存（含 swap）。内存不够时脚本会减少并行数，小内存设备编译要一个小时以上。
 - 至少一个交给 VPP 的网口。单网口时 WAN 和 LAN 用 VLAN 区分（WAN 默认 VLAN 100，LAN 不打标签），需要支持 VLAN 的交换机。
 - 在虚拟机里运行时，转发用的网卡应当直通（整卡或 SR-IOV VF）。由宿主机软件交换的虚拟网卡（PVE/KVM 的 virtio + vhost-net，没开加速网络的 Hyper-V 合成网卡，经 vSwitch 的 vmxnet3 等）包速率上限低，超载后转发会跌到接近 0，只适合低速或测试。PVE 的 virtio + vhost-net 实测 64 字节小包约 0.6 Mpps（直通约 6.1 Mpps），见 [docs/pve-virtio-nat.md](docs/pve-virtio-nat.md)。
+- 虚拟网卡也可以直接安装，VPP 一侧不用另外修改：安装器把 virtio、vmxnet3 识别为 DPDK 网卡；虚拟机没有 vIOMMU 时自动用 vfio-pci 的无 IOMMU 模式；队列数不超过虚拟网卡的上限；只有 mlx4 网卡才加 `no-multi-seg`；MTU 按网卡报告的上限设置（VPP 补丁 0050，PVE 默认的 `host_mtu=1500` 下可用）。需要在虚拟化平台上设置：
+  - 允许虚拟机使用别的 MAC 收发。局域网网关是 VPP 的 `loop0`，MAC 和虚拟网卡不同。PVE 的 Linux 网桥不用改，但虚拟机网卡开了防火墙时要关掉 MAC 过滤；ESXi 的端口组要允许混杂模式、MAC 地址更改和伪传输；Hyper-V 要打开 MAC 地址欺骗。
+  - 打开多队列，队列数等于 worker 数（PVE 默认 1 个队列，在网卡上设 `queues=N`），否则这块网卡只有一个 worker 收包。
+  - 可选：虚拟机内存用大页（PVE 的 `hugepages` 和 `numa: 1`）；给虚拟机加 vIOMMU（PVE q35 的 `viommu=intel`），安装器就会用正常的 vfio-pci，不用无 IOMMU 模式（后者会把内核标为 tainted）。
+  - Hyper-V 的合成网卡（NetVSC）在 VMBus 上，不是 PCI 设备，安装器只能以 AF_PACKET 接入，性能更低。
+  - 实测过的只有 PVE 的 virtio；vmxnet3 和 Hyper-V 是按安装器的处理和平台机制推断的。
 - 不需要额外的管理网口。只有运行安装脚本时（包括之后的重新配置和升级），交给 VPP 的网口会被重新绑定，经过它的 SSH 会断开，这时要从屏幕、串口调试口或一个不交给 VPP 的网口操作。首次安装只能经这个网口 SSH 时，记得启用自动回退。
 
 ### 从源码安装
