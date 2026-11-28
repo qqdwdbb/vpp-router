@@ -132,6 +132,8 @@ NAT 会话表太大、主堆内存不够时插件启用失败，VPP 照常启动
 
 `sw_interface_set_rx_placement` 把一个队列交给主线程或某个 worker。线程按 VPP 的线程号：0 是主线程，n 是 worker n-1。VPP 启动后装回；worker 少了以后放不下的队列跳过，由 VPP 自己分配，并在页面上提示。“VPP 分配”删掉这一项，现在的线程不变。
 
+worker 上只要有一个队列在轮询，它就不会休眠，同一 worker 上中断、自适应队列的设置等于白设。所以每次 VPP 启动装回设置以后，以及在页面上改收包方式或收包线程以后，本程序把这种 worker 上的中断、自适应队列移到没有轮询队列的 worker（队列最少的优先）。轮询队列不动，免得影响吞吐；页面上指定过线程的队列也不动。分不开的（没有空闲的 worker，或者指定的线程上有轮询队列）在页面上提示，但只在想让 worker 休眠时提示：有队列是自适应（安装器的“中断”收包），或者页面上把某个接口设成了中断、自适应。纯轮询的路由器上，安装器设成中断的 vpp-host TAP 和轮询网卡在同一个 worker 是正常情况，不提示。只用主线程（没有 worker）时不处理。自动移动不写进 `system.json`，下次 VPP 启动重新计算。
+
 ### 调速器
 
 写 `/sys/devices/system/cpu/cpufreq/policyN/scaling_governor`，只接受该策略 `scaling_available_governors` 里的值，写后读回。本服务启动时把 `system.json` 里的设置都写一次；别的程序（比如 rc.local）之后再改的，页面上显示“设置的是 X”。没有 cpufreq 的机器（虚拟机、固定频率）这一节为空。

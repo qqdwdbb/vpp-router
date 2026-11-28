@@ -106,6 +106,7 @@ type Service struct {
 	retryAt    time.Time
 	applyError string
 	warnings   []string
+	rxWarnings []string // interrupt queues that share a worker with polling ones
 }
 
 func systemctl(args ...string) error { return exec.Command("systemctl", args...).Run() }
@@ -1016,6 +1017,9 @@ func (s *Service) SetRxMode(name, mode, user string) (*State, error) {
 		return nil, err
 	}
 	log.Printf("audit: rx-mode %s %s by %s", name, mode, user)
+	if err := s.separate(v, cfg); err != nil {
+		log.Printf("rx: %v", err)
+	}
 	return s.stateLocked(), nil
 }
 
@@ -1114,6 +1118,9 @@ func (s *Service) SetRxPlacement(name string, queue uint32, thread int, user str
 		return nil, err
 	}
 	log.Printf("audit: rx-placement %s queue %d on %s by %s", name, queue, threadLabel(uint32(thread)), user)
+	if err := s.separate(v, cfg); err != nil {
+		log.Printf("rx: %v", err)
+	}
 	return s.stateLocked(), nil
 }
 
@@ -1124,9 +1131,32 @@ func hasThread(threads []thread, index uint32) bool {
 // reapply puts the RX settings back on a VPP that has just started. What cannot be done, such
 // as a placement on a worker there no longer is, is skipped and reported.
 func (s *Service) reapply(v vppAPI) (warnings []string, err error) {
-	if len(s.cfg.RxModes) == 0 && len(s.cfg.RxPlacement) == 0 {
-		return nil, nil
+	if len(s.cfg.RxModes) > 0 || len(s.cfg.RxPlacement) > 0 {
+		if warnings, err = s.reapplySettings(v); err != nil {
+			return nil, err
+		}
 	}
+	if err := s.separate(v, s.cfg); err != nil {
+		return nil, err
+	}
+	return warnings, nil
+}
+
+// separate keeps interrupt queues off workers that poll, and records what it cannot fix.
+func (s *Service) separate(v vppAPI, cfg *Config) error {
+	warnings, err := separateRx(v, cfg)
+	if err != nil {
+		return err
+	}
+	slices.Sort(warnings)
+	s.rxWarnings = warnings
+	for _, w := range warnings {
+		log.Printf("rx: %s", w)
+	}
+	return nil
+}
+
+func (s *Service) reapplySettings(v vppAPI) (warnings []string, err error) {
 	all, err := v.RxQueues()
 	if err != nil {
 		return nil, err
@@ -1371,7 +1401,7 @@ func (s *Service) devices(conf *startConf, hw []hardware) []DeviceView {
 func (s *Service) stateLocked() *State {
 	state := &State{
 		StartConf: s.opts.StartConf, CLIFile: s.opts.CLIFile, CanRestart: s.opts.VPPUnit != "",
-		ApplyError: s.applyError, Warnings: append([]string(nil), s.warnings...), Pending: s.pending, Last: s.last,
+		ApplyError: s.applyError, Warnings: append(slices.Clone(s.warnings), s.rxWarnings...), Pending: s.pending, Last: s.last,
 		GovernorSettings: s.cfg.Governors, Interfaces: []RxView{},
 		Threads: ThreadsView{MaxWorkers: s.opts.MaxWorkers, Policies: schedulerPolicies, Devices: []DeviceView{}},
 		NAT:     NATView{Defaults: defaultTimeouts},
